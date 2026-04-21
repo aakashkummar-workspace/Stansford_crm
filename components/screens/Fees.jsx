@@ -205,7 +205,7 @@ export default function ScreenFees({ E, refresh }) {
   // Receipt actions
   const phoneFor = () => DEMO_PARENT_PHONE.replace(/[^0-9]/g, "");
   const sendWhatsApp = () => {
-    const text = encodeURIComponent(`Receipt for ${selected.name} (${selected.id}) · ₹${selected.amount} paid via ${method}. Thank you — Stansford International.`);
+    const text = encodeURIComponent(`Receipt for ${selected.name} (${selected.id}) · ₹${selected.amount} paid via ${method}. Thank you — Stansford International HR.Sec.School.`);
     window.open(`https://wa.me/${phoneFor()}?text=${text}`, "_blank");
     flash("Opened WhatsApp");
   };
@@ -215,7 +215,7 @@ export default function ScreenFees({ E, refresh }) {
   };
   const sendEmail = () => {
     const subject = encodeURIComponent(`Fee receipt · ${selected.id} · ${selected.name}`);
-    const body = encodeURIComponent(`Dear Parent,\n\nThis is to confirm receipt of ₹${selected.amount} towards fees for ${selected.name} (Class ${selected.cls}, Reg ID ${selected.id}).\nMethod: ${method}\n\nThank you,\nStansford International School`);
+    const body = encodeURIComponent(`Dear Parent,\n\nThis is to confirm receipt of ₹${selected.amount} towards fees for ${selected.name} (Class ${selected.cls}, Reg ID ${selected.id}).\nMethod: ${method}\n\nThank you,\nStansford International HR.Sec.School`);
     window.open(`mailto:parent@example.com?subject=${subject}&body=${body}`, "_self");
     flash("Opened email draft");
   };
@@ -489,7 +489,7 @@ export default function ScreenFees({ E, refresh }) {
                 <>
                   <div className="receipt" id="fee-receipt">
                     <div style={{ textAlign: "center", marginBottom: 8 }}>
-                      <div style={{ fontWeight: 600, fontFamily: "var(--font-sans)", fontSize: 13 }}>STANSFORD INTERNATIONAL SCHOOL</div>
+                      <div style={{ fontWeight: 600, fontFamily: "var(--font-sans)", fontSize: 13 }}>STANSFORD INTERNATIONAL HR.SEC.SCHOOL</div>
                       <div style={{ fontSize: 10.5, color: "var(--ink-3)" }}>Fee Receipt · STN/RC/2026/{selected.id.replace(/[^0-9]/g, "").slice(-4)}</div>
                     </div>
                     <div style={{ borderTop: "1px dashed var(--rule)", borderBottom: "1px dashed var(--rule)", padding: "6px 0" }}>

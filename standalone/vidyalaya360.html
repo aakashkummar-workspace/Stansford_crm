@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Vidyalaya360 · School CRM (standalone)</title>
+<title>Stansford International HR.Sec.School · Vidyalaya360</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"/>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=DM+Serif+Display:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
@@ -1562,7 +1562,7 @@ function Sidebar({ current, setCurrent, role }) {
           <div className="b1">
             Vidyalaya<span className="num">360</span>
           </div>
-          <div className="b2">School CRM</div>
+          <div className="b2">Stansford Intl · HR.Sec.School</div>
         </div>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 1, overflowY: "auto", marginTop: 4, flex: 1 }}>
@@ -3467,7 +3467,7 @@ function ScreenFees({ E, refresh }) {
   // Receipt actions
   const phoneFor = () => DEMO_PARENT_PHONE.replace(/[^0-9]/g, "");
   const sendWhatsApp = () => {
-    const text = encodeURIComponent(`Receipt for ${selected.name} (${selected.id}) · ₹${selected.amount} paid via ${method}. Thank you — Stansford International.`);
+    const text = encodeURIComponent(`Receipt for ${selected.name} (${selected.id}) · ₹${selected.amount} paid via ${method}. Thank you — Stansford International HR.Sec.School.`);
     window.open(`https://wa.me/${phoneFor()}?text=${text}`, "_blank");
     flash("Opened WhatsApp");
   };
@@ -3477,7 +3477,7 @@ function ScreenFees({ E, refresh }) {
   };
   const sendEmail = () => {
     const subject = encodeURIComponent(`Fee receipt · ${selected.id} · ${selected.name}`);
-    const body = encodeURIComponent(`Dear Parent,\n\nThis is to confirm receipt of ₹${selected.amount} towards fees for ${selected.name} (Class ${selected.cls}, Reg ID ${selected.id}).\nMethod: ${method}\n\nThank you,\nStansford International School`);
+    const body = encodeURIComponent(`Dear Parent,\n\nThis is to confirm receipt of ₹${selected.amount} towards fees for ${selected.name} (Class ${selected.cls}, Reg ID ${selected.id}).\nMethod: ${method}\n\nThank you,\nStansford International HR.Sec.School`);
     window.open(`mailto:parent@example.com?subject=${subject}&body=${body}`, "_self");
     flash("Opened email draft");
   };
@@ -3751,7 +3751,7 @@ function ScreenFees({ E, refresh }) {
                 <>
                   <div className="receipt" id="fee-receipt">
                     <div style={{ textAlign: "center", marginBottom: 8 }}>
-                      <div style={{ fontWeight: 600, fontFamily: "var(--font-sans)", fontSize: 13 }}>STANSFORD INTERNATIONAL SCHOOL</div>
+                      <div style={{ fontWeight: 600, fontFamily: "var(--font-sans)", fontSize: 13 }}>STANSFORD INTERNATIONAL HR.SEC.SCHOOL</div>
                       <div style={{ fontSize: 10.5, color: "var(--ink-3)" }}>Fee Receipt · STN/RC/2026/{selected.id.replace(/[^0-9]/g, "").slice(-4)}</div>
                     </div>
                     <div style={{ borderTop: "1px dashed var(--rule)", borderBottom: "1px dashed var(--rule)", padding: "6px 0" }}>

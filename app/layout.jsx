@@ -1,7 +1,7 @@
 import "./globals.css";
 
 export const metadata = {
-  title: "Vidyalaya360 · Saraswati Trust",
+  title: "Stansford International HR.Sec.School · Vidyalaya360",
   description: "School ERP & CRM control tower — multi-school trust admin, principal, teacher and parent views.",
 };
 

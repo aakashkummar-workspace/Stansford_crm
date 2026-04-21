@@ -65,7 +65,7 @@ export default function Sidebar({ current, setCurrent, role }) {
           <div className="b1">
             Vidyalaya<span className="num">360</span>
           </div>
-          <div className="b2">School CRM</div>
+          <div className="b2">Stansford Intl · HR.Sec.School</div>
         </div>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 1, overflowY: "auto", marginTop: 4, flex: 1 }}>
