@@ -1,13 +1,10 @@
 import { NextResponse } from "next/server";
-import { readDb, writeDb, logAudit } from "@/lib/db";
+import { addStudent, addPendingFee, logAudit } from "@/lib/db";
 
 // Tiny CSV parser — handles quoted cells with commas inside.
 function parseCsv(text) {
   const rows = [];
-  let i = 0;
-  let cell = "";
-  let row = [];
-  let inQuotes = false;
+  let i = 0, cell = "", row = [], inQuotes = false;
   while (i < text.length) {
     const c = text[i];
     if (inQuotes) {
@@ -32,9 +29,7 @@ function parseCsv(text) {
 
 const monthYear = () =>
   new Date().toLocaleDateString("en-IN", { month: "short", year: "numeric" });
-
 const newId = () => `STN-${9000 + Math.floor(Math.random() * 999)}`;
-
 function termFeeFor(cls) {
   const n = Number(String(cls).split("-")[0]) || 1;
   return 14000 + n * 1000;
@@ -51,15 +46,11 @@ export async function POST(req) {
   }
   const header = rows[0].map((h) => h.toLowerCase().trim());
   const idx = (k) => header.findIndex((h) => h.includes(k));
-  const ni = idx("name");
-  const ci = idx("class");
-  const pi = idx("parent");
-  const ti = idx("transport");
+  const ni = idx("name"), ci = idx("class"), pi = idx("parent"), ti = idx("transport");
   if (ni === -1) {
     return NextResponse.json({ ok: false, error: "CSV needs a Name column" }, { status: 400 });
   }
 
-  const db = readDb();
   const created = [];
   for (const cells of rows.slice(1)) {
     const name = (cells[ni] || "").trim();
@@ -76,18 +67,13 @@ export async function POST(req) {
       transport: (cells[ti] || "—").trim(),
       joined: monthYear(),
     };
-    db.addedStudents.unshift(row);
-    db.pendingFees.unshift({
-      id: row.id,
-      name: row.name,
-      cls: row.cls,
-      amount: termFeeFor(row.cls),
-      due: "in 7 days",
-      overdue: false,
+    await addStudent(row);
+    await addPendingFee({
+      id: row.id, name: row.name, cls: row.cls,
+      amount: termFeeFor(row.cls), due: "in 7 days", overdue: false,
     });
     created.push(row);
   }
-  writeDb(db);
-  logAudit("Rashmi Iyer", "Bulk import", `${created.length} students added`);
+  await logAudit("Rashmi Iyer", "Bulk import", `${created.length} students added`);
   return NextResponse.json({ ok: true, count: created.length, students: created });
 }

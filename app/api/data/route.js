@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
-import { readDb } from "@/lib/db";
+import { readAllData, BACKEND } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const db = readDb();
-  return NextResponse.json(db);
+  const data = await readAllData();
+  return NextResponse.json(data, { headers: { "x-data-backend": BACKEND } });
 }

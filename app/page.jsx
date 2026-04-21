@@ -1,4 +1,4 @@
-import { readDb } from "@/lib/db";
+import { readAllData } from "@/lib/db";
 import AppShell from "@/components/AppShell";
 
 export const dynamic = "force-dynamic";
@@ -34,7 +34,7 @@ function shapeForScreens(db) {
 }
 
 export default async function Page() {
-  const db = readDb();
+  const db = await readAllData();
   const E = shapeForScreens(db);
   return <AppShell initialData={E} />;
 }

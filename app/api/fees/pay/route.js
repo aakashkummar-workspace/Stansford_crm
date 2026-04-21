@@ -1,36 +1,20 @@
 import { NextResponse } from "next/server";
-import { readDb, writeDb, logAudit } from "@/lib/db";
+import { payPendingFee, addActivity, logAudit } from "@/lib/db";
 
 export async function POST(req) {
   const { id, method = "UPI" } = await req.json();
-  const db = readDb();
-  const idx = db.pendingFees.findIndex((f) => f.id === id);
-  if (idx === -1) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 });
-  const fee = db.pendingFees[idx];
-  db.pendingFees.splice(idx, 1);
-  const paid = {
-    id: fee.id,
-    name: fee.name,
-    cls: fee.cls,
-    amount: fee.amount,
-    method,
-    time: "just now",
-    status: "paid",
-  };
-  db.recentFees.unshift(paid);
+  if (!id) return NextResponse.json({ ok: false, error: "id required" }, { status: 400 });
 
-  // Reflect the change on the student record so the Students roster
-  // shows "Paid" instead of stale "Pending" after payment.
-  const sIdx = db.addedStudents.findIndex((s) => s.id === fee.id);
-  if (sIdx !== -1) db.addedStudents[sIdx].fee = "paid";
+  const paid = await payPendingFee(id, method);
+  if (!paid) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 });
 
-  db.activities.unshift({
+  await addActivity({
     t: "fee", tone: "accent",
-    title: `Fee received · ${fee.id} ${fee.name}`,
-    sub: `${method} · ₹${fee.amount.toLocaleString("en-IN")} · receipt auto-sent`,
+    title: `Fee received · ${paid.id} ${paid.name}`,
+    sub: `${method} · ₹${paid.amount.toLocaleString("en-IN")} · receipt auto-sent`,
     ts: "now",
   });
-  writeDb(db);
-  logAudit("Rashmi Iyer", "Marked fee paid", `${fee.id} ${fee.name}`);
+  await logAudit("Rashmi Iyer", "Marked fee paid", `${paid.id} ${paid.name}`);
+
   return NextResponse.json({ ok: true, fee: paid });
 }

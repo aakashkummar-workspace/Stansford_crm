@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
-import { patch, append, logAudit } from "@/lib/db";
+import { patchEnquiryStatus, addEnquiry, logAudit } from "@/lib/db";
 
 export async function PATCH(req) {
   const { id, status } = await req.json();
-  const updated = patch("enquiries", (e) => e.id === id, { status });
+  if (!id || !status) return NextResponse.json({ ok: false, error: "id+status required" }, { status: 400 });
+  const updated = await patchEnquiryStatus(id, status);
   if (!updated) return NextResponse.json({ ok: false }, { status: 404 });
-  logAudit("Rashmi Iyer", `Enquiry → ${status}`, `${updated.id} ${updated.name}`);
+  await logAudit("Rashmi Iyer", `Enquiry → ${status}`, `${updated.id} ${updated.name}`);
   return NextResponse.json({ ok: true, enquiry: updated });
 }
 
@@ -22,7 +23,7 @@ export async function POST(req) {
     date: "Today",
     status: "New",
   };
-  append("enquiries", row);
-  logAudit("System", "Enquiry created", `${row.id} ${row.name}`);
-  return NextResponse.json({ ok: true, enquiry: row });
+  const created = await addEnquiry(row);
+  await logAudit("System", "Enquiry created", `${created.id} ${created.name}`);
+  return NextResponse.json({ ok: true, enquiry: created });
 }

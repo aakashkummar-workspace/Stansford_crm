@@ -1,25 +1,21 @@
 import { NextResponse } from "next/server";
-import { readDb, writeDb, append, logAudit } from "@/lib/db";
+import { addStudent, removeStudent, addPendingFee, logAudit } from "@/lib/db";
 
 const monthYear = () =>
   new Date().toLocaleDateString("en-IN", { month: "short", year: "numeric" });
 
 const newId = () => `STN-${9000 + Math.floor(Math.random() * 999)}`;
 
-// Term fee per class — simple linear schedule. Override later in Settings.
 function termFeeFor(cls) {
   const n = Number(String(cls).split("-")[0]) || 1;
   return 14000 + n * 1000;
 }
 
-// Accepts a 10-digit Indian mobile and returns the canonical
-// "+91 XXXXX XXXXX" form. Returns null on anything that isn't valid.
-// Strips a leading "+91" / "91" / "0" courtesy prefix before counting digits,
-// but the remaining number must be exactly 10 digits and start with 6/7/8/9.
+// Accepts a 10-digit Indian mobile (after stripping a courtesy +91/91/0 prefix)
+// and returns "+91 XXXXX XXXXX". Returns null if not valid.
 function formatIndianPhone(raw) {
   if (!raw) return "—";
   let digits = String(raw).replace(/\D/g, "");
-  // Strip a single courtesy country/trunk prefix ONCE.
   if (digits.startsWith("91") && digits.length === 12) digits = digits.slice(2);
   else if (digits.startsWith("0") && digits.length === 11) digits = digits.slice(1);
   if (digits.length !== 10 || !/^[6-9]/.test(digits)) return null;
@@ -55,10 +51,8 @@ export async function POST(req) {
     joined: monthYear(),
   };
 
-  // Persist student + auto-create a pending fee row for the term.
-  const db = readDb();
-  db.addedStudents.unshift(row);
-  db.pendingFees.unshift({
+  const student = await addStudent(row);
+  await addPendingFee({
     id: row.id,
     name: row.name,
     cls: row.cls,
@@ -66,22 +60,16 @@ export async function POST(req) {
     due: "in 7 days",
     overdue: false,
   });
-  writeDb(db);
+  await logAudit("Rashmi Iyer", "New admission", `${row.id} ${row.name}`);
 
-  logAudit("Rashmi Iyer", "New admission", `${row.id} ${row.name}`);
-  return NextResponse.json({ ok: true, student: row });
+  return NextResponse.json({ ok: true, student });
 }
 
 export async function DELETE(req) {
   const { id } = await req.json();
   if (!id) return NextResponse.json({ ok: false, error: "id required" }, { status: 400 });
-  const db = readDb();
-  const idx = db.addedStudents.findIndex((s) => s.id === id);
-  if (idx === -1) return NextResponse.json({ ok: false, error: "Not found (or built-in roster row)" }, { status: 404 });
-  const [removed] = db.addedStudents.splice(idx, 1);
-  // Drop any pending fee row for this student so it doesn't dangle.
-  db.pendingFees = db.pendingFees.filter((f) => f.id !== removed.id);
-  writeDb(db);
-  logAudit("Rashmi Iyer", "Removed student", `${removed.id} ${removed.name}`);
+  const removed = await removeStudent(id);
+  if (!removed) return NextResponse.json({ ok: false, error: "Not found (or built-in roster row)" }, { status: 404 });
+  await logAudit("Rashmi Iyer", "Removed student", `${removed.id} ${removed.name}`);
   return NextResponse.json({ ok: true });
 }
