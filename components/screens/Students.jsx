@@ -75,18 +75,29 @@ export default function ScreenStudents({ E, refresh }) {
     flash(`Exported ${visible.length} rows to CSV`);
   };
 
+  // Wrap fetch so a network failure (server restart, dev hot-reload mid-click,
+  // offline) becomes a toast instead of an unhandled "Failed to fetch" overlay.
+  const safeFetch = async (url, init) => {
+    try {
+      const r = await fetch(url, init);
+      const json = await r.json().catch(() => ({}));
+      return { ok: r.ok && json.ok !== false, status: r.status, json };
+    } catch (e) {
+      return { ok: false, status: 0, json: { error: "Network error — couldn't reach the server. Is the dev server still running?" } };
+    }
+  };
+
   const handleImportFile = (file) => {
     const reader = new FileReader();
     reader.onload = async (ev) => {
       const csv = ev.target?.result;
       if (typeof csv !== "string") { flash("Could not read file", "bad"); return; }
-      const r = await fetch("/api/students/import", {
+      const { ok, json } = await safeFetch("/api/students/import", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ csv }),
       });
-      const json = await r.json();
-      if (json.ok) {
+      if (ok) {
         flash(`Imported ${json.count} students`);
         await refresh?.();
         setShowImport(false);
@@ -99,13 +110,12 @@ export default function ScreenStudents({ E, refresh }) {
   };
 
   const submitAdmission = async (form) => {
-    const r = await fetch("/api/students", {
+    const { ok, json } = await safeFetch("/api/students", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(form),
     });
-    const json = await r.json();
-    if (json.ok) {
+    if (ok) {
       flash(`Admitted ${json.student.name} · ${json.student.id}`);
       await refresh?.();
       setShowAdmission(false);
@@ -119,13 +129,12 @@ export default function ScreenStudents({ E, refresh }) {
       flash("Built-in roster rows cannot be removed (only admissions added in this session)", "bad");
       return;
     }
-    const r = await fetch("/api/students", {
+    const { ok, json } = await safeFetch("/api/students", {
       method: "DELETE",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ id: s.id }),
     });
-    const json = await r.json();
-    if (json.ok) { flash(`Removed ${s.name}`); await refresh?.(); }
+    if (ok) { flash(`Removed ${s.name}`); await refresh?.(); }
     else flash(json.error || "Remove failed", "bad");
     setOpenMenuFor(null);
   };
@@ -459,14 +468,17 @@ function AdmissionModal({ onClose, onSubmit }) {
     setTouched({ name: true, phone: true });
     if (!formValid) return;
     setBusy(true);
-    await onSubmit({
-      name: form.name,
-      cls: form.cls,
-      section: form.section,
-      parent: form.phoneDigits ? formattedPhone : "",
-      transport: form.transport,
-    });
-    setBusy(false);
+    try {
+      await onSubmit({
+        name: form.name,
+        cls: form.cls,
+        section: form.section,
+        parent: form.phoneDigits ? formattedPhone : "",
+        transport: form.transport,
+      });
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
