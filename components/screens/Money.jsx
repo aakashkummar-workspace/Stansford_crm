@@ -34,12 +34,21 @@ export default function ScreenMoney({ E }) {
         </div>
       </div>
 
-      <div className="grid g-4" style={{ marginBottom: 14 }}>
-        <KPI label="Total income · YTD" value={moneyK(E.KPIS.income.value)} delta="+14%" deltaDir="up" sub="fees + donations + other" puck="mint" puckIcon="trending" />
-        <KPI label="Total expense · YTD" value={moneyK(E.KPIS.expense.value)} delta="+3%" deltaDir="up" sub="incl. salaries + ops" puck="peach" puckIcon="money" />
-        <KPI label="Net surplus" value={moneyK(E.KPIS.income.value - E.KPIS.expense.value)} delta="42% margin" deltaDir="up" sub="target 35%" puck="cream" puckIcon="trending" />
-        <KPI label="Combined balance" value={moneyK(E.KPIS.balance.value)} delta="+2.1%" deltaDir="up" sub="live as of 08:12" puck="sky" puckIcon="fees" />
-      </div>
+      {(() => {
+        const incomeYtd = (E.RECENT_FEES || []).reduce((a, f) => a + (f.amount || 0), 0);
+        const pendingTotal = (E.PENDING_FEES || []).reduce((a, f) => a + (f.amount || 0), 0);
+        const expenseYtd = 0; // no expense tracking yet
+        const surplus = incomeYtd - expenseYtd;
+        const margin = incomeYtd > 0 ? Math.round((surplus / incomeYtd) * 100) : 0;
+        return (
+          <div className="grid g-4" style={{ marginBottom: 14 }}>
+            <KPI label="Total income · YTD" value={moneyK(incomeYtd)} sub={`from ${(E.RECENT_FEES || []).length} fee receipt${(E.RECENT_FEES || []).length === 1 ? "" : "s"}`} puck="mint" puckIcon="trending" />
+            <KPI label="Total expense · YTD" value={moneyK(expenseYtd)} sub="not tracked yet" puck="peach" puckIcon="money" />
+            <KPI label="Net surplus" value={moneyK(surplus)} sub={incomeYtd > 0 ? `${margin}% margin` : "no income yet"} puck="cream" puckIcon="trending" />
+            <KPI label="Pending receivables" value={moneyK(pendingTotal)} sub={`${(E.PENDING_FEES || []).length} student${(E.PENDING_FEES || []).length === 1 ? "" : "s"}`} puck="sky" puckIcon="fees" />
+          </div>
+        );
+      })()}
 
       <div className="grid g-12">
         <div className="card col-8">

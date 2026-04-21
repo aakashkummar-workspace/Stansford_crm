@@ -53,12 +53,19 @@ export default function ScreenDashboard({ E }) {
         </div>
       </div>
 
-      <div className="grid g-4" style={{ marginBottom: 20 }}>
-        <KPI label="Students" value={KPIS.students.value} sub={KPIS.students.sub || "on roll"} puck="mint" puckIcon="students" />
-        <KPI label="Fees collected" value={moneyK(KPIS.collected.value || 0)} sub="this term" puck="peach" puckIcon="fees" />
-        <KPI label="Attendance" value="—" sub="needs attendance data" puck="cream" puckIcon="check" />
-        <KPI label="Buses" value={(E.ROUTES || []).length || 0} sub={(E.ROUTES || []).length ? "running" : "no routes"} puck="sky" puckIcon="bus" />
-      </div>
+      {(() => {
+        const studentCount = (E.ADDED_STUDENTS || []).length;
+        const collected = (RECENT_FEES || []).reduce((a, f) => a + (f.amount || 0), 0);
+        const pendingTotal = (PENDING_FEES || []).reduce((a, f) => a + (f.amount || 0), 0);
+        return (
+          <div className="grid g-4" style={{ marginBottom: 20 }}>
+            <KPI label="Students" value={studentCount} sub="on roll" puck="mint" puckIcon="students" />
+            <KPI label="Fees collected" value={moneyK(collected)} sub={pendingTotal > 0 ? `${moneyK(pendingTotal)} still pending` : "this term"} puck="peach" puckIcon="fees" />
+            <KPI label="Attendance" value="—" sub="needs attendance data" puck="cream" puckIcon="check" />
+            <KPI label="Buses" value={(E.ROUTES || []).length || 0} sub={(E.ROUTES || []).length ? "running" : "no routes"} puck="sky" puckIcon="bus" />
+          </div>
+        );
+      })()}
 
       <div className="grid g-12" style={{ marginBottom: 20 }}>
         <div className="card col-8">
@@ -80,37 +87,39 @@ export default function ScreenDashboard({ E }) {
           </div>
           <div className="card-body" style={{ padding: "10px 14px 14px" }}>
             <LineBarChart data={INCOME_SERIES} w={760} h={240} lineKeys={["inc"]} barKey="exp" palette={["var(--accent)"]} />
-            <div style={{ display: "flex", gap: 28, paddingTop: 14, borderTop: "1px solid var(--rule-2)", marginTop: 8, flexWrap: "wrap" }}>
-              <div>
-                <div style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 500 }}>Income YTD</div>
-                <div style={{ fontFamily: "var(--font-serif)", fontSize: 24, marginTop: 4, letterSpacing: "-0.02em" }}>{moneyK(KPIS.income.value)}</div>
-                <div className="delta up" style={{ fontSize: 11 }}>
-                  <Icon name="arrowUp" size={10} stroke={2.2} />
-                  +14% vs LY
+            {(() => {
+              const incomeYtd = (RECENT_FEES || []).reduce((a, f) => a + (f.amount || 0), 0);
+              const expenseYtd = 0;
+              const surplus = incomeYtd - expenseYtd;
+              const margin = incomeYtd > 0 ? Math.round((surplus / incomeYtd) * 100) : 0;
+              return (
+                <div style={{ display: "flex", gap: 28, paddingTop: 14, borderTop: "1px solid var(--rule-2)", marginTop: 8, flexWrap: "wrap" }}>
+                  <div>
+                    <div style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 500 }}>Income YTD</div>
+                    <div style={{ fontFamily: "var(--font-serif)", fontSize: 24, marginTop: 4, letterSpacing: "-0.02em" }}>{moneyK(incomeYtd)}</div>
+                    <div style={{ fontSize: 11, color: "var(--ink-3)" }}>{(RECENT_FEES || []).length} fee receipt{(RECENT_FEES || []).length === 1 ? "" : "s"}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 500 }}>Expense YTD</div>
+                    <div style={{ fontFamily: "var(--font-serif)", fontSize: 24, marginTop: 4, letterSpacing: "-0.02em" }}>{moneyK(expenseYtd)}</div>
+                    <div style={{ fontSize: 11, color: "var(--ink-3)" }}>not tracked yet</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 500 }}>Net surplus</div>
+                    <div style={{ fontFamily: "var(--font-serif)", fontSize: 24, marginTop: 4, letterSpacing: "-0.02em", color: "var(--ok)" }}>
+                      {moneyK(surplus)}
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--ink-3)" }}>{incomeYtd > 0 ? `${margin}% margin` : "no income yet"}</div>
+                  </div>
+                  <div style={{ marginLeft: "auto", alignSelf: "center" }}>
+                    <button className="btn sm">
+                      <Icon name="link" size={12} />
+                      Open ledger
+                    </button>
+                  </div>
                 </div>
-              </div>
-              <div>
-                <div style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 500 }}>Expense YTD</div>
-                <div style={{ fontFamily: "var(--font-serif)", fontSize: 24, marginTop: 4, letterSpacing: "-0.02em" }}>{moneyK(KPIS.expense.value)}</div>
-                <div className="delta up" style={{ fontSize: 11 }}>
-                  <Icon name="arrowUp" size={10} stroke={2.2} />
-                  +3% vs LY
-                </div>
-              </div>
-              <div>
-                <div style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 500 }}>Net surplus</div>
-                <div style={{ fontFamily: "var(--font-serif)", fontSize: 24, marginTop: 4, letterSpacing: "-0.02em", color: "var(--ok)" }}>
-                  {moneyK(KPIS.income.value - KPIS.expense.value)}
-                </div>
-                <div style={{ fontSize: 11, color: "var(--ink-3)" }}>42% margin · target 35%</div>
-              </div>
-              <div style={{ marginLeft: "auto", alignSelf: "center" }}>
-                <button className="btn sm">
-                  <Icon name="link" size={12} />
-                  Open ledger
-                </button>
-              </div>
-            </div>
+              );
+            })()}
           </div>
         </div>
 
