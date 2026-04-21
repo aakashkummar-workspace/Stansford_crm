@@ -5,12 +5,14 @@ import Icon from "../Icon";
 import { KPI, BarChart, LineBarChart, Ring, AvatarChip } from "../ui";
 import { money, moneyK } from "@/lib/format";
 
-export default function ScreenDashboard({ E }) {
+export default function ScreenDashboard({ E, role }) {
   const { KPIS, CLASS_STRENGTH, RECENT_FEES, PENDING_FEES, ACTIVITIES, ROUTES, INCOME_SERIES } = E;
   const [range, setRange] = useState("12W");
-  // Greeting + date string both depend on the client clock — they're computed
-  // after mount so SSR (UTC) and CSR (local) can't disagree and trigger a
-  // hydration mismatch. We render an empty placeholder server-side.
+  const isParent = role === "parent";
+  const child = isParent ? (E.ADDED_STUDENTS || [])[0] : null;
+
+  // Greeting + date string both depend on the client clock — computed after
+  // mount to avoid SSR/CSR hydration mismatch.
   const [greet, setGreet] = useState("Hello");
   const [dateLabel, setDateLabel] = useState("");
   useEffect(() => {
@@ -26,12 +28,20 @@ export default function ScreenDashboard({ E }) {
         <div>
           <div className="page-eyebrow">{dateLabel || "\u00A0"}</div>
           <div className="page-title">
-            {greet}. <span className="amber">{KPIS.students.value || "No"} student{KPIS.students.value === 1 ? "" : "s"}</span>
-            <br />
-            on roll today.
+            {isParent ? (
+              child ? (
+                <>{greet}. <span className="amber">{child.name.split(" ")[0]}</span><br />is in Class {child.cls}.</>
+              ) : (
+                <>{greet}.<br />No child linked to this account yet.</>
+              )
+            ) : (
+              <>{greet}. <span className="amber">{(E.ADDED_STUDENTS || []).length || "No"} student{(E.ADDED_STUDENTS || []).length === 1 ? "" : "s"}</span><br />on roll today.</>
+            )}
           </div>
           <div className="page-sub">
-            Your operating snapshot — fees, attendance, transport.
+            {isParent
+              ? "Your child's fees, attendance, and transport — all in one place."
+              : "Your operating snapshot — fees, attendance, transport."}
           </div>
         </div>
         <div className="page-actions">

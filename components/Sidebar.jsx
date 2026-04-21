@@ -51,7 +51,6 @@ export const NAV_BY_ROLE = {
     { id: "fees", label: "Fees", icon: "fees" },
     { id: "transport", label: "Transport", icon: "bus" },
     { id: "communication", label: "Messages", icon: "megaphone" },
-    { id: "complaints", label: "Raise ticket", icon: "complaint" },
   ],
 };
 

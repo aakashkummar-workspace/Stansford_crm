@@ -150,6 +150,30 @@ export default function AppShell({ initialData }) {
   const view = settings.view;
   const Comp = SCREENS[current] || SCREENS.dashboard;
 
+  // For the Parent role, restrict every piece of data to this parent's child.
+  // Demo picks the first active student as "this parent's child"; in a
+  // real deployment the parent would be authenticated and linked to a
+  // specific student_id on the students table.
+  const scopedData = (() => {
+    if (role !== "parent") return data;
+    const myChild = (data.ADDED_STUDENTS || [])[0];
+    if (!myChild) return { ...data, ADDED_STUDENTS: [], PENDING_FEES: [], RECENT_FEES: [], DAILY_LOGS: [], ROUTES: [] };
+    return {
+      ...data,
+      ADDED_STUDENTS:    [myChild],
+      ARCHIVED_STUDENTS: [],
+      PENDING_FEES:      (data.PENDING_FEES || []).filter((f) => f.id === myChild.id),
+      RECENT_FEES:       (data.RECENT_FEES  || []).filter((f) => f.id === myChild.id),
+      DAILY_LOGS:        (data.DAILY_LOGS   || []).filter((l) => l.studentId === myChild.id),
+      ROUTES:            (data.ROUTES || []).filter((r) => r.code === myChild.transport),
+      // Hide all admin-level data from the parent view.
+      STAFF: [], AUDIT: [], INVENTORY: [], DONORS: [],
+      ENQUIRIES: [], COMPLAINTS: [], AUTOMATIONS: [],
+      SCHOOLS: [], USERS: [], ANOMALIES: [], DONATION_PIPELINE: [],
+      COMPLIANCE: [], AI_BRIEF: [],
+    };
+  })();
+
   if (view === "mobile") {
     return (
       <div
@@ -159,7 +183,7 @@ export default function AppShell({ initialData }) {
         style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: "32px 16px", background: "var(--bg-2)" }}
       >
         <MobileShell current={current} setCurrent={setCurrent} role={role}>
-          <Comp E={data} refresh={refresh} role={role} />
+          <Comp E={scopedData} refresh={refresh} role={role} />
         </MobileShell>
         <RolePill role={role} setRole={(r) => setSetting("role", r)} />
         <ViewToggle view={view} setView={(v) => setSetting("view", v)} />

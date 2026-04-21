@@ -7,7 +7,8 @@ import { money, moneyK } from "@/lib/format";
 
 const DEMO_PARENT_PHONE = "+919876543210";
 
-export default function ScreenFees({ E, refresh }) {
+export default function ScreenFees({ E, refresh, role }) {
+  const isParent = role === "parent";
   // ---------- core state ----------
   const [selected, setSelected] = useState(E.PENDING_FEES[0] || E.RECENT_FEES[0]);
   const [stage, setStage] = useState("pick");
@@ -240,25 +241,36 @@ export default function ScreenFees({ E, refresh }) {
           </div>
         </div>
         <div className="page-actions">
-          <button className="btn" onClick={importStructure}><Icon name="upload" size={13} />Import structure</button>
-          <button className="btn" onClick={exportCsv}><Icon name="download" size={13} />Export CSV</button>
-          <div style={{ position: "relative" }}>
-            <button className="btn accent" onClick={headerCollect}>
-              <Icon name="plus" size={13} />Collect fee
-              {E.PENDING_FEES.length > 0 && (
-                <span className="mono" style={{ marginLeft: 4, fontSize: 11, opacity: 0.85 }}>
-                  · {E.PENDING_FEES.length} pending
-                </span>
-              )}
-            </button>
-            {collectOpen && (
-              <CollectMenu
-                items={E.PENDING_FEES}
-                onPick={pickFromCollect}
-                onClose={() => setCollectOpen(false)}
-              />
-            )}
-          </div>
+          {isParent ? (
+            /* Parent view: one primary call-to-action when a pending fee exists */
+            E.PENDING_FEES.length > 0 && (
+              <button className="btn accent" onClick={() => { setSelected(E.PENDING_FEES[0]); setStage("pick"); flash("Let's pay this term's fee"); }}>
+                <Icon name="fees" size={13} />Pay now · {moneyK(E.PENDING_FEES[0].amount)}
+              </button>
+            )
+          ) : (
+            <>
+              <button className="btn" onClick={importStructure}><Icon name="upload" size={13} />Import structure</button>
+              <button className="btn" onClick={exportCsv}><Icon name="download" size={13} />Export CSV</button>
+              <div style={{ position: "relative" }}>
+                <button className="btn accent" onClick={headerCollect}>
+                  <Icon name="plus" size={13} />Collect fee
+                  {E.PENDING_FEES.length > 0 && (
+                    <span className="mono" style={{ marginLeft: 4, fontSize: 11, opacity: 0.85 }}>
+                      · {E.PENDING_FEES.length} pending
+                    </span>
+                  )}
+                </button>
+                {collectOpen && (
+                  <CollectMenu
+                    items={E.PENDING_FEES}
+                    onPick={pickFromCollect}
+                    onClose={() => setCollectOpen(false)}
+                  />
+                )}
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -294,7 +306,7 @@ export default function ScreenFees({ E, refresh }) {
             </div>
           </div>
 
-          {picked.size > 0 && (
+          {!isParent && picked.size > 0 && (
             <div style={{
               padding: "10px 18px", display: "flex", alignItems: "center", gap: 12,
               background: "var(--accent-soft)", borderBottom: "1px solid var(--rule-2)",

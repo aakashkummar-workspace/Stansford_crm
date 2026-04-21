@@ -41,11 +41,24 @@ const EMPTY_LOG = {
   extra: "",
 };
 
-export default function ScreenAcademic({ E, refresh }) {
+export default function ScreenAcademic({ E, refresh, role }) {
   const classes = E.CLASSES;
   const [cls, setCls] = useState(5);
   const [sec, setSec] = useState("A");
   const [selectedStudent, setSelectedStudent] = useState(0);
+
+  // Parent view: pin the class/section to the parent's child and skip the
+  // class picker altogether. This runs whenever the parent's child (or role)
+  // changes so switching roles redirects correctly.
+  useEffect(() => {
+    if (role === "parent" && E.ADDED_STUDENTS && E.ADDED_STUDENTS[0]) {
+      const child = E.ADDED_STUDENTS[0];
+      const [c, s] = String(child.cls).split("-");
+      const n = Number(c);
+      if (!Number.isNaN(n)) setCls(n);
+      if (s) setSec(s);
+    }
+  }, [role, E.ADDED_STUDENTS]);
   // WEEKS + TODAY_ISO depend on the client clock; populate after mount.
   const [WEEKS, setWeeks] = useState(PLACEHOLDER_WEEKS);
   const [TODAY_ISO, setTodayIso] = useState("");
@@ -197,16 +210,21 @@ export default function ScreenAcademic({ E, refresh }) {
               />
             )}
           </div>
-          <button className="btn" onClick={downloadMonthlyReport}>
-            <Icon name="download" size={13} />Monthly report
-          </button>
-          <button className="btn accent" onClick={() => setShowLog(true)}>
-            <Icon name="plus" size={13} />Log today
-          </button>
+          {role !== "parent" && (
+            <>
+              <button className="btn" onClick={downloadMonthlyReport}>
+                <Icon name="download" size={13} />Monthly report
+              </button>
+              <button className="btn accent" onClick={() => setShowLog(true)}>
+                <Icon name="plus" size={13} />Log today
+              </button>
+            </>
+          )}
         </div>
       </div>
 
       <div className="grid g-12">
+        {role !== "parent" && (
         <div className="col-12" style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <span style={{ fontSize: 11.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", marginRight: 4 }}>Class</span>
           {classes.map((c) => (
@@ -239,6 +257,7 @@ export default function ScreenAcademic({ E, refresh }) {
             </button>
           ))}
         </div>
+        )}
 
         <div className="card col-4">
           <div className="card-head">

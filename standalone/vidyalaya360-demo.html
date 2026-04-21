@@ -1607,7 +1607,6 @@ const NAV_BY_ROLE = {
     { id: "fees", label: "Fees", icon: "fees" },
     { id: "transport", label: "Transport", icon: "bus" },
     { id: "communication", label: "Messages", icon: "megaphone" },
-    { id: "complaints", label: "Raise ticket", icon: "complaint" },
   ],
 };
 
@@ -1940,11 +1939,24 @@ const EMPTY_LOG = {
   extra: "",
 };
 
-function ScreenAcademic({ E, refresh }) {
+function ScreenAcademic({ E, refresh, role }) {
   const classes = E.CLASSES;
   const [cls, setCls] = useState(5);
   const [sec, setSec] = useState("A");
   const [selectedStudent, setSelectedStudent] = useState(0);
+
+  // Parent view: pin the class/section to the parent's child and skip the
+  // class picker altogether. This runs whenever the parent's child (or role)
+  // changes so switching roles redirects correctly.
+  useEffect(() => {
+    if (role === "parent" && E.ADDED_STUDENTS && E.ADDED_STUDENTS[0]) {
+      const child = E.ADDED_STUDENTS[0];
+      const [c, s] = String(child.cls).split("-");
+      const n = Number(c);
+      if (!Number.isNaN(n)) setCls(n);
+      if (s) setSec(s);
+    }
+  }, [role, E.ADDED_STUDENTS]);
   // WEEKS + TODAY_ISO depend on the client clock; populate after mount.
   const [WEEKS, setWeeks] = useState(PLACEHOLDER_WEEKS);
   const [TODAY_ISO, setTodayIso] = useState("");
@@ -2085,16 +2097,21 @@ function ScreenAcademic({ E, refresh }) {
               />
             )}
           </div>
-          <button className="btn" onClick={downloadMonthlyReport}>
-            <Icon name="download" size={13} />Monthly report
-          </button>
-          <button className="btn accent" onClick={() => setShowLog(true)}>
-            <Icon name="plus" size={13} />Log today
-          </button>
+          {role !== "parent" && (
+            <>
+              <button className="btn" onClick={downloadMonthlyReport}>
+                <Icon name="download" size={13} />Monthly report
+              </button>
+              <button className="btn accent" onClick={() => setShowLog(true)}>
+                <Icon name="plus" size={13} />Log today
+              </button>
+            </>
+          )}
         </div>
       </div>
 
       <div className="grid g-12">
+        {role !== "parent" && (
         <div className="col-12" style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <span style={{ fontSize: 11.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", marginRight: 4 }}>Class</span>
           {classes.map((c) => (
@@ -2127,6 +2144,7 @@ function ScreenAcademic({ E, refresh }) {
             </button>
           ))}
         </div>
+        )}
 
         <div className="card col-4">
           <div className="card-head">
@@ -2797,12 +2815,14 @@ var ScreenComplaints = window.ScreenComplaints;
 
 ;(function(){
 
-function ScreenDashboard({ E }) {
+function ScreenDashboard({ E, role }) {
   const { KPIS, CLASS_STRENGTH, RECENT_FEES, PENDING_FEES, ACTIVITIES, ROUTES, INCOME_SERIES } = E;
   const [range, setRange] = useState("12W");
-  // Greeting + date string both depend on the client clock — they're computed
-  // after mount so SSR (UTC) and CSR (local) can't disagree and trigger a
-  // hydration mismatch. We render an empty placeholder server-side.
+  const isParent = role === "parent";
+  const child = isParent ? (E.ADDED_STUDENTS || [])[0] : null;
+
+  // Greeting + date string both depend on the client clock — computed after
+  // mount to avoid SSR/CSR hydration mismatch.
   const [greet, setGreet] = useState("Hello");
   const [dateLabel, setDateLabel] = useState("");
   useEffect(() => {
@@ -2818,12 +2838,20 @@ function ScreenDashboard({ E }) {
         <div>
           <div className="page-eyebrow">{dateLabel || "\u00A0"}</div>
           <div className="page-title">
-            {greet}. <span className="amber">{KPIS.students.value || "No"} student{KPIS.students.value === 1 ? "" : "s"}</span>
-            <br />
-            on roll today.
+            {isParent ? (
+              child ? (
+                <>{greet}. <span className="amber">{child.name.split(" ")[0]}</span><br />is in Class {child.cls}.</>
+              ) : (
+                <>{greet}.<br />No child linked to this account yet.</>
+              )
+            ) : (
+              <>{greet}. <span className="amber">{(E.ADDED_STUDENTS || []).length || "No"} student{(E.ADDED_STUDENTS || []).length === 1 ? "" : "s"}</span><br />on roll today.</>
+            )}
           </div>
           <div className="page-sub">
-            Your operating snapshot — fees, attendance, transport.
+            {isParent
+              ? "Your child's fees, attendance, and transport — all in one place."
+              : "Your operating snapshot — fees, attendance, transport."}
           </div>
         </div>
         <div className="page-actions">
@@ -3413,7 +3441,8 @@ var ScreenEnquiries = window.ScreenEnquiries;
 
 const DEMO_PARENT_PHONE = "+919876543210";
 
-function ScreenFees({ E, refresh }) {
+function ScreenFees({ E, refresh, role }) {
+  const isParent = role === "parent";
   // ---------- core state ----------
   const [selected, setSelected] = useState(E.PENDING_FEES[0] || E.RECENT_FEES[0]);
   const [stage, setStage] = useState("pick");
@@ -3638,25 +3667,36 @@ function ScreenFees({ E, refresh }) {
           </div>
         </div>
         <div className="page-actions">
-          <button className="btn" onClick={importStructure}><Icon name="upload" size={13} />Import structure</button>
-          <button className="btn" onClick={exportCsv}><Icon name="download" size={13} />Export CSV</button>
-          <div style={{ position: "relative" }}>
-            <button className="btn accent" onClick={headerCollect}>
-              <Icon name="plus" size={13} />Collect fee
-              {E.PENDING_FEES.length > 0 && (
-                <span className="mono" style={{ marginLeft: 4, fontSize: 11, opacity: 0.85 }}>
-                  · {E.PENDING_FEES.length} pending
-                </span>
-              )}
-            </button>
-            {collectOpen && (
-              <CollectMenu
-                items={E.PENDING_FEES}
-                onPick={pickFromCollect}
-                onClose={() => setCollectOpen(false)}
-              />
-            )}
-          </div>
+          {isParent ? (
+            /* Parent view: one primary call-to-action when a pending fee exists */
+            E.PENDING_FEES.length > 0 && (
+              <button className="btn accent" onClick={() => { setSelected(E.PENDING_FEES[0]); setStage("pick"); flash("Let's pay this term's fee"); }}>
+                <Icon name="fees" size={13} />Pay now · {moneyK(E.PENDING_FEES[0].amount)}
+              </button>
+            )
+          ) : (
+            <>
+              <button className="btn" onClick={importStructure}><Icon name="upload" size={13} />Import structure</button>
+              <button className="btn" onClick={exportCsv}><Icon name="download" size={13} />Export CSV</button>
+              <div style={{ position: "relative" }}>
+                <button className="btn accent" onClick={headerCollect}>
+                  <Icon name="plus" size={13} />Collect fee
+                  {E.PENDING_FEES.length > 0 && (
+                    <span className="mono" style={{ marginLeft: 4, fontSize: 11, opacity: 0.85 }}>
+                      · {E.PENDING_FEES.length} pending
+                    </span>
+                  )}
+                </button>
+                {collectOpen && (
+                  <CollectMenu
+                    items={E.PENDING_FEES}
+                    onPick={pickFromCollect}
+                    onClose={() => setCollectOpen(false)}
+                  />
+                )}
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -3692,7 +3732,7 @@ function ScreenFees({ E, refresh }) {
             </div>
           </div>
 
-          {picked.size > 0 && (
+          {!isParent && picked.size > 0 && (
             <div style={{
               padding: "10px 18px", display: "flex", alignItems: "center", gap: 12,
               background: "var(--accent-soft)", borderBottom: "1px solid var(--rule-2)",
@@ -6279,6 +6319,30 @@ function AppShell({ initialData }) {
   const view = settings.view;
   const Comp = SCREENS[current] || SCREENS.dashboard;
 
+  // For the Parent role, restrict every piece of data to this parent's child.
+  // Demo picks the first active student as "this parent's child"; in a
+  // real deployment the parent would be authenticated and linked to a
+  // specific student_id on the students table.
+  const scopedData = (() => {
+    if (role !== "parent") return data;
+    const myChild = (data.ADDED_STUDENTS || [])[0];
+    if (!myChild) return { ...data, ADDED_STUDENTS: [], PENDING_FEES: [], RECENT_FEES: [], DAILY_LOGS: [], ROUTES: [] };
+    return {
+      ...data,
+      ADDED_STUDENTS:    [myChild],
+      ARCHIVED_STUDENTS: [],
+      PENDING_FEES:      (data.PENDING_FEES || []).filter((f) => f.id === myChild.id),
+      RECENT_FEES:       (data.RECENT_FEES  || []).filter((f) => f.id === myChild.id),
+      DAILY_LOGS:        (data.DAILY_LOGS   || []).filter((l) => l.studentId === myChild.id),
+      ROUTES:            (data.ROUTES || []).filter((r) => r.code === myChild.transport),
+      // Hide all admin-level data from the parent view.
+      STAFF: [], AUDIT: [], INVENTORY: [], DONORS: [],
+      ENQUIRIES: [], COMPLAINTS: [], AUTOMATIONS: [],
+      SCHOOLS: [], USERS: [], ANOMALIES: [], DONATION_PIPELINE: [],
+      COMPLIANCE: [], AI_BRIEF: [],
+    };
+  })();
+
   if (view === "mobile") {
     return (
       <div
@@ -6288,7 +6352,7 @@ function AppShell({ initialData }) {
         style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: "32px 16px", background: "var(--bg-2)" }}
       >
         <MobileShell current={current} setCurrent={setCurrent} role={role}>
-          <Comp E={data} refresh={refresh} role={role} />
+          <Comp E={scopedData} refresh={refresh} role={role} />
         </MobileShell>
         <RolePill role={role} setRole={(r) => setSetting("role", r)} />
         <ViewToggle view={view} setView={(v) => setSetting("view", v)} />
