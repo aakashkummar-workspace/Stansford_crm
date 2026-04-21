@@ -8,19 +8,23 @@ import { money, moneyK } from "@/lib/format";
 export default function ScreenDashboard({ E }) {
   const { KPIS, CLASS_STRENGTH, RECENT_FEES, PENDING_FEES, ACTIVITIES, ROUTES, INCOME_SERIES } = E;
   const [range, setRange] = useState("12W");
-  // Greeting uses the client clock; computed after mount to avoid SSR/CSR hydration mismatch
-  // when the server timezone differs from the user's.
-  const [greet, setGreet] = useState("Good morning");
+  // Greeting + date string both depend on the client clock — they're computed
+  // after mount so SSR (UTC) and CSR (local) can't disagree and trigger a
+  // hydration mismatch. We render an empty placeholder server-side.
+  const [greet, setGreet] = useState("Hello");
+  const [dateLabel, setDateLabel] = useState("");
   useEffect(() => {
-    const h = new Date().getHours();
+    const now = new Date();
+    const h = now.getHours();
     setGreet(h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening");
+    setDateLabel(now.toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" }));
   }, []);
 
   return (
     <div className="page">
       <div className="page-head">
         <div>
-          <div className="page-eyebrow">{new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}</div>
+          <div className="page-eyebrow">{dateLabel || "\u00A0"}</div>
           <div className="page-title">
             {greet}. <span className="amber">{KPIS.students.value || "No"} student{KPIS.students.value === 1 ? "" : "s"}</span>
             <br />

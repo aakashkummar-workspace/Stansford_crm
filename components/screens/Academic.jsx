@@ -4,7 +4,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI, AvatarChip } from "../ui";
 
-// Last 8 week-start dates (Mondays) — generated relative to today.
+// Build the last 8 week-start dates relative to today. Computed lazily on
+// the client (see useEffect in the component) so server- and client-rendered
+// markup match — otherwise we'd hit a hydration mismatch when the server
+// clock crosses a day boundary vs the user's clock.
 function buildWeeks() {
   const out = [];
   const today = new Date();
@@ -20,9 +23,13 @@ function buildWeeks() {
   }
   return out;
 }
-const WEEKS = buildWeeks();
 
-const TODAY_ISO = new Date().toISOString().slice(0, 10);
+// Stable placeholders rendered on first paint so SSR matches CSR.
+const PLACEHOLDER_WEEKS = Array.from({ length: 8 }, (_, i) => ({
+  iso: `placeholder-${i}`,
+  label: i === 0 ? "Current week" : `Week -${i}`,
+  short: i === 0 ? "current" : `-${i}w`,
+}));
 
 const EMPTY_LOG = {
   classwork: "",
@@ -39,7 +46,16 @@ export default function ScreenAcademic({ E, refresh }) {
   const [cls, setCls] = useState(5);
   const [sec, setSec] = useState("A");
   const [selectedStudent, setSelectedStudent] = useState(0);
-  const [weekIso, setWeekIso] = useState(WEEKS[0].iso);
+  // WEEKS + TODAY_ISO depend on the client clock; populate after mount.
+  const [WEEKS, setWeeks] = useState(PLACEHOLDER_WEEKS);
+  const [TODAY_ISO, setTodayIso] = useState("");
+  const [weekIso, setWeekIso] = useState(PLACEHOLDER_WEEKS[0].iso);
+  useEffect(() => {
+    const fresh = buildWeeks();
+    setWeeks(fresh);
+    setTodayIso(new Date().toISOString().slice(0, 10));
+    setWeekIso((prev) => (prev.startsWith("placeholder-") ? fresh[0].iso : prev));
+  }, []);
   const [weekOpen, setWeekOpen] = useState(false);
   const [showLog, setShowLog] = useState(false);
   const [toast, setToast] = useState(null);
@@ -170,6 +186,7 @@ export default function ScreenAcademic({ E, refresh }) {
             </button>
             {weekOpen && (
               <WeekMenu
+                weeks={WEEKS}
                 value={weekIso}
                 onPick={(iso) => {
                   setWeekIso(iso);
@@ -388,7 +405,7 @@ function Toast({ toast }) {
   );
 }
 
-function WeekMenu({ value, onPick, onClose }) {
+function WeekMenu({ weeks, value, onPick, onClose }) {
   useEffect(() => {
     const onDoc = (e) => { if (!e.target.closest(".week-menu") && !e.target.closest(".btn")) onClose(); };
     setTimeout(() => document.addEventListener("click", onDoc), 0);
@@ -403,7 +420,7 @@ function WeekMenu({ value, onPick, onClose }) {
       <div style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.08em", padding: "6px 10px 4px" }}>
         Pick a week
       </div>
-      {WEEKS.map((w) => (
+      {weeks.map((w, i) => (
         <button key={w.iso} onClick={() => onPick(w.iso)} className="btn ghost"
           style={{
             width: "100%", justifyContent: "flex-start", height: 30, padding: "0 10px",
@@ -412,7 +429,7 @@ function WeekMenu({ value, onPick, onClose }) {
             fontWeight: value === w.iso ? 500 : 400,
           }}>
           {w.label}
-          {w.iso === WEEKS[0].iso && <span className="chip ok" style={{ marginLeft: "auto", height: 16, fontSize: 9.5, padding: "0 6px" }}>current</span>}
+          {i === 0 && <span className="chip ok" style={{ marginLeft: "auto", height: 16, fontSize: 9.5, padding: "0 6px" }}>current</span>}
         </button>
       ))}
     </div>
