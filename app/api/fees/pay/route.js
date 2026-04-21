@@ -18,6 +18,12 @@ export async function POST(req) {
     status: "paid",
   };
   db.recentFees.unshift(paid);
+
+  // Reflect the change on the student record so the Students roster
+  // shows "Paid" instead of stale "Pending" after payment.
+  const sIdx = db.addedStudents.findIndex((s) => s.id === fee.id);
+  if (sIdx !== -1) db.addedStudents[sIdx].fee = "paid";
+
   db.activities.unshift({
     t: "fee", tone: "accent",
     title: `Fee received · ${fee.id} ${fee.name}`,

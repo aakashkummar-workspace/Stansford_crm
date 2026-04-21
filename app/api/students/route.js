@@ -6,6 +6,12 @@ const monthYear = () =>
 
 const newId = () => `STN-${9000 + Math.floor(Math.random() * 999)}`;
 
+// Term fee per class — simple linear schedule. Override later in Settings.
+function termFeeFor(cls) {
+  const n = Number(String(cls).split("-")[0]) || 1;
+  return 14000 + n * 1000;
+}
+
 // Accepts a 10-digit Indian mobile and returns the canonical
 // "+91 XXXXX XXXXX" form. Returns null on anything that isn't valid.
 // Strips a leading "+91" / "91" / "0" courtesy prefix before counting digits,
@@ -48,7 +54,20 @@ export async function POST(req) {
     transport: body.transport || "—",
     joined: monthYear(),
   };
-  append("addedStudents", row);
+
+  // Persist student + auto-create a pending fee row for the term.
+  const db = readDb();
+  db.addedStudents.unshift(row);
+  db.pendingFees.unshift({
+    id: row.id,
+    name: row.name,
+    cls: row.cls,
+    amount: termFeeFor(row.cls),
+    due: "in 7 days",
+    overdue: false,
+  });
+  writeDb(db);
+
   logAudit("Rashmi Iyer", "New admission", `${row.id} ${row.name}`);
   return NextResponse.json({ ok: true, student: row });
 }
@@ -60,6 +79,8 @@ export async function DELETE(req) {
   const idx = db.addedStudents.findIndex((s) => s.id === id);
   if (idx === -1) return NextResponse.json({ ok: false, error: "Not found (or built-in roster row)" }, { status: 404 });
   const [removed] = db.addedStudents.splice(idx, 1);
+  // Drop any pending fee row for this student so it doesn't dangle.
+  db.pendingFees = db.pendingFees.filter((f) => f.id !== removed.id);
   writeDb(db);
   logAudit("Rashmi Iyer", "Removed student", `${removed.id} ${removed.name}`);
   return NextResponse.json({ ok: true });

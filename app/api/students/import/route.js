@@ -35,6 +35,11 @@ const monthYear = () =>
 
 const newId = () => `STN-${9000 + Math.floor(Math.random() * 999)}`;
 
+function termFeeFor(cls) {
+  const n = Number(String(cls).split("-")[0]) || 1;
+  return 14000 + n * 1000;
+}
+
 export async function POST(req) {
   const { csv } = await req.json();
   if (typeof csv !== "string" || !csv.trim()) {
@@ -72,6 +77,14 @@ export async function POST(req) {
       joined: monthYear(),
     };
     db.addedStudents.unshift(row);
+    db.pendingFees.unshift({
+      id: row.id,
+      name: row.name,
+      cls: row.cls,
+      amount: termFeeFor(row.cls),
+      due: "in 7 days",
+      overdue: false,
+    });
     created.push(row);
   }
   writeDb(db);
