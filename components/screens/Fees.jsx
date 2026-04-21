@@ -10,7 +10,16 @@ const DEMO_PARENT_PHONE = "+919876543210";
 export default function ScreenFees({ E, refresh, role }) {
   const isParent = role === "parent";
   // ---------- core state ----------
-  const [selected, setSelected] = useState(E.PENDING_FEES[0] || E.RECENT_FEES[0]);
+  // Parent-aware initial selection: pick the first PENDING (or the first
+  // PAID) for the currently-logged-in child, not whichever happens to be
+  // top of the global list.
+  const [selected, setSelected] = useState(() => {
+    const childId = role === "parent" && E.ADDED_STUDENTS && E.ADDED_STUDENTS[0]
+      ? E.ADDED_STUDENTS[0].id : null;
+    const p = childId ? (E.PENDING_FEES || []).filter((f) => f.id === childId) : (E.PENDING_FEES || []);
+    const r = childId ? (E.RECENT_FEES  || []).filter((f) => f.id === childId) : (E.RECENT_FEES  || []);
+    return p[0] || r[0];
+  });
   const [stage, setStage] = useState("pick");
   const [method, setMethod] = useState("UPI");
   const [busy, setBusy] = useState(false);
@@ -31,13 +40,28 @@ export default function ScreenFees({ E, refresh, role }) {
     toastTimer.current = setTimeout(() => setToast(null), 2400);
   };
 
+  // ---------- parent-scoped fee lists ----------
+  // Defence-in-depth: even if AppShell's parent-scoping was applied upstream,
+  // we also scope here, so the Fees screen *always* respects "only my child"
+  // when viewed as a parent. Non-parent roles see every row as before.
+  const myChildId = isParent && E.ADDED_STUDENTS && E.ADDED_STUDENTS[0]
+    ? E.ADDED_STUDENTS[0].id : null;
+  const scopedPending = useMemo(
+    () => (myChildId ? (E.PENDING_FEES || []).filter((f) => f.id === myChildId) : (E.PENDING_FEES || [])),
+    [E.PENDING_FEES, myChildId]
+  );
+  const scopedRecent = useMemo(
+    () => (myChildId ? (E.RECENT_FEES || []).filter((f) => f.id === myChildId) : (E.RECENT_FEES || [])),
+    [E.RECENT_FEES, myChildId]
+  );
+
   // ---------- derived data ----------
   const all = useMemo(
     () => [
-      ...E.RECENT_FEES.map((f) => ({ ...f, status: "paid" })),
-      ...E.PENDING_FEES.map((f) => ({ ...f, status: f.overdue ? "overdue" : "pending", method: "—", time: "due " + f.due })),
+      ...scopedRecent.map((f) => ({ ...f, status: "paid" })),
+      ...scopedPending.map((f) => ({ ...f, status: f.overdue ? "overdue" : "pending", method: "—", time: "due " + f.due })),
     ],
-    [E.RECENT_FEES, E.PENDING_FEES]
+    [scopedRecent, scopedPending]
   );
 
   const counts = {
@@ -56,20 +80,20 @@ export default function ScreenFees({ E, refresh, role }) {
   });
 
   const totals = {
-    collected: E.RECENT_FEES.reduce((a, f) => a + f.amount, 0),
-    pending: E.PENDING_FEES.reduce((a, f) => a + f.amount, 0),
-    overdue: E.PENDING_FEES.filter((f) => f.overdue).reduce((a, f) => a + f.amount, 0),
+    collected: scopedRecent.reduce((a, f) => a + f.amount, 0),
+    pending: scopedPending.reduce((a, f) => a + f.amount, 0),
+    overdue: scopedPending.filter((f) => f.overdue).reduce((a, f) => a + f.amount, 0),
   };
 
   // After data refresh, if `selected` is paid and we're in "pick", advance to next pending
   useEffect(() => {
     if (stage !== "pick" || !selected) return;
-    const stillPending = E.PENDING_FEES.find((f) => f.id === selected.id);
+    const stillPending = scopedPending.find((f) => f.id === selected.id);
     if (!stillPending) {
-      const next = E.PENDING_FEES[0];
+      const next = scopedPending[0];
       if (next) setSelected(next);
     }
-  }, [E.PENDING_FEES, stage]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [scopedPending, stage]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Drop bulk selections that no longer exist
   useEffect(() => {
@@ -124,7 +148,7 @@ export default function ScreenFees({ E, refresh, role }) {
   };
 
   const headerCollect = () => {
-    if (E.PENDING_FEES.length === 0) {
+    if (scopedPending.length === 0) {
       flash("No pending fees right now", "ok");
       return;
     }
@@ -243,9 +267,9 @@ export default function ScreenFees({ E, refresh, role }) {
         <div className="page-actions">
           {isParent ? (
             /* Parent view: one primary call-to-action when a pending fee exists */
-            E.PENDING_FEES.length > 0 && (
-              <button className="btn accent" onClick={() => { setSelected(E.PENDING_FEES[0]); setStage("pick"); flash("Let's pay this term's fee"); }}>
-                <Icon name="fees" size={13} />Pay now · {moneyK(E.PENDING_FEES[0].amount)}
+            scopedPending.length > 0 && (
+              <button className="btn accent" onClick={() => { setSelected(scopedPending[0]); setStage("pick"); flash("Let's pay this term's fee"); }}>
+                <Icon name="fees" size={13} />Pay now · {moneyK(scopedPending[0].amount)}
               </button>
             )
           ) : (
@@ -255,15 +279,15 @@ export default function ScreenFees({ E, refresh, role }) {
               <div style={{ position: "relative" }}>
                 <button className="btn accent" onClick={headerCollect}>
                   <Icon name="plus" size={13} />Collect fee
-                  {E.PENDING_FEES.length > 0 && (
+                  {scopedPending.length > 0 && (
                     <span className="mono" style={{ marginLeft: 4, fontSize: 11, opacity: 0.85 }}>
-                      · {E.PENDING_FEES.length} pending
+                      · {scopedPending.length} pending
                     </span>
                   )}
                 </button>
                 {collectOpen && (
                   <CollectMenu
-                    items={E.PENDING_FEES}
+                    items={scopedPending}
                     onPick={pickFromCollect}
                     onClose={() => setCollectOpen(false)}
                   />
