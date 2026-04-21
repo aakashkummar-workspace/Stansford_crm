@@ -34,10 +34,10 @@ export default function ScreenEnquiries({ E, refresh }) {
       </div>
 
       <div className="grid g-4" style={{ marginBottom: 14 }}>
-        <KPI label="Open pipeline" value={counts.New + counts.Contacted} delta="+9" deltaDir="up" sub="this week" puck="mint" puckIcon="enquiry" />
-        <KPI label="Converted · YTD" value="63" delta="+18%" deltaDir="up" sub="admission conversion 41%" puck="cream" puckIcon="check" />
-        <KPI label="Avg response time" value="2.1h" delta="-40 min" deltaDir="down" sub="first-touch" puck="peach" puckIcon="clock" />
-        <KPI label="Top source" value="Referral" delta="38%" deltaDir="up" sub="parent-to-parent" puck="sky" puckIcon="trending" />
+        <KPI label="Open pipeline" value={counts.New + counts.Contacted} sub="awaiting follow-up" puck="mint" puckIcon="enquiry" />
+        <KPI label="Converted" value={counts.Converted} sub="admissions confirmed" puck="cream" puckIcon="check" />
+        <KPI label="Rejected" value={counts.Rejected} sub="archived" puck="peach" puckIcon="x" />
+        <KPI label="Total enquiries" value={data.length} sub="all-time" puck="sky" puckIcon="trending" />
       </div>
 
       <div className="grid g-12">

@@ -10,13 +10,11 @@ export default function ScreenTrust({ E }) {
     <div className="page">
       <div className="page-head">
         <div>
-          <div className="page-eyebrow">Saraswati Educational Trust · 3 schools</div>
+          <div className="page-eyebrow">Trust overview · {SCHOOLS.length} school{SCHOOLS.length === 1 ? "" : "s"}</div>
           <div className="page-title">
-            Good morning, Rajesh.
-            <br />
-            Across your trust, <span className="amber">things look steady</span> today.
+            Trust <span className="amber">overview</span>
           </div>
-          <div className="page-sub">Tuesday, 28 April 2026 · last synced 08:12 IST · 1,878 students learning right now.</div>
+          <div className="page-sub">Roll-up view across all schools in the trust.</div>
         </div>
         <div className="page-actions">
           <div className="segmented">
@@ -55,6 +53,9 @@ export default function ScreenTrust({ E }) {
             </div>
           </div>
           <div>
+            {SCHOOLS.length === 0 && (
+              <div className="empty">No schools added to the trust yet.</div>
+            )}
             {SCHOOLS.map((s) => (
               <div className="school-row" key={s.id}>
                 <div className={`school-puck ${s.puck}`}>
@@ -86,24 +87,19 @@ export default function ScreenTrust({ E }) {
         <div className="card col-4 ai-brief">
           <div className="card-body" style={{ position: "relative", zIndex: 1 }}>
             <div className="eyebrow">
-              <Icon name="sparkles" size={11} /> Your morning briefing
+              <Icon name="sparkles" size={11} /> Briefing
             </div>
-            <div className="headline">Three things worth your time before 11 AM.</div>
-            {AI_BRIEF.map((t, i) => (
+            <div className="headline">Today across the trust.</div>
+            {AI_BRIEF.length === 0 ? (
+              <div style={{ color: "rgba(255,255,255,0.6)", fontSize: 12.5, lineHeight: 1.5 }}>
+                Briefing items will appear here once there's enough activity to summarise.
+              </div>
+            ) : AI_BRIEF.map((t, i) => (
               <div className="insight-row" key={i}>
                 <div className="n">0{i + 1}</div>
                 <div>{t}</div>
               </div>
             ))}
-            <div style={{ marginTop: 14, display: "flex", gap: 8 }}>
-              <button className="btn sm" style={{ background: "rgba(255,255,255,0.1)", borderColor: "rgba(255,255,255,0.15)", color: "#fff" }}>
-                <Icon name="phone" size={11} />
-                Start call list
-              </button>
-              <button className="btn sm ghost" style={{ color: "rgba(255,255,255,0.7)" }}>
-                Dismiss
-              </button>
-            </div>
           </div>
         </div>
       </div>
@@ -120,6 +116,9 @@ export default function ScreenTrust({ E }) {
             </span>
           </div>
           <div>
+            {ANOMALIES.length === 0 && (
+              <div className="empty">No anomalies detected.</div>
+            )}
             {ANOMALIES.map((a, i) => (
               <div key={i} className="lrow">
                 <div className={`act-ico ${a.tone}`}>
@@ -145,8 +144,11 @@ export default function ScreenTrust({ E }) {
             </div>
           </div>
           <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            {DONATION_PIPELINE.length === 0 && (
+              <div className="empty" style={{ padding: 12 }}>No pipeline yet.</div>
+            )}
             {DONATION_PIPELINE.map((p, i) => {
-              const max = Math.max(...DONATION_PIPELINE.map((x) => x.amount));
+              const max = Math.max(...DONATION_PIPELINE.map((x) => x.amount)) || 1;
               return (
                 <div key={p.stage}>
                   <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5, alignItems: "baseline" }}>
@@ -174,6 +176,9 @@ export default function ScreenTrust({ E }) {
             </div>
           </div>
           <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {COMPLIANCE.length === 0 && (
+              <div className="empty" style={{ padding: 12 }}>No compliance items tracked.</div>
+            )}
             {COMPLIANCE.map((c) => (
               <div key={c.t}>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 5 }}>

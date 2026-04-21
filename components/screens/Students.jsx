@@ -4,35 +4,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI, AvatarChip, StatusChip } from "../ui";
 
-const STUDENT_NAMES = [
-  ["Aanya", "Sharma"], ["Advait", "Patel"], ["Arjun", "Khan"], ["Ishaan", "Gupta"],
-  ["Kiara", "Reddy"], ["Vivaan", "Iyer"], ["Saanvi", "Desai"], ["Aarav", "Nair"],
-  ["Myra", "Joshi"], ["Vihaan", "Malhotra"], ["Diya", "Singh"], ["Krish", "Verma"],
-  ["Anaya", "Mehta"], ["Reyansh", "Chauhan"], ["Aadhya", "Rao"], ["Shaurya", "Kapoor"],
-  ["Zara", "Pillai"], ["Kabir", "Bose"], ["Navya", "Menon"], ["Atharv", "Trivedi"],
-  ["Pari", "Shetty"], ["Dhruv", "Agarwal"], ["Riya", "Banerjee"], ["Yash", "Choudhary"],
-];
-
-// Deterministic baseline roster (unchanging across reloads)
-function baselineRoster() {
-  return STUDENT_NAMES.flatMap((n, i) => {
-    const cls = (i % 8) + 1;
-    const sec = i % 2 === 0 ? "A" : "B";
-    const rr = (k) => ((i * k * 9301 + 49297) % 233280) / 233280;
-    return [{
-      id: `STN-${2000 + i}`,
-      name: `${n[0]} ${n[1]}`,
-      cls: `${cls}-${sec}`,
-      parent: `+91 98${Math.floor(rr(3) * 90000 + 10000)} ${Math.floor(rr(5) * 9000 + 1000)}`,
-      fee: rr(7) > 0.22 ? "paid" : rr(7) > 0.1 ? "pending" : "overdue",
-      attendance: Math.round(80 + rr(9) * 18),
-      transport: rr(11) > 0.4 ? ["R1", "R2", "R3"][i % 3] : "—",
-      joined: `Apr ${2020 + (i % 5)}`,
-      __seed: true,
-    }];
-  });
-}
-
 export default function ScreenStudents({ E, refresh }) {
   // ---------- state ----------
   const [classFilter, setClassFilter] = useState("All");
@@ -51,9 +22,8 @@ export default function ScreenStudents({ E, refresh }) {
   };
 
   // ---------- data ----------
-  const baseline = useMemo(baselineRoster, []);
-  const added = (E.ADDED_STUDENTS || []).map((s) => ({ ...s, __added: true }));
-  const roster = [...added, ...baseline];
+  // The roster is populated entirely from real DB rows (no mock baseline).
+  const roster = (E.ADDED_STUDENTS || []).map((s) => ({ ...s, __added: true }));
 
   const visible = roster.filter((s) => {
     if (classFilter === "All") return true;
@@ -168,7 +138,7 @@ export default function ScreenStudents({ E, refresh }) {
         <div>
           <div className="page-eyebrow">People · Roster</div>
           <div className="page-title">Students <span className="amber">at school</span></div>
-          <div className="page-sub">{roster.length} children listed · classes 1–8 · academic year 2025–26</div>
+          <div className="page-sub">{roster.length} {roster.length === 1 ? "child" : "children"} on roll · classes 1–8</div>
         </div>
         <div className="page-actions">
           <button className="btn" onClick={() => setShowImport(true)}><Icon name="upload" size={13} />Import</button>
@@ -178,10 +148,10 @@ export default function ScreenStudents({ E, refresh }) {
       </div>
 
       <div className="grid g-4" style={{ marginBottom: 14 }}>
-        <KPI label="Enrolled" value={roster.length} delta={`+${added.length || 12} this term`} deltaDir="up" sub="across 8 classes" puck="mint" puckIcon="students" />
-        <KPI label="New admissions · YTD" value={63 + added.length} delta="+18%" deltaDir="up" sub="vs last year" puck="peach" puckIcon="enquiry" />
-        <KPI label="Average attendance" value="91%" delta="+2%" deltaDir="up" sub="last 30 days" puck="cream" puckIcon="check" />
-        <KPI label="Transfer certificates" value="4" delta="2 pending" deltaDir="down" sub="processed this month" puck="rose" puckIcon="reports" />
+        <KPI label="Enrolled" value={roster.length} sub="across 8 classes" puck="mint" puckIcon="students" />
+        <KPI label="New admissions" value={roster.length} sub="this session" puck="peach" puckIcon="enquiry" />
+        <KPI label="Average attendance" value={roster.length ? `${Math.round(roster.reduce((a, s) => a + (s.attendance || 0), 0) / roster.length)}%` : "—"} sub="across all students" puck="cream" puckIcon="check" />
+        <KPI label="Transfer certificates" value={0} sub="processed this month" puck="rose" puckIcon="reports" />
       </div>
 
       <div className="card">

@@ -3,21 +3,6 @@
 import Icon from "../Icon";
 import { KPI, AvatarChip } from "../ui";
 
-const STATIC_EVENTS = [
-  { t: "08:12", who: "Rajesh Iyer", action: "Viewed Trust dashboard", meta: "From 49.37.x.x · Chrome", tone: "info" },
-  { t: "08:03", who: "Sunita Pillai", action: "Issued receipt · STN-2041 Aanya Sharma", meta: "₹18,500 · UPI · auto", tone: "ok" },
-  { t: "07:54", who: "System", action: "Ran automation · Fee reminder SMS batch", meta: "14 sent · 2 failed", tone: "accent" },
-  { t: "07:41", who: "Anita Deshmukh", action: "Marked attendance · Class 6-B", meta: "28/30 present", tone: "info" },
-  { t: "07:30", who: "Rashmi Iyer", action: "Updated fee structure · Class 7 term 2", meta: "₹21,200 → ₹22,400", tone: "warn" },
-  { t: "07:12", who: "Ramesh K.", action: "Boarding logged · Stop Whitefield Main", meta: "12/12 boarded", tone: "ok" },
-  { t: "06:58", who: "System", action: "Nightly backup complete", meta: "3.4 GB · S3 · verified", tone: "ok" },
-  { t: "Y/23:14", who: "Sanjay Mehta", action: "Added user · neha@saraswati.org", meta: "Role: Teacher", tone: "accent" },
-  { t: "Y/19:02", who: "Rajesh Iyer", action: "Approved vendor payment", meta: "₹1,24,000 · Stationers", tone: "warn" },
-  { t: "Y/17:40", who: "Parent Portal", action: "Complaint filed · CMP-0312", meta: "Nandini Verma", tone: "bad" },
-  { t: "Y/14:22", who: "System", action: "Donation recorded · Kothari Foundation", meta: "₹1,00,000 · 80G issued", tone: "ok" },
-  { t: "Y/11:08", who: "Rashmi Iyer", action: "Exported monthly board pack", meta: "PDF · 38 pages", tone: "info" },
-];
-
 function toneFor(action = "") {
   const a = action.toLowerCase();
   if (a.includes("paid") || a.includes("receipt") || a.includes("board")) return "ok";
@@ -29,15 +14,14 @@ function toneFor(action = "") {
 }
 
 export default function ScreenAudit({ E }) {
-  // Merge in live audit events from the DB (newest first), then the static history
-  const liveEvents = (E.AUDIT || []).map((a) => ({
+  // Live audit events from the DB only — newest first.
+  const events = (E.AUDIT || []).map((a) => ({
     t: a.when,
     who: a.who,
     action: a.action,
     meta: a.entity,
     tone: toneFor(a.action),
   }));
-  const events = [...liveEvents, ...STATIC_EVENTS];
 
   return (
     <div className="page">
@@ -59,10 +43,10 @@ export default function ScreenAudit({ E }) {
       </div>
 
       <div className="grid g-4" style={{ marginBottom: 18 }}>
-        <KPI label="Events · 24h" value="342" delta="+8%" deltaDir="up" sub="vs yesterday" puck="mint" puckIcon="audit" />
-        <KPI label="Financial writes" value="48" delta="0" deltaDir="" sub="₹14.2L moved" puck="peach" puckIcon="money" />
-        <KPI label="Permission changes" value="3" delta="-2" deltaDir="down" sub="2 admins · 1 teacher" puck="cream" puckIcon="shield" />
-        <KPI label="Failed attempts" value="2" delta="+1" deltaDir="up" sub="Auto-locked after 5" puck="rose" puckIcon="warning" />
+        <KPI label="Events · total" value={events.length} sub="all-time" puck="mint" puckIcon="audit" />
+        <KPI label="Financial writes" value={events.filter((e) => /paid|receipt|reminder|donation/i.test(e.action)).length} sub="fee/donation actions" puck="peach" puckIcon="money" />
+        <KPI label="Permission changes" value={events.filter((e) => /role|user/i.test(e.action)).length} sub="user/role updates" puck="cream" puckIcon="shield" />
+        <KPI label="Failed attempts" value={0} sub="locked after 5" puck="rose" puckIcon="warning" />
       </div>
 
       <div className="card">
@@ -73,6 +57,9 @@ export default function ScreenAudit({ E }) {
           </div>
         </div>
         <div>
+          {events.length === 0 && (
+            <div className="empty">No events yet. Actions across the app will appear here as you work.</div>
+          )}
           {events.map((e, i) => (
             <div key={i} className="lrow">
               <div className="mono" style={{ fontSize: 11.5, color: "var(--ink-3)", width: 54, flexShrink: 0 }}>{e.t}</div>

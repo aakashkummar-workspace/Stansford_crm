@@ -4,37 +4,34 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI, AvatarChip } from "../ui";
 
-const STUDENT_NAMES = [
-  ["Aanya", "Sharma"], ["Advait", "Patel"], ["Arjun", "Khan"], ["Ishaan", "Gupta"],
-  ["Kiara", "Reddy"], ["Vivaan", "Iyer"], ["Saanvi", "Desai"], ["Aarav", "Nair"],
-  ["Myra", "Joshi"], ["Vihaan", "Malhotra"], ["Diya", "Singh"], ["Krish", "Verma"],
-  ["Anaya", "Mehta"], ["Reyansh", "Chauhan"], ["Aadhya", "Rao"], ["Shaurya", "Kapoor"],
-  ["Zara", "Pillai"], ["Kabir", "Bose"],
-];
+// Last 8 week-start dates (Mondays) — generated relative to today.
+function buildWeeks() {
+  const out = [];
+  const today = new Date();
+  const day = today.getDay() || 7;
+  const monday = new Date(today);
+  monday.setDate(today.getDate() - (day - 1));
+  for (let i = 0; i < 8; i++) {
+    const d = new Date(monday);
+    d.setDate(monday.getDate() - i * 7);
+    const iso = d.toISOString().slice(0, 10);
+    const short = d.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+    out.push({ iso, label: `Week of ${short}`, short });
+  }
+  return out;
+}
+const WEEKS = buildWeeks();
 
-// 8 most-recent week-start dates (Mondays) ending around the demo date 2026-04-22.
-const WEEKS = [
-  { iso: "2026-04-22", label: "Week of 22 Apr", short: "22 Apr" },
-  { iso: "2026-04-15", label: "Week of 15 Apr", short: "15 Apr" },
-  { iso: "2026-04-08", label: "Week of 8 Apr", short: "8 Apr" },
-  { iso: "2026-04-01", label: "Week of 1 Apr", short: "1 Apr" },
-  { iso: "2026-03-25", label: "Week of 25 Mar", short: "25 Mar" },
-  { iso: "2026-03-18", label: "Week of 18 Mar", short: "18 Mar" },
-  { iso: "2026-03-11", label: "Week of 11 Mar", short: "11 Mar" },
-  { iso: "2026-03-04", label: "Week of 4 Mar", short: "4 Mar" },
-];
+const TODAY_ISO = new Date().toISOString().slice(0, 10);
 
-const DEMO_TODAY = "2026-04-28";
-
-// ---- sample log used as the "what teachers post by default" fallback ----
-const SAMPLE_LOG = {
-  classwork: "Fractions · Ex 3.2 pp. 54–56",
-  homework: "English comprehension · 'The Banyan Tree'",
-  topics: "Science: Food chains · Social: Mughal empire intro",
-  handwritingNote: "Clean, letters well-formed. Watch spacing on 'g' and 'y'.",
-  handwritingGrade: "A-",
-  behaviour: "Engaged in group reading. Helped peer with maths.",
-  extra: "Art club · practicing watercolour",
+const EMPTY_LOG = {
+  classwork: "",
+  homework: "",
+  topics: "",
+  handwritingNote: "",
+  handwritingGrade: "",
+  behaviour: "",
+  extra: "",
 };
 
 export default function ScreenAcademic({ E, refresh }) {
@@ -55,42 +52,53 @@ export default function ScreenAcademic({ E, refresh }) {
 
   const week = WEEKS.find((w) => w.iso === weekIso) || WEEKS[0];
 
+  // Roster is built from real students in the DB filtered by class and section.
   const roster = useMemo(() => {
-    return STUDENT_NAMES.slice(0, 18).map((n, i) => {
-      const seed = cls * 100 + i;
-      const rr = (k) => ((seed * k * 9301 + 49297) % 233280) / 233280;
-      return {
-        id: `STN-${2000 + cls * 30 + i}`,
-        name: `${n[0]} ${n[1]}`,
+    const want = `${cls}-${sec}`;
+    return (E.ADDED_STUDENTS || [])
+      .filter((s) => s.cls === want)
+      .map((s, i) => ({
+        id: s.id,
+        name: s.name,
         roll: i + 1,
-        attendance: Math.round(80 + rr(3) * 18),
-        homework: Math.round(70 + rr(5) * 28),
-        classwork: Math.round(70 + rr(7) * 28),
-        handwriting: ["A", "A", "A-", "B+", "B", "B", "A", "B+"][(i + cls) % 8],
-        behavior: ["Excellent", "Good", "Good", "Needs focus", "Good", "Excellent", "Good"][(i + cls) % 7],
-      };
-    });
-  }, [cls, sec]);
+        attendance: s.attendance ?? 0,
+        homework: 0,
+        classwork: 0,
+        handwriting: "—",
+        behavior: "—",
+      }));
+  }, [E.ADDED_STUDENTS, cls, sec]);
 
-  const student = roster[selectedStudent];
+  // Reset selection if the previously-selected index is out of range
+  useEffect(() => {
+    if (selectedStudent >= roster.length) setSelectedStudent(0);
+  }, [roster.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const heatmap = Array.from({ length: 28 }, (_, i) => {
-    const seed = student.id.charCodeAt(student.id.length - 1) * (i + 1);
-    const v = ((seed * 9301 + 49297) % 233280) / 233280;
-    if (i % 7 === 6) return { v: -1 };
-    if (v < 0.08) return { v: 0 };
-    return { v: Math.min(4, Math.floor(v * 5)) };
-  });
+  const student = roster[selectedStudent] || null;
 
-  // Pull a saved log for (student, today) if it exists; otherwise show the sample.
-  const savedLog = (E.DAILY_LOGS || []).find(
-    (l) => l.studentId === student.id && l.date === DEMO_TODAY
-  );
-  const logToShow = savedLog || { ...SAMPLE_LOG, postedBy: "Ms. Deshmukh", postedAt: null };
+  const heatmap = student
+    ? Array.from({ length: 28 }, (_, i) => {
+        const seed = student.id.charCodeAt(student.id.length - 1) * (i + 1);
+        const v = ((seed * 9301 + 49297) % 233280) / 233280;
+        if (i % 7 === 6) return { v: -1 };
+        if (v < 0.08) return { v: 0 };
+        return { v: Math.min(4, Math.floor(v * 5)) };
+      })
+    : [];
+
+  // Saved daily log for this student today, if any.
+  const savedLog = student
+    ? (E.DAILY_LOGS || []).find((l) => l.studentId === student.id && l.date === TODAY_ISO)
+    : null;
+  const logToShow = savedLog || { ...EMPTY_LOG, postedBy: "", postedAt: null };
   const isUserSaved = Boolean(savedLog);
 
   // ---------- Handlers ----------
   const submitLog = async (form) => {
+    if (!student) {
+      flash("No student selected", "bad");
+      return;
+    }
     const r = await fetch("/api/academic/log", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -99,8 +107,8 @@ export default function ScreenAcademic({ E, refresh }) {
         studentId: student.id,
         studentName: student.name,
         cls: `${cls}-${sec}`,
-        date: DEMO_TODAY,
-        postedBy: "Ms. Deshmukh",
+        date: TODAY_ISO,
+        postedBy: "Teacher",
       }),
     });
     const json = await r.json();
@@ -213,22 +221,22 @@ export default function ScreenAcademic({ E, refresh }) {
               Section {s}
             </button>
           ))}
-          <div style={{ marginLeft: "auto", fontSize: 12, color: "var(--ink-3)" }}>
-            Teacher-in-charge <span style={{ color: "var(--ink)", fontWeight: 500 }}>Ms. Anita Deshmukh</span>
-          </div>
         </div>
 
         <div className="card col-4">
           <div className="card-head">
             <div>
               <div className="card-title">Class {cls}-{sec} · {roster.length} students</div>
-              <div className="card-sub">{week.label} · today&apos;s attendance: 16/{roster.length}</div>
+              <div className="card-sub">{week.label}</div>
             </div>
           </div>
           <div style={{ maxHeight: 620, overflowY: "auto" }}>
+            {roster.length === 0 && (
+              <div className="empty">No students in Class {cls}-{sec} yet. Add some on the Students screen.</div>
+            )}
             {roster.map((s, i) => {
               const act = i === selectedStudent;
-              const hasLog = (E.DAILY_LOGS || []).some((l) => l.studentId === s.id && l.date === DEMO_TODAY);
+              const hasLog = (E.DAILY_LOGS || []).some((l) => l.studentId === s.id && l.date === TODAY_ISO);
               return (
                 <div key={s.id} onClick={() => setSelectedStudent(i)} className="lrow" style={{ cursor: "pointer", background: act ? "var(--accent-soft)" : undefined }}>
                   <div style={{ width: 28, fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-3)" }}>{String(s.roll).padStart(2, "0")}</div>
@@ -250,6 +258,17 @@ export default function ScreenAcademic({ E, refresh }) {
           </div>
         </div>
 
+        {!student && (
+          <div className="col-8">
+            <div className="card">
+              <div className="empty" style={{ padding: 60 }}>
+                Pick a class with students to see daily logs and attendance here.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {student && (
         <div className="col-8" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <div className="card">
             <div style={{ padding: "16px 18px", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
@@ -260,14 +279,10 @@ export default function ScreenAcademic({ E, refresh }) {
                 <div style={{ fontSize: 17, fontWeight: 600, letterSpacing: "-0.01em" }}>{student.name}</div>
                 <div style={{ color: "var(--ink-3)", fontSize: 12.5, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                   <span>{student.id}</span><span className="meta-dot">·</span>
-                  <span>Class {cls}-{sec} · Roll {student.roll}</span><span className="meta-dot">·</span>
-                  <span>Parent: Mr. Sharma · +91 98xxxx4251</span>
+                  <span>Class {cls}-{sec} · Roll {student.roll}</span>
                 </div>
               </div>
               <div style={{ display: "flex", gap: 6 }}>
-                <button className="btn sm" onClick={() => { window.open(`https://wa.me/919800004251`, "_blank"); flash("Opened WhatsApp"); }}>
-                  <Icon name="whatsapp" size={12} />Parent
-                </button>
                 <button className="btn sm" onClick={() => flash(`TC requested for ${student.name}`)}>
                   <Icon name="book" size={12} />TC
                 </button>
@@ -279,10 +294,10 @@ export default function ScreenAcademic({ E, refresh }) {
           </div>
 
           <div className="grid g-4">
-            <KPI label="Attendance" value={`${student.attendance}%`} delta="21/23 days" deltaDir="up" sub="this term" puck="mint" puckIcon="check" />
-            <KPI label="Homework" value={`${student.homework}%`} delta={student.homework > 85 ? "on track" : "lagging"} deltaDir={student.homework > 85 ? "up" : "down"} sub="completion" puck="peach" puckIcon="book" />
-            <KPI label="Classwork" value={`${student.classwork}%`} delta="+4" deltaDir="up" sub="vs last month" puck="cream" puckIcon="pencil" />
-            <KPI label="Handwriting" value={student.handwriting} sub="avg grade · 4 weeks" puck="sky" puckIcon="pencil" />
+            <KPI label="Attendance" value={student.attendance ? `${student.attendance}%` : "—"} sub="this term" puck="mint" puckIcon="check" />
+            <KPI label="Homework" value={student.homework ? `${student.homework}%` : "—"} sub="completion" puck="peach" puckIcon="book" />
+            <KPI label="Classwork" value={student.classwork ? `${student.classwork}%` : "—"} sub="recent" puck="cream" puckIcon="pencil" />
+            <KPI label="Handwriting" value={student.handwriting} sub="avg grade" puck="sky" puckIcon="pencil" />
           </div>
 
           <div className="grid g-12">
@@ -292,28 +307,31 @@ export default function ScreenAcademic({ E, refresh }) {
                   <div className="card-title">Today · daily log</div>
                   <div className="card-sub">
                     {isUserSaved
-                      ? `${DEMO_TODAY} · posted by ${logToShow.postedBy} ${new Date(logToShow.postedAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}`
-                      : "28 April · sample log (no entry yet — click ‘Log today’)"}
+                      ? `${TODAY_ISO} · posted by ${logToShow.postedBy} ${new Date(logToShow.postedAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}`
+                      : "No entry for today yet — click ‘Today's log’ to post one"}
                   </div>
                 </div>
                 <div className="card-actions">
                   {isUserSaved
                     ? <span className="chip ok"><span className="dot" />Submitted</span>
-                    : <span className="chip warn"><span className="dot" />Sample</span>}
+                    : <span className="chip"><span className="dot" />Empty</span>}
                 </div>
               </div>
               <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                {[
-                  { l: "Classwork", v: logToShow.classwork || SAMPLE_LOG.classwork, c: <span className="chip ok"><span className="dot" />Complete</span> },
-                  { l: "Homework", v: logToShow.homework || SAMPLE_LOG.homework, c: <span className="chip ok"><span className="dot" />Submitted on time</span> },
-                  { l: "Topics covered today", v: logToShow.topics || SAMPLE_LOG.topics, c: null },
-                  { l: "Handwriting", v: logToShow.handwritingNote || SAMPLE_LOG.handwritingNote, c: <span className="chip accent"><span className="dot" />{logToShow.handwritingGrade || SAMPLE_LOG.handwritingGrade}</span> },
-                  { l: "Behaviour", v: logToShow.behaviour || SAMPLE_LOG.behaviour, c: <span className="chip ok"><span className="dot" />Excellent</span> },
-                  { l: "Extra-curricular", v: logToShow.extra || SAMPLE_LOG.extra, c: <span className="chip info"><span className="dot" />Active</span> },
-                ].map((r, i) => (
-                  <div key={i} style={{ display: "grid", gridTemplateColumns: "130px 1fr auto", gap: 12, alignItems: "flex-start", paddingBottom: 10, borderBottom: i < 5 ? "1px solid var(--rule-2)" : "none" }}>
+                {!isUserSaved && (
+                  <div className="empty" style={{ padding: 24 }}>Nothing posted for {student.name} today.</div>
+                )}
+                {isUserSaved && [
+                  { l: "Classwork", v: logToShow.classwork, c: logToShow.classwork ? <span className="chip ok"><span className="dot" />Logged</span> : null },
+                  { l: "Homework", v: logToShow.homework, c: logToShow.homework ? <span className="chip ok"><span className="dot" />Logged</span> : null },
+                  { l: "Topics covered today", v: logToShow.topics, c: null },
+                  { l: "Handwriting", v: logToShow.handwritingNote, c: logToShow.handwritingGrade ? <span className="chip accent"><span className="dot" />{logToShow.handwritingGrade}</span> : null },
+                  { l: "Behaviour", v: logToShow.behaviour, c: null },
+                  { l: "Extra-curricular", v: logToShow.extra, c: null },
+                ].map((r, i, arr) => (
+                  <div key={i} style={{ display: "grid", gridTemplateColumns: "130px 1fr auto", gap: 12, alignItems: "flex-start", paddingBottom: 10, borderBottom: i < arr.length - 1 ? "1px solid var(--rule-2)" : "none" }}>
                     <div style={{ fontSize: 11.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.05em", paddingTop: 1 }}>{r.l}</div>
-                    <div style={{ fontSize: 13 }}>{r.v}</div>
+                    <div style={{ fontSize: 13 }}>{r.v || <span style={{ color: "var(--ink-4)" }}>—</span>}</div>
                     <div>{r.c}</div>
                   </div>
                 ))}
@@ -322,7 +340,7 @@ export default function ScreenAcademic({ E, refresh }) {
 
             <div className="card col-5">
               <div className="card-head">
-                <div><div className="card-title">28-day attendance</div><div className="card-sub">Green = present · red = absent</div></div>
+                <div><div className="card-title">28-day attendance</div><div className="card-sub">Recent attendance pattern</div></div>
               </div>
               <div className="card-body">
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 5 }}>
@@ -337,30 +355,11 @@ export default function ScreenAcademic({ E, refresh }) {
                     return <div key={i} className="hm-cell" style={{ background: color, opacity: c.v === -1 ? 0.5 : 1 }} />;
                   })}
                 </div>
-
-                <div style={{ marginTop: 16 }}>
-                  <div style={{ fontSize: 11.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>This year&apos;s achievements</div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    {[
-                      { i: "sparkles", t: "Annual Day · Lead speaker", d: "Feb 2026" },
-                      { i: "flag", t: "Inter-school quiz · 2nd place", d: "Jan 2026" },
-                      { i: "heart", t: "100% attendance award (Term 1)", d: "Dec 2025" },
-                      { i: "book", t: "Reading challenge · 24 books", d: "Nov 2025" },
-                    ].map((a, i) => (
-                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", background: "var(--card-2)", borderRadius: 7 }}>
-                        <div style={{ width: 22, height: 22, borderRadius: 6, background: "var(--accent-soft)", color: "var(--accent-2)", display: "grid", placeItems: "center" }}>
-                          <Icon name={a.i} size={12} />
-                        </div>
-                        <div style={{ flex: 1, fontSize: 12.5 }}>{a.t}</div>
-                        <div style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>{a.d}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
               </div>
             </div>
           </div>
         </div>
+        )}
       </div>
 
       {showLog && (
@@ -422,13 +421,13 @@ function WeekMenu({ value, onPick, onClose }) {
 
 function LogModal({ student, cls, existing, onClose, onSubmit }) {
   const [form, setForm] = useState({
-    classwork: existing?.classwork || SAMPLE_LOG.classwork,
-    homework: existing?.homework || SAMPLE_LOG.homework,
-    topics: existing?.topics || SAMPLE_LOG.topics,
-    handwritingNote: existing?.handwritingNote || SAMPLE_LOG.handwritingNote,
-    handwritingGrade: existing?.handwritingGrade || SAMPLE_LOG.handwritingGrade,
-    behaviour: existing?.behaviour || SAMPLE_LOG.behaviour,
-    extra: existing?.extra || SAMPLE_LOG.extra,
+    classwork: existing?.classwork || "",
+    homework: existing?.homework || "",
+    topics: existing?.topics || "",
+    handwritingNote: existing?.handwritingNote || "",
+    handwritingGrade: existing?.handwritingGrade || "A",
+    behaviour: existing?.behaviour || "",
+    extra: existing?.extra || "",
   });
   const [busy, setBusy] = useState(false);
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
@@ -455,7 +454,7 @@ function LogModal({ student, cls, existing, onClose, onSubmit }) {
         <div className="card-head">
           <div>
             <div className="card-title">{existing ? "Edit today's log" : "Log today"}</div>
-            <div className="card-sub">{student.name} · {student.id} · Class {cls} · {DEMO_TODAY}</div>
+            <div className="card-sub">{student?.name || "—"} · {student?.id || ""} · Class {cls} · {TODAY_ISO}</div>
           </div>
           <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
         </div>

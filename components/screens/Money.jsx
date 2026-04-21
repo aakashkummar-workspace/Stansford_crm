@@ -4,20 +4,18 @@ import Icon from "../Icon";
 import { KPI, LineBarChart } from "../ui";
 import { money, moneyK } from "@/lib/format";
 
-const TXNS = [
-  { id: "TXN-20412", d: "28 Apr 08:12", desc: "Fee · Aanya Sharma · STN-2041", acc: "School", cat: "Fees", m: "UPI", amt: 18500, in: true },
-  { id: "TXN-20411", d: "28 Apr 08:03", desc: "Fee · Advait Patel · STN-1987", acc: "School", cat: "Fees", m: "UPI", amt: 16800, in: true },
-  { id: "TXN-20410", d: "28 Apr 07:54", desc: "Fuel · Bus KA-01-BZ-4271", acc: "School", cat: "Transport", m: "Cash", amt: -2400, in: false },
-  { id: "TXN-20409", d: "28 Apr 07:42", desc: "Fee · Kiara Reddy · STN-2105", acc: "School", cat: "Fees", m: "Cash", amt: 21200, in: true },
-  { id: "TXN-20408", d: "27 Apr", desc: "Donation · Kothari Foundation", acc: "Trust", cat: "CSR", m: "Bank", amt: 100000, in: true },
-  { id: "TXN-20407", d: "27 Apr", desc: "Purchase · Reading primers (40)", acc: "School", cat: "Inventory", m: "Bank", amt: -14000, in: false },
-  { id: "TXN-20406", d: "26 Apr", desc: "Salary advance · Ms. Kulkarni", acc: "School", cat: "Payroll", m: "Bank", amt: -25000, in: false },
-  { id: "TXN-20405", d: "26 Apr", desc: "Electricity bill · April", acc: "School", cat: "Utilities", m: "Bank", amt: -38400, in: false },
-  { id: "TXN-20404", d: "25 Apr", desc: "Donation · Bansal Family Trust", acc: "Trust", cat: "Donation", m: "Bank", amt: 50000, in: true },
-  { id: "TXN-20403", d: "25 Apr", desc: "Craft supplies · Class 2", acc: "School", cat: "Inventory", m: "UPI", amt: -8400, in: false },
-];
-
 export default function ScreenMoney({ E }) {
+  // Build live ledger entries from real fee receipts in the DB.
+  const TXNS = (E.RECENT_FEES || []).map((f) => ({
+    id: `TXN-${f.id.replace(/[^0-9]/g, "")}`,
+    d: f.time || "",
+    desc: `Fee · ${f.name} · ${f.id}`,
+    acc: "School",
+    cat: "Fees",
+    m: f.method || "—",
+    amt: f.amount,
+    in: true,
+  }));
   return (
     <div className="page">
       <div className="page-head">
@@ -57,24 +55,31 @@ export default function ScreenMoney({ E }) {
             <div><div className="card-title">Income breakup</div><div className="card-sub">Year to date</div></div>
           </div>
           <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {[
-              { l: "Fees · tuition", v: 7640000, c: "var(--accent)" },
-              { l: "Fees · activity", v: 620000, c: "var(--accent-2)" },
-              { l: "Donations · CSR", v: 980000, c: "var(--ok)" },
-              { l: "Donations · indiv.", v: 240000, c: "var(--info)" },
-              { l: "Other income", v: 360000, c: "var(--warn)" },
-            ].map((r, i) => {
-              const pct = (r.v / 9840000) * 100;
-              return (
-                <div key={i}>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
-                    <span>{r.l}</span>
-                    <span className="mono">{moneyK(r.v)} · {pct.toFixed(1)}%</span>
+            {(() => {
+              const feesTotal = (E.RECENT_FEES || []).reduce((a, f) => a + f.amount, 0);
+              const buckets = [
+                { l: "Fees · received", v: feesTotal, c: "var(--accent)" },
+                { l: "Fees · pending", v: (E.PENDING_FEES || []).reduce((a, f) => a + f.amount, 0), c: "var(--warn)" },
+                { l: "Donations", v: 0, c: "var(--ok)" },
+                { l: "Other income", v: 0, c: "var(--info)" },
+              ];
+              const total = buckets.reduce((a, b) => a + b.v, 0) || 1;
+              if (total === 1 && feesTotal === 0) {
+                return <div className="empty" style={{ padding: 16 }}>No income posted yet.</div>;
+              }
+              return buckets.map((r, i) => {
+                const pct = (r.v / total) * 100;
+                return (
+                  <div key={i}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
+                      <span>{r.l}</span>
+                      <span className="mono">{moneyK(r.v)} · {pct.toFixed(1)}%</span>
+                    </div>
+                    <div className="bar thick"><span style={{ width: `${pct}%`, background: r.c }} /></div>
                   </div>
-                  <div className="bar thick"><span style={{ width: `${pct}%`, background: r.c }} /></div>
-                </div>
-              );
-            })}
+                );
+              });
+            })()}
           </div>
         </div>
 
@@ -93,6 +98,9 @@ export default function ScreenMoney({ E }) {
           <table className="table">
             <thead><tr><th>Txn ID</th><th>Date</th><th>Description</th><th>Account</th><th>Category</th><th>Method</th><th className="num">Amount</th><th></th></tr></thead>
             <tbody>
+              {TXNS.length === 0 && (
+                <tr><td colSpan={8} className="empty">No transactions yet. Fee receipts and other entries will appear here.</td></tr>
+              )}
               {TXNS.map((t) => (
                 <tr key={t.id}>
                   <td style={{ fontFamily: "var(--font-mono)", fontSize: 11.5, color: "var(--ink-3)" }}>{t.id}</td>

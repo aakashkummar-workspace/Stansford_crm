@@ -4,9 +4,9 @@ import { useState } from "react";
 import Icon from "../Icon";
 
 export default function ScreenSchools({ E }) {
-  const { SCHOOLS } = E;
-  const [sel, setSel] = useState(SCHOOLS[0].id);
-  const s = SCHOOLS.find((x) => x.id === sel);
+  const SCHOOLS = E.SCHOOLS || [];
+  const [sel, setSel] = useState(SCHOOLS[0]?.id || null);
+  const s = SCHOOLS.find((x) => x.id === sel) || null;
 
   return (
     <div className="page">
@@ -21,6 +21,12 @@ export default function ScreenSchools({ E }) {
           <button className="btn accent"><Icon name="plus" size={13} />Add school</button>
         </div>
       </div>
+
+      {SCHOOLS.length === 0 && (
+        <div className="card" style={{ marginBottom: 18 }}>
+          <div className="empty" style={{ padding: 60 }}>No schools added yet. Click “Add school” to start.</div>
+        </div>
+      )}
 
       <div className="grid g-3" style={{ marginBottom: 18 }}>
         {SCHOOLS.map((sc) => (
@@ -56,6 +62,7 @@ export default function ScreenSchools({ E }) {
         ))}
       </div>
 
+      {s && (
       <div className="card">
         <div className="card-head">
           <div>
@@ -70,14 +77,14 @@ export default function ScreenSchools({ E }) {
         <div className="card-body">
           <div className="grid g-4">
             {[
-              { t: "Students", v: s.students, s: "Classes 1–10" },
-              { t: "Teachers", v: Math.round(s.students / 22), s: "12:1 ratio" },
-              { t: "Fees collected", v: s.fees + "%", s: "Apr 2026" },
-              { t: "Complaints open", v: 4, s: "2 overdue" },
-              { t: "Transport routes", v: 6, s: "All running" },
-              { t: "Inventory low", v: 3, s: "Reorder due" },
-              { t: "Donors", v: 12, s: "YTD" },
-              { t: "Audit score", v: s.wellness, s: "Board Jan 26" },
+              { t: "Students", v: s.students || 0, s: "on roll" },
+              { t: "Teachers", v: 0, s: "—" },
+              { t: "Fees collected", v: (s.fees ?? 0) + "%", s: "this term" },
+              { t: "Complaints open", v: 0, s: "—" },
+              { t: "Transport routes", v: 0, s: "—" },
+              { t: "Inventory low", v: 0, s: "—" },
+              { t: "Donors", v: 0, s: "—" },
+              { t: "Audit score", v: s.wellness || "—", s: "—" },
             ].map((k) => (
               <div key={k.t} style={{ padding: "14px 0" }}>
                 <div style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 500 }}>{k.t}</div>
@@ -88,6 +95,7 @@ export default function ScreenSchools({ E }) {
           </div>
         </div>
       </div>
+      )}
     </div>
   );
 }

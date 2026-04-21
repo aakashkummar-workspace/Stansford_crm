@@ -20,14 +20,14 @@ export default function ScreenDashboard({ E }) {
     <div className="page">
       <div className="page-head">
         <div>
-          <div className="page-eyebrow">Tuesday · 28 April 2026</div>
+          <div className="page-eyebrow">{new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}</div>
           <div className="page-title">
-            {greet}, Rashmi. <span className="amber">445 students</span>
+            {greet}. <span className="amber">{KPIS.students.value || "No"} student{KPIS.students.value === 1 ? "" : "s"}</span>
             <br />
-            will walk in through your gates today.
+            on roll today.
           </div>
           <div className="page-sub">
-            Sri Saraswati Vidyalaya · Chennai · your morning is tracking steady. Three things need your attention before first bell.
+            Your operating snapshot — fees, attendance, transport.
           </div>
         </div>
         <div className="page-actions">
@@ -50,10 +50,10 @@ export default function ScreenDashboard({ E }) {
       </div>
 
       <div className="grid g-4" style={{ marginBottom: 20 }}>
-        <KPI label="Students" value={KPIS.students.value} delta={KPIS.students.delta} deltaDir="up" sub={KPIS.students.sub} puck="mint" puckIcon="students" />
-        <KPI label="Fees · April" value={moneyK(KPIS.collected.value)} delta={KPIS.collected.delta} deltaDir="up" sub="82 pending" puck="peach" puckIcon="fees" />
-        <KPI label="Attendance" value="91%" delta="+2%" deltaDir="up" sub="405 / 445 present" puck="cream" puckIcon="check" />
-        <KPI label="On-time buses" value="2/3" delta="R3 late" deltaDir="down" sub="Koramangala · 12 min" puck="sky" puckIcon="bus" />
+        <KPI label="Students" value={KPIS.students.value} sub={KPIS.students.sub || "on roll"} puck="mint" puckIcon="students" />
+        <KPI label="Fees collected" value={moneyK(KPIS.collected.value || 0)} sub="this term" puck="peach" puckIcon="fees" />
+        <KPI label="Attendance" value="—" sub="needs attendance data" puck="cream" puckIcon="check" />
+        <KPI label="Buses" value={(E.ROUTES || []).length || 0} sub={(E.ROUTES || []).length ? "running" : "no routes"} puck="sky" puckIcon="bus" />
       </div>
 
       <div className="grid g-12" style={{ marginBottom: 20 }}>
@@ -113,31 +113,11 @@ export default function ScreenDashboard({ E }) {
         <div className="card col-4 ai-brief">
           <div className="card-body" style={{ position: "relative", zIndex: 1 }}>
             <div className="eyebrow">
-              <Icon name="sparkles" size={11} /> Three things for today
+              <Icon name="sparkles" size={11} /> Briefing
             </div>
-            <div className="headline">Before first bell.</div>
-            <div className="insight-row">
-              <div className="n">01</div>
-              <div>
-                Call <b style={{ color: "#fff" }}>Nandini Verma</b> — her son Krish&apos;s bus has been late 3 days. A 90-second call fixes this.
-              </div>
-            </div>
-            <div className="insight-row">
-              <div className="n">02</div>
-              <div>Class 5 science notebooks are down to 12. Approve reorder with one tap before morning assembly.</div>
-            </div>
-            <div className="insight-row">
-              <div className="n">03</div>
-              <div>Reyansh Chauhan&apos;s fee is 7 days overdue. His parent opened the reminder but didn&apos;t pay.</div>
-            </div>
-            <div style={{ marginTop: 14, display: "flex", gap: 8 }}>
-              <button className="btn sm" style={{ background: "rgba(255,255,255,0.1)", borderColor: "rgba(255,255,255,0.15)", color: "#fff" }}>
-                <Icon name="phone" size={11} />
-                Start calls
-              </button>
-              <button className="btn sm ghost" style={{ color: "rgba(255,255,255,0.7)" }}>
-                Dismiss
-              </button>
+            <div className="headline">Today's focus.</div>
+            <div style={{ color: "rgba(255,255,255,0.6)", fontSize: 12.5, lineHeight: 1.5 }}>
+              Insights will appear here once there is enough activity to summarise — pending fees, late buses, low stock.
             </div>
           </div>
         </div>
@@ -156,6 +136,9 @@ export default function ScreenDashboard({ E }) {
             </span>
           </div>
           <div>
+            {ROUTES.length === 0 && (
+              <div className="empty">No transport routes yet.</div>
+            )}
             {ROUTES.map((r) => {
               const boarded = r.stops.reduce((a, s) => a + s.boarded, 0);
               const total = r.stops.reduce((a, s) => a + s.cap, 0);
@@ -217,7 +200,9 @@ export default function ScreenDashboard({ E }) {
             <div style={{ display: "flex", justifyContent: "space-between", padding: "12px 12px 4px", borderTop: "1px solid var(--rule-2)", marginTop: 6 }}>
               <div style={{ fontSize: 12, color: "var(--ink-3)" }}>Avg collection</div>
               <div className="mono" style={{ fontSize: 13, fontWeight: 500 }}>
-                {Math.round((CLASS_STRENGTH.reduce((a, c) => a + c.paid, 0) / CLASS_STRENGTH.reduce((a, c) => a + c.total, 0)) * 100)}%
+                {CLASS_STRENGTH.length && CLASS_STRENGTH.reduce((a, c) => a + c.total, 0)
+                  ? Math.round((CLASS_STRENGTH.reduce((a, c) => a + c.paid, 0) / CLASS_STRENGTH.reduce((a, c) => a + c.total, 0)) * 100) + "%"
+                  : "—"}
               </div>
             </div>
           </div>
@@ -268,6 +253,9 @@ export default function ScreenDashboard({ E }) {
               </tr>
             </thead>
             <tbody>
+              {RECENT_FEES.length === 0 && (
+                <tr><td colSpan={4} className="empty">No fees collected yet.</td></tr>
+              )}
               {RECENT_FEES.slice(0, 6).map((f) => (
                 <tr key={f.id}>
                   <td>
@@ -294,7 +282,7 @@ export default function ScreenDashboard({ E }) {
           <div className="card-head">
             <div>
               <div className="card-title">Pending fees</div>
-              <div className="card-sub">82 students · ₹12.84L outstanding</div>
+              <div className="card-sub">{PENDING_FEES.length} {PENDING_FEES.length === 1 ? "student" : "students"} · {moneyK(PENDING_FEES.reduce((a, f) => a + f.amount, 0))} outstanding</div>
             </div>
             <button className="btn sm">
               <Icon name="send" size={12} />
@@ -310,6 +298,9 @@ export default function ScreenDashboard({ E }) {
               </tr>
             </thead>
             <tbody>
+              {PENDING_FEES.length === 0 && (
+                <tr><td colSpan={3} className="empty">No pending fees.</td></tr>
+              )}
               {PENDING_FEES.map((f) => (
                 <tr key={f.id}>
                   <td>
@@ -347,6 +338,9 @@ export default function ScreenDashboard({ E }) {
             </div>
           </div>
           <div className="activity">
+            {ACTIVITIES.length === 0 && (
+              <div className="empty">No activity yet.</div>
+            )}
             {ACTIVITIES.slice(0, 7).map((a, i) => (
               <div key={i} className="act-item">
                 <div className={`act-ico ${a.tone === "accent" ? "accent" : a.tone}`}>

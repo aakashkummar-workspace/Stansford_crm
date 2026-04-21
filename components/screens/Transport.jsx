@@ -42,10 +42,10 @@ export default function ScreenTransport({ E, refresh }) {
       </div>
 
       <div className="grid g-4" style={{ marginBottom: 14 }}>
-        <KPI label="Students boarded" value={`${totalBoarded}`} unit={`/${totalCap}`} delta={`${totalCap ? Math.round((totalBoarded / totalCap) * 100) : 0}%`} deltaDir="up" sub="morning run" puck="mint" puckIcon="check" />
-        <KPI label="Absent today" value={totalAbsent} delta="auto-SMS sent" deltaDir="down" sub="to parents" puck="rose" puckIcon="warning" />
-        <KPI label="Buses running" value="3" delta="1 delayed" deltaDir="down" sub="Route R3 · 12 min late" puck="peach" puckIcon="bus" />
-        <KPI label="Avg on-time %" value="92%" delta="+3%" deltaDir="up" sub="last 30 days" puck="cream" puckIcon="trending" />
+        <KPI label="Students boarded" value={totalCap ? `${totalBoarded}` : "—"} unit={totalCap ? `/${totalCap}` : ""} sub="morning run" puck="mint" puckIcon="check" />
+        <KPI label="Absent today" value={totalAbsent} sub="across all routes" puck="rose" puckIcon="warning" />
+        <KPI label="Buses running" value={routes.length} sub={routes.length ? `${routes.filter((r) => r.status === "delayed").length} delayed` : "no routes yet"} puck="peach" puckIcon="bus" />
+        <KPI label="Avg on-time %" value="—" sub="needs run history" puck="cream" puckIcon="trending" />
       </div>
 
       <div className="grid g-12">
@@ -54,6 +54,9 @@ export default function ScreenTransport({ E, refresh }) {
             <div><div className="card-title">Routes</div><div className="card-sub">{routes.length} active · morning run</div></div>
           </div>
           <div>
+            {routes.length === 0 && (
+              <div className="empty">No transport routes yet. Click “Add route” to set one up.</div>
+            )}
             {routes.map((r, i) => {
               const boarded = r.stops.reduce((a, s) => a + s.boarded, 0);
               const cap = r.stops.reduce((a, s) => a + s.cap, 0);
@@ -85,6 +88,11 @@ export default function ScreenTransport({ E, refresh }) {
           </div>
         </div>
 
+        {!route ? (
+          <div className="col-8">
+            <div className="card"><div className="empty" style={{ padding: 60 }}>Add a route to see live boarding here.</div></div>
+          </div>
+        ) : (
         <div className="col-8" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <div className="card">
             <div style={{ padding: "14px 18px", display: "flex", alignItems: "center", gap: 14, borderBottom: "1px solid var(--rule)", flexWrap: "wrap" }}>
@@ -188,13 +196,10 @@ export default function ScreenTransport({ E, refresh }) {
               <table className="table">
                 <thead><tr><th>Student</th><th>Class</th><th>Stop</th><th>Route</th><th>Parent notified</th></tr></thead>
                 <tbody>
-                  {[
-                    { n: "Diya Singh", c: "6-A", s: "ITPL Junction", r: "R1", t: "07:25" },
-                    { n: "Krish Verma", c: "4-A", s: "Brookefield Gate", r: "R1", t: "07:32" },
-                    { n: "Shaurya Kapoor", c: "7-B", s: "HSR Sector 6", r: "R2", t: "07:19" },
-                    { n: "Kabir Bose", c: "2-B", s: "Agara Lake", r: "R2", t: "07:27" },
-                    { n: "Anaya Mehta", c: "5-A", s: "Domlur Bridge", r: "R3", t: "07:16" },
-                  ].map((a, i) => (
+                  {totalAbsent === 0 && (
+                    <tr><td colSpan={5} className="empty">No absentees logged today.</td></tr>
+                  )}
+                  {[].map((a, i) => (
                     <tr key={i}>
                       <td>
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -215,6 +220,7 @@ export default function ScreenTransport({ E, refresh }) {
             </div>
           </div>
         </div>
+        )}
       </div>
     </div>
   );

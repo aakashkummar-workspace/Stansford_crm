@@ -20,10 +20,10 @@ export default function ScreenStaff({ E }) {
       </div>
 
       <div className="grid g-4" style={{ marginBottom: 14 }}>
-        <KPI label="Total staff" value="38" delta="+2" deltaDir="up" sub="32 teachers · 6 ops" puck="mint" puckIcon="staff" />
-        <KPI label="Interns" value="7" delta="4 active" deltaDir="up" sub="this semester" puck="peach" puckIcon="users" />
-        <KPI label="Avg performance" value="86" delta="+3 pts" deltaDir="up" sub="composite score" puck="cream" puckIcon="trending" />
-        <KPI label="Low performers" value="1" delta="auto-flagged" deltaDir="down" sub="under review" puck="rose" puckIcon="warning" />
+        <KPI label="Total staff" value={staff.length} sub="all roles" puck="mint" puckIcon="staff" />
+        <KPI label="Interns" value={staff.filter((s) => /intern/i.test(s.role)).length} sub="active" puck="peach" puckIcon="users" />
+        <KPI label="Avg performance" value={staff.length ? Math.round(staff.reduce((a, s) => a + (s.score || 0), 0) / staff.length) : "—"} sub="composite score" puck="cream" puckIcon="trending" />
+        <KPI label="Low performers" value={staff.filter((s) => s.status === "low").length} sub="needs review" puck="rose" puckIcon="warning" />
       </div>
 
       <div className="grid g-12">
@@ -43,6 +43,9 @@ export default function ScreenStaff({ E }) {
             <table className="table">
               <thead><tr><th>#</th><th>Name</th><th>Role</th><th>Attendance</th><th>Tasks</th><th>Score</th><th>Status</th></tr></thead>
               <tbody>
+                {staff.length === 0 && (
+                  <tr><td colSpan={7} className="empty">No staff added yet. Click “Add staff” to start.</td></tr>
+                )}
                 {staff.map((s, i) => (
                   <tr key={s.name}>
                     <td style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-4)" }}>{String(i + 1).padStart(2, "0")}</td>
@@ -84,68 +87,17 @@ export default function ScreenStaff({ E }) {
         <div className="col-4" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <div className="card">
             <div className="card-head"><div><div className="card-title">Today&apos;s attendance</div></div></div>
-            <div className="card-body" style={{ display: "flex", gap: 18, alignItems: "center" }}>
-              <Ring pct={92} label="35/38" sub="checked in" color="var(--ok)" size={92} stroke={10} />
-              <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6, fontSize: 12 }}>
-                <div style={{ display: "flex", justifyContent: "space-between" }}><span>On time</span><span className="mono">32</span></div>
-                <div style={{ display: "flex", justifyContent: "space-between" }}><span>Late</span><span className="mono" style={{ color: "var(--warn)" }}>3</span></div>
-                <div style={{ display: "flex", justifyContent: "space-between" }}><span>On leave</span><span className="mono" style={{ color: "var(--ink-3)" }}>2</span></div>
-                <div style={{ display: "flex", justifyContent: "space-between" }}><span>Absent</span><span className="mono">1</span></div>
-              </div>
-            </div>
+            <div className="empty">Mark staff in/out to see today's check-in summary.</div>
           </div>
 
           <div className="card">
-            <div className="card-head">
-              <div><div className="card-title">Intern rotations</div><div className="card-sub">4 active · 3 completed</div></div>
-            </div>
-            <div>
-              {[
-                { n: "Kavya N.", cls: "Class 4", mentor: "Neha Kulkarni", weeks: 6, total: 12 },
-                { n: "Rohit M.", cls: "Class 2", mentor: "Arun Joshi", weeks: 3, total: 12 },
-                { n: "Swati B.", cls: "Class 7", mentor: "Vikram Rao", weeks: 10, total: 12 },
-                { n: "Tanvi R.", cls: "Class 1", mentor: "Priya Shah", weeks: 2, total: 12 },
-              ].map((it, i) => (
-                <div key={i} className="lrow">
-                  <AvatarChip initials={it.n.split(" ").map((n) => n[0]).join("")} />
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 12.5, fontWeight: 500 }}>{it.n} · <span style={{ color: "var(--ink-3)", fontWeight: 400 }}>{it.cls}</span></div>
-                    <div className="s">Mentor: {it.mentor}</div>
-                  </div>
-                  <div style={{ width: 60 }}>
-                    <div className="bar"><span style={{ width: `${(it.weeks / it.total) * 100}%` }} /></div>
-                    <div className="mono" style={{ fontSize: 10, color: "var(--ink-3)", textAlign: "right", marginTop: 2 }}>{it.weeks}/{it.total}w</div>
-                  </div>
-                </div>
-              ))}
-            </div>
+            <div className="card-head"><div><div className="card-title">Intern rotations</div></div></div>
+            <div className="empty">No intern rotations set up yet.</div>
           </div>
 
           <div className="card">
             <div className="card-head"><div><div className="card-title">Alerts</div></div></div>
-            <div>
-              <div className="lrow">
-                <div className="act-ico bad"><Icon name="warning" size={13} /></div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 12.5 }}>Arun Joshi flagged</div>
-                  <div className="s">Attendance dropped below 80% · 14 days</div>
-                </div>
-              </div>
-              <div className="lrow">
-                <div className="act-ico warn"><Icon name="clock" size={13} /></div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 12.5 }}>3 contracts expiring</div>
-                  <div className="s">HR auto-reminder queued for next week</div>
-                </div>
-              </div>
-              <div className="lrow">
-                <div className="act-ico info"><Icon name="calendar" size={13} /></div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 12.5 }}>Salary run · Apr 30</div>
-                  <div className="s">₹12,48,000 · 38 staff · pre-approved</div>
-                </div>
-              </div>
-            </div>
+            <div className="empty">No alerts.</div>
           </div>
         </div>
       </div>

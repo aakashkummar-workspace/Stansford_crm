@@ -51,7 +51,14 @@ export const Sparkline = ({ data, w = 100, h = 28, stroke = "var(--accent-2)", f
   );
 };
 
+const ChartEmpty = ({ h }) => (
+  <div style={{ height: h || 200, display: "grid", placeItems: "center", color: "var(--ink-4)", fontSize: 12.5 }}>
+    No data yet
+  </div>
+);
+
 export const LineBarChart = ({ data, w, h, lineKeys = ["inc"], barKey, xKey = "w", palette }) => {
+  if (!data || data.length === 0) return <ChartEmpty h={h} />;
   const pad = { t: 16, r: 16, b: 22, l: 36 };
   const iw = w - pad.l - pad.r;
   const ih = h - pad.t - pad.b;
@@ -99,6 +106,7 @@ export const LineBarChart = ({ data, w, h, lineKeys = ["inc"], barKey, xKey = "w
 };
 
 export const BarChart = ({ data, w, h, xKey, yKey, yKey2, labelFmt, palette = ["var(--accent)", "var(--rule-2)"] }) => {
+  if (!data || data.length === 0) return <ChartEmpty h={h} />;
   const pad = { t: 12, r: 8, b: 28, l: 8 };
   const iw = w - pad.l - pad.r;
   const ih = h - pad.t - pad.b;

@@ -7,7 +7,7 @@ export const NAV_BY_ROLE = {
   super: [
     { section: "Trust" },
     { id: "trust", label: "Overview", icon: "dashboard" },
-    { id: "schools", label: "Schools", icon: "school", badge: "3" },
+    { id: "schools", label: "Schools", icon: "school" },
     { id: "money", label: "Finance", icon: "money" },
     { id: "donors", label: "Trust & Donors", icon: "donors" },
     { section: "Governance" },
@@ -21,16 +21,16 @@ export const NAV_BY_ROLE = {
     { id: "money", label: "Money", icon: "money" },
     { id: "fees", label: "Fees & UPI", icon: "fees" },
     { section: "People" },
-    { id: "students", label: "Students", icon: "students", badge: "445" },
+    { id: "students", label: "Students", icon: "students" },
     { id: "academic", label: "Academic", icon: "academic" },
-    { id: "staff", label: "Staff", icon: "staff", badge: "38" },
+    { id: "staff", label: "Staff", icon: "staff" },
     { section: "Operations" },
-    { id: "transport", label: "Transport", icon: "bus", live: true },
-    { id: "inventory", label: "Inventory", icon: "inventory", badge: "4", badgeAlert: true },
+    { id: "transport", label: "Transport", icon: "bus" },
+    { id: "inventory", label: "Inventory", icon: "inventory" },
     { id: "communication", label: "Communication", icon: "megaphone" },
     { section: "CRM" },
-    { id: "enquiries", label: "Admissions", icon: "enquiry", badge: "24" },
-    { id: "complaints", label: "Complaints", icon: "complaint", badge: "6", badgeAlert: true },
+    { id: "enquiries", label: "Admissions", icon: "enquiry" },
+    { id: "complaints", label: "Complaints", icon: "complaint" },
     { id: "donors", label: "Donors", icon: "donors" },
     { section: "System" },
     { id: "automation", label: "Automation", icon: "automation" },
@@ -65,7 +65,7 @@ export default function Sidebar({ current, setCurrent, role }) {
           <div className="b1">
             Vidyalaya<span className="num">360</span>
           </div>
-          <div className="b2">Saraswati Trust · 3</div>
+          <div className="b2">School CRM</div>
         </div>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 1, overflowY: "auto", marginTop: 4, flex: 1 }}>
@@ -88,9 +88,9 @@ export default function Sidebar({ current, setCurrent, role }) {
         })}
       </div>
       <div className="side-foot">
-        <AvatarChip initials="RI" />
+        <AvatarChip initials="—" />
         <div style={{ minWidth: 0, flex: 1 }} className="side-lbl">
-          <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>Rajesh Iyer</div>
+          <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>Signed in</div>
           <div style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "capitalize" }}>{role === "super" ? "Super Admin" : role}</div>
         </div>
       </div>

@@ -33,10 +33,10 @@ export default function ScreenComplaints({ E, refresh }) {
       </div>
 
       <div className="grid g-4" style={{ marginBottom: 14 }}>
-        <KPI label="Open" value={complaints.filter((c) => c.status === "Open").length} delta="+2" deltaDir="up" sub="needs action" puck="rose" puckIcon="warning" />
-        <KPI label="In progress" value={complaints.filter((c) => c.status === "In Progress").length} delta="being handled" deltaDir="up" sub="across desks" puck="peach" puckIcon="clock" />
-        <KPI label="Resolved · month" value="14" delta="avg 1.4 days" deltaDir="up" sub="resolution time" puck="mint" puckIcon="check" />
-        <KPI label="Parent CSAT" value="4.6" unit="/5" delta="+0.2" deltaDir="up" sub="after resolution" puck="cream" puckIcon="heart" />
+        <KPI label="Open" value={complaints.filter((c) => c.status === "Open").length} sub="needs action" puck="rose" puckIcon="warning" />
+        <KPI label="In progress" value={complaints.filter((c) => c.status === "In Progress").length} sub="being handled" puck="peach" puckIcon="clock" />
+        <KPI label="Resolved" value={complaints.filter((c) => c.status === "Resolved").length} sub="closed out" puck="mint" puckIcon="check" />
+        <KPI label="Parent CSAT" value="—" sub="needs survey data" puck="cream" puckIcon="heart" />
       </div>
 
       <div className="card">
@@ -54,6 +54,9 @@ export default function ScreenComplaints({ E, refresh }) {
           <table className="table">
             <thead><tr><th>ID</th><th>Student · Parent</th><th>Issue</th><th>Assigned</th><th>Date</th><th>Status</th><th></th></tr></thead>
             <tbody>
+              {filtered.length === 0 && (
+                <tr><td colSpan={7} className="empty">No complaints match this filter.</td></tr>
+              )}
               {filtered.map((c) => (
                 <tr key={c.id}>
                   <td style={{ fontFamily: "var(--font-mono)", fontSize: 11.5, color: "var(--ink-3)" }}>{c.id}</td>
