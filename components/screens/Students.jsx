@@ -14,6 +14,8 @@ export default function ScreenStudents({ E, refresh }) {
   const [picked, setPicked] = useState(new Set());
   const [openMenuFor, setOpenMenuFor] = useState(null);
   const [menuAnchor, setMenuAnchor] = useState(null);
+  const [view, setView] = useState("active"); // 'active' | 'archived'
+  const [confirmArchive, setConfirmArchive] = useState(null); // student awaiting confirmation
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
   const flash = (msg, tone = "ok") => {
@@ -24,7 +26,9 @@ export default function ScreenStudents({ E, refresh }) {
 
   // ---------- data ----------
   // The roster is populated entirely from real DB rows (no mock baseline).
-  const roster = (E.ADDED_STUDENTS || []).map((s) => ({ ...s, __added: true }));
+  const activeRoster   = (E.ADDED_STUDENTS    || []).map((s) => ({ ...s, __added: true, __status: "active" }));
+  const archivedRoster = (E.ARCHIVED_STUDENTS || []).map((s) => ({ ...s, __added: true, __status: "archived" }));
+  const roster = view === "archived" ? archivedRoster : activeRoster;
 
   const visible = roster.filter((s) => {
     if (classFilter === "All") return true;
@@ -124,18 +128,29 @@ export default function ScreenStudents({ E, refresh }) {
     }
   };
 
-  const removeStudent = async (s) => {
-    if (!s.__added) {
-      flash("Built-in roster rows cannot be removed (only admissions added in this session)", "bad");
-      return;
-    }
+  // Soft-delete: archives the student. All their fee receipts and daily logs
+  // are preserved. The pending fee (if any) is dropped because we no longer
+  // expect to collect it.
+  const archiveStudent = async (s) => {
     const { ok, json } = await safeFetch("/api/students", {
       method: "DELETE",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ id: s.id }),
     });
-    if (ok) { flash(`Removed ${s.name}`); await refresh?.(); }
-    else flash(json.error || "Remove failed", "bad");
+    if (ok) { flash(`Withdrew ${s.name} · history preserved`); await refresh?.(); }
+    else flash(json.error || "Withdraw failed", "bad");
+    setOpenMenuFor(null);
+    setConfirmArchive(null);
+  };
+
+  const restoreStudent = async (s) => {
+    const { ok, json } = await safeFetch("/api/students/restore", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: s.id }),
+    });
+    if (ok) { flash(`Restored ${s.name}`); await refresh?.(); }
+    else flash(json.error || "Restore failed", "bad");
     setOpenMenuFor(null);
   };
 
@@ -166,8 +181,23 @@ export default function ScreenStudents({ E, refresh }) {
 
       <div className="card">
         <div className="card-head">
-          <div><div className="card-title">All students</div><div className="card-sub">Auto-assigned IDs · auto fee schedule</div></div>
+          <div>
+            <div className="card-title">{view === "archived" ? "Archived students" : "All students"}</div>
+            <div className="card-sub">
+              {view === "archived"
+                ? `${archivedRoster.length} withdrawn · records preserved`
+                : "Auto-assigned IDs · auto fee schedule"}
+            </div>
+          </div>
           <div className="card-actions">
+            <div className="segmented">
+              <button className={view === "active" ? "active" : ""} onClick={() => setView("active")}>
+                Active · {activeRoster.length}
+              </button>
+              <button className={view === "archived" ? "active" : ""} onClick={() => setView("archived")}>
+                Archived · {archivedRoster.length}
+              </button>
+            </div>
             <div className="segmented" style={{ flexWrap: "wrap" }}>
               {["All", "Class 1", "Class 2", "Class 3", "Class 4", "Class 5", "Class 6", "Class 7", "Class 8"].map((f) => (
                 <button key={f} className={classFilter === f ? "active" : ""} onClick={() => setClassFilter(f)}>{f}</button>
@@ -283,7 +313,8 @@ export default function ScreenStudents({ E, refresh }) {
                         onView={() => { setProfileOf(s); setOpenMenuFor(null); }}
                         onTC={() => { flash(`TC requested for ${s.name} · queued`); setOpenMenuFor(null); }}
                         onMessage={() => { window.open(`https://wa.me/${s.parent.replace(/[^0-9]/g, "")}`, "_blank"); flash("Opened WhatsApp"); setOpenMenuFor(null); }}
-                        onRemove={() => removeStudent(s)}
+                        onWithdraw={() => { setConfirmArchive(s); setOpenMenuFor(null); }}
+                        onRestore={() => restoreStudent(s)}
                       />
                     )}
                   </td>
@@ -294,6 +325,13 @@ export default function ScreenStudents({ E, refresh }) {
         </div>
       </div>
 
+      {confirmArchive && (
+        <ConfirmArchive
+          student={confirmArchive}
+          onCancel={() => setConfirmArchive(null)}
+          onConfirm={() => archiveStudent(confirmArchive)}
+        />
+      )}
       {showAdmission && <AdmissionModal onClose={() => setShowAdmission(false)} onSubmit={submitAdmission} />}
       {showImport && <ImportModal onClose={() => setShowImport(false)} onFile={handleImportFile} />}
       {profileOf && (
@@ -353,7 +391,7 @@ function FilterMenu({ value, onPick, onClose }) {
   );
 }
 
-function RowMenu({ student, anchor, onClose, onView, onTC, onMessage, onRemove }) {
+function RowMenu({ student, anchor, onClose, onView, onTC, onMessage, onWithdraw, onRestore }) {
   // Close on outside click + on scroll/resize (the menu is fixed-positioned
   // relative to the trigger, so anything that moves the trigger should close it).
   useEffect(() => {
@@ -371,11 +409,14 @@ function RowMenu({ student, anchor, onClose, onView, onTC, onMessage, onRemove }
     };
   }, [onClose]);
 
+  const isArchived = student.__status === "archived";
   const items = [
     { label: "View profile", icon: "user", action: onView },
-    { label: "Message parent", icon: "whatsapp", action: onMessage },
+    { label: "Message parent", icon: "whatsapp", action: onMessage, disabled: isArchived },
     { label: "Issue TC", icon: "book", action: onTC },
-    { label: student.__added ? "Remove" : "Remove (locked)", icon: "x", action: onRemove, danger: true, disabled: !student.__added },
+    isArchived
+      ? { label: "Restore admission", icon: "refresh", action: onRestore }
+      : { label: "Withdraw…", icon: "x", action: onWithdraw, danger: true },
   ];
 
   // Position the menu so its right edge aligns with the trigger's right edge
@@ -636,6 +677,55 @@ function ImportModal({ onClose, onFile }) {
         </div>
       </div>
     </ModalShell>
+  );
+}
+
+function ConfirmArchive({ student, onCancel, onConfirm }) {
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onCancel(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+  const submit = async () => {
+    setBusy(true);
+    try { await onConfirm(); } finally { setBusy(false); }
+  };
+  return (
+    <div onClick={onCancel} style={{
+      position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)",
+      display: "grid", placeItems: "center", zIndex: 250, padding: 16,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 460 }}>
+        <div className="card-head">
+          <div>
+            <div className="card-title">Withdraw {student.name}?</div>
+            <div className="card-sub">{student.id} · Class {student.cls}</div>
+          </div>
+          <button className="icon-btn" onClick={onCancel}><Icon name="x" size={14} /></button>
+        </div>
+        <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ fontSize: 13, lineHeight: 1.55 }}>
+            They&apos;ll move to the <b>Archived</b> list and stop appearing in the active roster, Fees, and Academic.
+          </div>
+          <div style={{ background: "var(--card-2)", border: "1px solid var(--rule)", borderRadius: 9, padding: 12, fontSize: 12, color: "var(--ink-2)", lineHeight: 1.6 }}>
+            <div style={{ fontWeight: 500, color: "var(--ink)", marginBottom: 4 }}>Records that stay forever:</div>
+            <div>• Paid fee receipts (Money ledger)</div>
+            <div>• Daily logs (academic record)</div>
+            <div>• Audit log entries</div>
+            <div style={{ marginTop: 8, fontWeight: 500, color: "var(--ink)" }}>Cancelled:</div>
+            <div>• Any uncollected pending fee for this term</div>
+            <div style={{ marginTop: 8, color: "var(--ink-3)" }}>You can restore them any time from the Archived tab.</div>
+          </div>
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
+            <button className="btn ghost" onClick={onCancel} disabled={busy}>Cancel</button>
+            <button className="btn" style={{ background: "var(--bad)", borderColor: "var(--bad)", color: "#fff" }} onClick={submit} disabled={busy}>
+              <Icon name="x" size={13} />{busy ? "Withdrawing…" : "Withdraw student"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 

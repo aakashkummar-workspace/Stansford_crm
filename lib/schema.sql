@@ -3,6 +3,9 @@
 -- Re-runnable: every statement is `if not exists`.
 
 -- ---------- students ----------
+-- Production rule: never hard-delete a student. The "Withdraw" action sets
+-- status='archived' and stamps archived_at; their financial history (paid
+-- receipts, audit log) is preserved forever. Restoring just clears the flag.
 create table if not exists students (
   id text primary key,
   name text not null,
@@ -12,8 +15,15 @@ create table if not exists students (
   attendance int default 0,
   transport text default '—',
   joined text,
+  status text default 'active',
+  archived_at timestamptz,
   created_at timestamptz default now()
 );
+
+-- For installs that ran an earlier schema, add the new columns idempotently.
+alter table students add column if not exists status text default 'active';
+alter table students add column if not exists archived_at timestamptz;
+create index if not exists idx_students_status on students (status);
 
 -- ---------- pending fees ----------
 create table if not exists pending_fees (

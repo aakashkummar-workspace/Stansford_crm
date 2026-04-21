@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { addStudent, removeStudent, addPendingFee, logAudit } from "@/lib/db";
+import { addStudent, archiveStudent, addPendingFee, logAudit } from "@/lib/db";
 
 const monthYear = () =>
   new Date().toLocaleDateString("en-IN", { month: "short", year: "numeric" });
@@ -65,11 +65,13 @@ export async function POST(req) {
   return NextResponse.json({ ok: true, student });
 }
 
+// "Withdraw" — soft-delete. Student record + all financial history are kept;
+// only the active flag flips and any uncollected pending fee is dropped.
 export async function DELETE(req) {
   const { id } = await req.json();
   if (!id) return NextResponse.json({ ok: false, error: "id required" }, { status: 400 });
-  const removed = await removeStudent(id);
-  if (!removed) return NextResponse.json({ ok: false, error: "Not found (or built-in roster row)" }, { status: 404 });
-  await logAudit("Rashmi Iyer", "Removed student", `${removed.id} ${removed.name}`);
-  return NextResponse.json({ ok: true });
+  const archived = await archiveStudent(id);
+  if (!archived) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 });
+  await logAudit("Rashmi Iyer", "Archived student", `${archived.id} ${archived.name} · history kept`);
+  return NextResponse.json({ ok: true, student: archived });
 }
