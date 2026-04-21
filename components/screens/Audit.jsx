@@ -18,6 +18,16 @@ const STATIC_EVENTS = [
   { t: "Y/11:08", who: "Rashmi Iyer", action: "Exported monthly board pack", meta: "PDF · 38 pages", tone: "info" },
 ];
 
+function toneFor(action = "") {
+  const a = action.toLowerCase();
+  if (a.includes("paid") || a.includes("receipt") || a.includes("board")) return "ok";
+  if (a.includes("resolved") || a.includes("converted")) return "ok";
+  if (a.includes("absent") || a.includes("complaint")) return "bad";
+  if (a.includes("progress") || a.includes("contacted") || a.includes("late")) return "warn";
+  if (a.includes("created") || a.includes("enquiry") || a.includes("viewed")) return "info";
+  return "accent";
+}
+
 export default function ScreenAudit({ E }) {
   // Merge in live audit events from the DB (newest first), then the static history
   const liveEvents = (E.AUDIT || []).map((a) => ({
@@ -25,7 +35,7 @@ export default function ScreenAudit({ E }) {
     who: a.who,
     action: a.action,
     meta: a.entity,
-    tone: "accent",
+    tone: toneFor(a.action),
   }));
   const events = [...liveEvents, ...STATIC_EVENTS];
 

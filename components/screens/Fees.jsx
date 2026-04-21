@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Icon from "../Icon";
 import { AvatarChip, FakeQR, StatusChip } from "../ui";
 import { money, moneyK } from "@/lib/format";
@@ -10,6 +10,17 @@ export default function ScreenFees({ E, refresh }) {
   const [stage, setStage] = useState("pick");
   const [method, setMethod] = useState("UPI");
   const [busy, setBusy] = useState(false);
+
+  // If the data refreshes and our selection is now paid (moved to RECENT_FEES) and the
+  // user is back at the "pick" stage, advance to the next pending fee so "Collect" works.
+  useEffect(() => {
+    if (stage !== "pick" || !selected) return;
+    const stillPending = E.PENDING_FEES.find((f) => f.id === selected.id);
+    if (!stillPending) {
+      const next = E.PENDING_FEES[0];
+      if (next) setSelected(next);
+    }
+  }, [E.PENDING_FEES, stage]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const all = [
     ...E.RECENT_FEES.map((f) => ({ ...f, status: "paid" })),

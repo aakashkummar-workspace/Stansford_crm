@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Icon from "../Icon";
 import { KPI, BarChart, LineBarChart, Ring, AvatarChip } from "../ui";
 import { money, moneyK } from "@/lib/format";
@@ -8,8 +8,13 @@ import { money, moneyK } from "@/lib/format";
 export default function ScreenDashboard({ E }) {
   const { KPIS, CLASS_STRENGTH, RECENT_FEES, PENDING_FEES, ACTIVITIES, ROUTES, INCOME_SERIES } = E;
   const [range, setRange] = useState("12W");
-  const hour = new Date().getHours();
-  const greet = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
+  // Greeting uses the client clock; computed after mount to avoid SSR/CSR hydration mismatch
+  // when the server timezone differs from the user's.
+  const [greet, setGreet] = useState("Good morning");
+  useEffect(() => {
+    const h = new Date().getHours();
+    setGreet(h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening");
+  }, []);
 
   return (
     <div className="page">
