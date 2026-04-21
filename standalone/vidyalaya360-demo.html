@@ -1,4 +1,26 @@
 <!doctype html>
+<!--
+  ═══════════════════════════════════════════════════════════════════════════════
+
+    VIDYALAYA360 · STANSFORD INTERNATIONAL HR.SEC.SCHOOL
+    Self-contained demo build — open this file in any modern browser.
+
+    HOW IT WORKS
+      · Fonts load from Google Fonts (one network request on first open).
+      · React 18 + Babel-standalone load from unpkg (transforms the JSX
+        below in the browser — takes ~1–2 s on first load, then caches).
+      · All application code is inlined in the Babel script block near the
+        bottom of this file. Scroll down to read it section by section.
+      · Data persists to localStorage ('vidyalaya360.db'). Open DevTools →
+        Application → Local Storage to inspect / clear.
+
+    NOT IN THIS FILE
+      · No server, no API routes, no Supabase — this is the portable demo.
+      · For the fullstack (Next.js + Supabase) version see the repository:
+        github.com/aakashkummar-workspace/Stansford_crm
+
+  ═══════════════════════════════════════════════════════════════════════════════
+-->
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
@@ -891,7 +913,55 @@ a { color: inherit; text-decoration: none; }
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin></script>
 
 <script type="text/babel">
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+//   VIDYALAYA360 · STANSFORD INTERNATIONAL HR.SEC.SCHOOL — STANDALONE DEMO
+//
+//   A self-contained school ERP/CRM. Runs from file:// in any modern browser.
+//   All data persists to localStorage under the key "vidyalaya360.db".
+//   No server, no Supabase — this is the portable demo build.
+//
+// ───────────────────────────── TABLE OF CONTENTS ─────────────────────────────
+//
+//   §1  React hook aliases              — useState / useEffect / useRef / …
+//   §2  localStorage-backed store       — mirrors the Next.js API surface
+//   §3  money / moneyK helpers          — Indian-locale currency formatting
+//
+//   §4  Icon component                  — inline SVG icon set (≈60 glyphs)
+//   §5  UI primitives                   — KPI, Sparkline, BarChart, Ring, etc.
+//   §6  Sidebar                         — role-based navigation
+//   §7  MobileShell                     — iPhone frame for the mobile view
+//   §8  Tweaks panel                    — ⌘K settings (theme/density/role/view)
+//
+//   §9+ Screens (18)                    — one IIFE per screen; publishes
+//                                         window.Screen<Name> for AppShell
+//
+//   §27 AppShell                        — top-level layout + screen router
+//   §28 Bootstrap                       — <App/> + ReactDOM.createRoot().render()
+//
+// ═══════════════════════════════════════════════════════════════════════════════
+
+
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §1  React hook aliases                                                      
+//   Imports were stripped for single-file delivery — bind hooks to globals.     
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 const { useState, useEffect, useRef, useMemo, useCallback, useContext, Fragment, createContext } = React;
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §2  localStorage-backed store                                               
+//   The demo's persistence layer. Mirrors /api/X routes from the Next.js build. 
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 
 const STORE_KEY = "vidyalaya360.db";
 const EMPTY_DB = {
@@ -1121,6 +1191,15 @@ const store = {
 window.store = store;
 
 
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §3  money / moneyK helpers                                                  
+//   Indian-locale currency formatting (₹, L, Cr).                               
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
+
 const money = (n) => "₹" + Number(n).toLocaleString("en-IN");
 const moneyK = (n) => {
   if (n >= 10000000) return "₹" + (n/10000000).toFixed(2) + "Cr";
@@ -1130,7 +1209,14 @@ const moneyK = (n) => {
 };
 
 
-// ===== components/Icon.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §4  Icon                                                                    
+//   components/Icon.jsx                                                         
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 
 const PATHS = {
   dashboard: <><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></>,
@@ -1223,7 +1309,14 @@ function Icon({ name, size = 16, stroke = 1.5, className = "", style }) {
 }
 
 
-// ===== components/ui.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §5  ui                                                                      
+//   components/ui.jsx                                                           
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 
 const KPI = ({ label, value, unit, delta, deltaDir, sub, sparkData, puck, puckIcon }) => {
   const arrow = deltaDir === "up" ? "arrowUp" : deltaDir === "down" ? "arrowDown" : null;
@@ -1457,7 +1550,14 @@ const AvatarChip = ({ initials, color }) => (
 );
 
 
-// ===== components/Sidebar.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §6  Sidebar                                                                 
+//   components/Sidebar.jsx                                                      
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 
 const NAV_BY_ROLE = {
   super: [
@@ -1555,7 +1655,14 @@ function Sidebar({ current, setCurrent, role }) {
 }
 
 
-// ===== components/MobileShell.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §7  MobileShell                                                             
+//   components/MobileShell.jsx                                                  
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 
 const TABS = {
   parent: [
@@ -1689,7 +1796,14 @@ function MobileShell({ current, setCurrent, role, children }) {
 }
 
 
-// ===== components/Tweaks.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §8  Tweaks                                                                  
+//   components/Tweaks.jsx                                                       
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 
 const ROLES = [
   { k: "super", label: "Super Admin", icon: "shield" },
@@ -1779,7 +1893,14 @@ function Tweaks({ show, settings, setSetting }) {
 
 
 
-// ===== components/screens/Academic.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §9  Academic screen                                                         
+//   components/screens/Academic.jsx — wrapped in an IIFE to keep local helpers scoped.
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 ;(function(){
 
 // Build the last 8 week-start dates relative to today. Computed lazily on
@@ -2294,7 +2415,14 @@ window.ScreenAcademic = ScreenAcademic;
 })();
 var ScreenAcademic = window.ScreenAcademic;
 
-// ===== components/screens/Audit.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §10  Audit screen                                                           
+//   components/screens/Audit.jsx — wrapped in an IIFE to keep local helpers scoped.
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 ;(function(){
 
 function toneFor(action = "") {
@@ -2375,7 +2503,14 @@ window.ScreenAudit = ScreenAudit;
 })();
 var ScreenAudit = window.ScreenAudit;
 
-// ===== components/screens/Automation.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §11  Automation screen                                                      
+//   components/screens/Automation.jsx — wrapped in an IIFE to keep local helpers scoped.
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 ;(function(){
 
 function ScreenAutomation({ E }) {
@@ -2465,7 +2600,14 @@ window.ScreenAutomation = ScreenAutomation;
 })();
 var ScreenAutomation = window.ScreenAutomation;
 
-// ===== components/screens/Communication.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §12  Communication screen                                                   
+//   components/screens/Communication.jsx — wrapped in an IIFE to keep local helpers scoped.
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 ;(function(){
 
 function ScreenCommunication() {
@@ -2554,7 +2696,14 @@ window.ScreenCommunication = ScreenCommunication;
 })();
 var ScreenCommunication = window.ScreenCommunication;
 
-// ===== components/screens/Complaints.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §13  Complaints screen                                                      
+//   components/screens/Complaints.jsx — wrapped in an IIFE to keep local helpers scoped.
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 ;(function(){
 
 function ScreenComplaints({ E, refresh }) {
@@ -2638,7 +2787,14 @@ window.ScreenComplaints = ScreenComplaints;
 })();
 var ScreenComplaints = window.ScreenComplaints;
 
-// ===== components/screens/Dashboard.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §14  Dashboard screen                                                       
+//   components/screens/Dashboard.jsx — wrapped in an IIFE to keep local helpers scoped.
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 ;(function(){
 
 function ScreenDashboard({ E }) {
@@ -3024,7 +3180,14 @@ window.ScreenDashboard = ScreenDashboard;
 })();
 var ScreenDashboard = window.ScreenDashboard;
 
-// ===== components/screens/Donors.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §15  Donors screen                                                          
+//   components/screens/Donors.jsx — wrapped in an IIFE to keep local helpers scoped.
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 ;(function(){
 
 function ScreenDonors({ E }) {
@@ -3132,7 +3295,14 @@ window.ScreenDonors = ScreenDonors;
 })();
 var ScreenDonors = window.ScreenDonors;
 
-// ===== components/screens/Enquiries.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §16  Enquiries screen                                                       
+//   components/screens/Enquiries.jsx — wrapped in an IIFE to keep local helpers scoped.
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 ;(function(){
 
 function ScreenEnquiries({ E, refresh }) {
@@ -3231,7 +3401,14 @@ window.ScreenEnquiries = ScreenEnquiries;
 })();
 var ScreenEnquiries = window.ScreenEnquiries;
 
-// ===== components/screens/Fees.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §17  Fees screen                                                            
+//   components/screens/Fees.jsx — wrapped in an IIFE to keep local helpers scoped.
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 ;(function(){
 
 const DEMO_PARENT_PHONE = "+919876543210";
@@ -3901,7 +4078,14 @@ window.ScreenFees = ScreenFees;
 })();
 var ScreenFees = window.ScreenFees;
 
-// ===== components/screens/Inventory.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §18  Inventory screen                                                       
+//   components/screens/Inventory.jsx — wrapped in an IIFE to keep local helpers scoped.
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 ;(function(){
 
 function ScreenInventory({ E }) {
@@ -4001,7 +4185,14 @@ window.ScreenInventory = ScreenInventory;
 })();
 var ScreenInventory = window.ScreenInventory;
 
-// ===== components/screens/Money.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §19  Money screen                                                           
+//   components/screens/Money.jsx — wrapped in an IIFE to keep local helpers scoped.
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 ;(function(){
 
 function ScreenMoney({ E }) {
@@ -4136,7 +4327,14 @@ window.ScreenMoney = ScreenMoney;
 })();
 var ScreenMoney = window.ScreenMoney;
 
-// ===== components/screens/Schools.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §20  Schools screen                                                         
+//   components/screens/Schools.jsx — wrapped in an IIFE to keep local helpers scoped.
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 ;(function(){
 
 function ScreenSchools({ E }) {
@@ -4240,7 +4438,14 @@ window.ScreenSchools = ScreenSchools;
 })();
 var ScreenSchools = window.ScreenSchools;
 
-// ===== components/screens/Settings.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §21  Settings screen                                                        
+//   components/screens/Settings.jsx — wrapped in an IIFE to keep local helpers scoped.
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 ;(function(){
 
 const SECTIONS = [
@@ -4325,7 +4530,14 @@ window.ScreenSettings = ScreenSettings;
 })();
 var ScreenSettings = window.ScreenSettings;
 
-// ===== components/screens/Staff.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §22  Staff screen                                                           
+//   components/screens/Staff.jsx — wrapped in an IIFE to keep local helpers scoped.
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 ;(function(){
 
 function ScreenStaff({ E }) {
@@ -4434,7 +4646,14 @@ window.ScreenStaff = ScreenStaff;
 })();
 var ScreenStaff = window.ScreenStaff;
 
-// ===== components/screens/Students.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §23  Students screen                                                        
+//   components/screens/Students.jsx — wrapped in an IIFE to keep local helpers scoped.
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 ;(function(){
 
 function ScreenStudents({ E, refresh }) {
@@ -5371,7 +5590,14 @@ window.ScreenStudents = ScreenStudents;
 })();
 var ScreenStudents = window.ScreenStudents;
 
-// ===== components/screens/Transport.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §24  Transport screen                                                       
+//   components/screens/Transport.jsx — wrapped in an IIFE to keep local helpers scoped.
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 ;(function(){
 
 function ScreenTransport({ E, refresh }) {
@@ -5596,7 +5822,14 @@ window.ScreenTransport = ScreenTransport;
 })();
 var ScreenTransport = window.ScreenTransport;
 
-// ===== components/screens/Trust.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §25  Trust screen                                                           
+//   components/screens/Trust.jsx — wrapped in an IIFE to keep local helpers scoped.
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 ;(function(){
 
 function ScreenTrust({ E }) {
@@ -5798,7 +6031,14 @@ window.ScreenTrust = ScreenTrust;
 })();
 var ScreenTrust = window.ScreenTrust;
 
-// ===== components/screens/Users.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §26  Users screen                                                           
+//   components/screens/Users.jsx — wrapped in an IIFE to keep local helpers scoped.
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 ;(function(){
 
 const ROLE_DESC = {
@@ -5906,7 +6146,14 @@ window.ScreenUsers = ScreenUsers;
 })();
 var ScreenUsers = window.ScreenUsers;
 
-// ===== components/AppShell.jsx =====
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §27  AppShell                                                               
+//   components/AppShell.jsx — top-level layout + screen router.                 
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
 
 const SCREENS = {
   dashboard: ScreenDashboard,
@@ -6128,6 +6375,15 @@ function ViewToggle({ view, setView }) {
 
 
 
+
+// ══════════════════════════════════════════════════════════════════════════════
+//                                                                               
+//   §28  Bootstrap                                                              
+//   Root <App/>: loads data from the store, then mounts AppShell.               
+//                                                                               
+// ══════════════════════════════════════════════════════════════════════════════
+
+
 const App = () => {
   const [data, setData] = React.useState(null);
   const refresh = React.useCallback(async () => setData(await store.readAllData()), []);
@@ -6135,6 +6391,7 @@ const App = () => {
   if (!data) return null;
   return <AppShell initialData={data} refresh={refresh} />;
 };
+
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(<App/>);
 

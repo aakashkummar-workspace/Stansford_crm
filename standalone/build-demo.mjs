@@ -360,12 +360,82 @@ const screens = fs.readdirSync(path.join(ROOT, "components/screens"))
   .filter(f => f.endsWith(".jsx"))
   .map(f => "components/screens/" + f);
 
-let bigJs = HOOKS_JS + "\n" + STORE_JS + "\n" + FORMAT_JS + "\n";
-for (const f of components) bigJs += "\n// ===== " + f + " =====\n" + patch(r(f)) + "\n";
-for (const f of screens)    bigJs += "\n// ===== " + f + " =====\n" + wrapScreen(patch(r(f)), f) + "\n";
-bigJs += "\n// ===== components/AppShell.jsx =====\n" + patch(r("components/AppShell.jsx")) + "\n";
+// ---------- readable section banners ----------
+const banner = (title, subtitle = "") => {
+  const bar = "// " + "═".repeat(78);
+  const pad = (s) => "// " + s + " ".repeat(Math.max(0, 78 - s.length));
+  return [
+    "\n\n",
+    bar,
+    pad(""),
+    pad("  " + title),
+    subtitle ? pad("  " + subtitle) : null,
+    pad(""),
+    bar,
+    "\n",
+  ].filter(Boolean).join("\n");
+};
 
-const BOOTSTRAP_JS = `
+// Human-readable table of contents at the top
+const TOC = `
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+//   VIDYALAYA360 · STANSFORD INTERNATIONAL HR.SEC.SCHOOL — STANDALONE DEMO
+//
+//   A self-contained school ERP/CRM. Runs from file:// in any modern browser.
+//   All data persists to localStorage under the key "vidyalaya360.db".
+//   No server, no Supabase — this is the portable demo build.
+//
+// ───────────────────────────── TABLE OF CONTENTS ─────────────────────────────
+//
+//   §1  React hook aliases              — useState / useEffect / useRef / …
+//   §2  localStorage-backed store       — mirrors the Next.js API surface
+//   §3  money / moneyK helpers          — Indian-locale currency formatting
+//
+//   §4  Icon component                  — inline SVG icon set (≈60 glyphs)
+//   §5  UI primitives                   — KPI, Sparkline, BarChart, Ring, etc.
+//   §6  Sidebar                         — role-based navigation
+//   §7  MobileShell                     — iPhone frame for the mobile view
+//   §8  Tweaks panel                    — ⌘K settings (theme/density/role/view)
+//
+//   §9+ Screens (18)                    — one IIFE per screen; publishes
+//                                         window.Screen<Name> for AppShell
+//
+//   §27 AppShell                        — top-level layout + screen router
+//   §28 Bootstrap                       — <App/> + ReactDOM.createRoot().render()
+//
+// ═══════════════════════════════════════════════════════════════════════════════
+
+`;
+
+let bigJs = TOC;
+bigJs += banner("§1  React hook aliases", "Imports were stripped for single-file delivery — bind hooks to globals.");
+bigJs += HOOKS_JS;
+bigJs += banner("§2  localStorage-backed store", "The demo's persistence layer. Mirrors /api/X routes from the Next.js build.");
+bigJs += STORE_JS;
+bigJs += banner("§3  money / moneyK helpers", "Indian-locale currency formatting (₹, L, Cr).");
+bigJs += FORMAT_JS;
+
+let idx = 4;
+for (const f of components) {
+  const label = "§" + idx + "  " + path.basename(f, ".jsx");
+  bigJs += banner(label, f);
+  bigJs += patch(r(f));
+  idx++;
+}
+
+for (const f of screens) {
+  const label = "§" + idx + "  " + path.basename(f, ".jsx") + " screen";
+  bigJs += banner(label, f + " — wrapped in an IIFE to keep local helpers scoped.");
+  bigJs += wrapScreen(patch(r(f)), f);
+  idx++;
+}
+
+bigJs += banner("§" + idx + "  AppShell", "components/AppShell.jsx — top-level layout + screen router.");
+bigJs += patch(r("components/AppShell.jsx"));
+idx++;
+
+const BOOTSTRAP_JS = banner("§" + idx + "  Bootstrap", "Root <App/>: loads data from the store, then mounts AppShell.") + `
 const App = () => {
   const [data, setData] = React.useState(null);
   const refresh = React.useCallback(async () => setData(await store.readAllData()), []);
@@ -373,11 +443,34 @@ const App = () => {
   if (!data) return null;
   return <AppShell initialData={data} refresh={refresh} />;
 };
+
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(<App/>);
 `;
 
 const html = `<!doctype html>
+<!--
+  ═══════════════════════════════════════════════════════════════════════════════
+
+    VIDYALAYA360 · STANSFORD INTERNATIONAL HR.SEC.SCHOOL
+    Self-contained demo build — open this file in any modern browser.
+
+    HOW IT WORKS
+      · Fonts load from Google Fonts (one network request on first open).
+      · React 18 + Babel-standalone load from unpkg (transforms the JSX
+        below in the browser — takes ~1–2 s on first load, then caches).
+      · All application code is inlined in the Babel script block near the
+        bottom of this file. Scroll down to read it section by section.
+      · Data persists to localStorage ('vidyalaya360.db'). Open DevTools →
+        Application → Local Storage to inspect / clear.
+
+    NOT IN THIS FILE
+      · No server, no API routes, no Supabase — this is the portable demo.
+      · For the fullstack (Next.js + Supabase) version see the repository:
+        github.com/aakashkummar-workspace/Stansford_crm
+
+  ═══════════════════════════════════════════════════════════════════════════════
+-->
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
