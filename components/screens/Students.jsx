@@ -13,6 +13,7 @@ export default function ScreenStudents({ E, refresh }) {
   const [profileOf, setProfileOf] = useState(null);
   const [picked, setPicked] = useState(new Set());
   const [openMenuFor, setOpenMenuFor] = useState(null);
+  const [menuAnchor, setMenuAnchor] = useState(null);
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
   const flash = (msg, tone = "ok") => {
@@ -253,13 +254,22 @@ export default function ScreenStudents({ E, refresh }) {
                   <td><StatusChip status={s.fee}>{s.fee.charAt(0).toUpperCase() + s.fee.slice(1)}</StatusChip></td>
                   <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{s.transport}</td>
                   <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{s.joined}</td>
-                  <td style={{ position: "relative" }}>
-                    <button className="icon-btn" onClick={() => setOpenMenuFor(openMenuFor === s.id ? null : s.id)}>
+                  <td>
+                    <button
+                      className="icon-btn"
+                      onClick={(e) => {
+                        if (openMenuFor === s.id) { setOpenMenuFor(null); return; }
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        setOpenMenuFor(s.id);
+                        setMenuAnchor({ x: rect.right, y: rect.bottom });
+                      }}
+                    >
                       <Icon name="more" size={14} />
                     </button>
-                    {openMenuFor === s.id && (
+                    {openMenuFor === s.id && menuAnchor && (
                       <RowMenu
                         student={s}
+                        anchor={menuAnchor}
                         onClose={() => setOpenMenuFor(null)}
                         onView={() => { setProfileOf(s); setOpenMenuFor(null); }}
                         onTC={() => { flash(`TC requested for ${s.name} · queued`); setOpenMenuFor(null); }}
@@ -334,23 +344,45 @@ function FilterMenu({ value, onPick, onClose }) {
   );
 }
 
-function RowMenu({ student, onClose, onView, onTC, onMessage, onRemove }) {
+function RowMenu({ student, anchor, onClose, onView, onTC, onMessage, onRemove }) {
+  // Close on outside click + on scroll/resize (the menu is fixed-positioned
+  // relative to the trigger, so anything that moves the trigger should close it).
   useEffect(() => {
-    const onDoc = (e) => { if (!e.target.closest(".row-menu") && !e.target.closest(".icon-btn")) onClose(); };
+    const onDoc = (e) => {
+      if (!e.target.closest(".row-menu") && !e.target.closest(".icon-btn")) onClose();
+    };
+    const onScrollOrResize = () => onClose();
     setTimeout(() => document.addEventListener("click", onDoc), 0);
-    return () => document.removeEventListener("click", onDoc);
+    window.addEventListener("scroll", onScrollOrResize, true);
+    window.addEventListener("resize", onScrollOrResize);
+    return () => {
+      document.removeEventListener("click", onDoc);
+      window.removeEventListener("scroll", onScrollOrResize, true);
+      window.removeEventListener("resize", onScrollOrResize);
+    };
   }, [onClose]);
+
   const items = [
     { label: "View profile", icon: "user", action: onView },
     { label: "Message parent", icon: "whatsapp", action: onMessage },
     { label: "Issue TC", icon: "book", action: onTC },
     { label: student.__added ? "Remove" : "Remove (locked)", icon: "x", action: onRemove, danger: true, disabled: !student.__added },
   ];
+
+  // Position the menu so its right edge aligns with the trigger's right edge
+  // and it sits 6px below. If it would fall off the bottom of the viewport,
+  // flip it above the trigger.
+  const MENU_W = 200;
+  const MENU_H = 4 * 32 + 8; // approx
+  const wantsFlip = anchor.y + MENU_H + 16 > window.innerHeight;
+  const top = wantsFlip ? Math.max(8, anchor.y - MENU_H - 24) : anchor.y + 6;
+  const left = Math.max(8, anchor.x - MENU_W);
+
   return (
     <div className="row-menu" style={{
-      position: "absolute", top: "calc(100% + 4px)", right: 0, zIndex: 70,
+      position: "fixed", top, left, zIndex: 200, width: MENU_W,
       background: "var(--card)", border: "1px solid var(--rule)", borderRadius: 9,
-      boxShadow: "var(--shadow-lg)", padding: 4, minWidth: 180,
+      boxShadow: "var(--shadow-lg)", padding: 4,
     }}>
       {items.map((it) => (
         <button
