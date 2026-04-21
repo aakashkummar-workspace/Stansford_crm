@@ -39,6 +39,7 @@ export default function ScreenStudents({ E, refresh }) {
   const [filterOpen, setFilterOpen] = useState(false);
   const [showAdmission, setShowAdmission] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [profileOf, setProfileOf] = useState(null);
   const [picked, setPicked] = useState(new Set());
   const [openMenuFor, setOpenMenuFor] = useState(null);
   const [toast, setToast] = useState(null);
@@ -290,7 +291,7 @@ export default function ScreenStudents({ E, refresh }) {
                       <RowMenu
                         student={s}
                         onClose={() => setOpenMenuFor(null)}
-                        onView={() => { flash(`Profile of ${s.name} (read-only demo)`); setOpenMenuFor(null); }}
+                        onView={() => { setProfileOf(s); setOpenMenuFor(null); }}
                         onTC={() => { flash(`TC requested for ${s.name} · queued`); setOpenMenuFor(null); }}
                         onMessage={() => { window.open(`https://wa.me/${s.parent.replace(/[^0-9]/g, "")}`, "_blank"); flash("Opened WhatsApp"); setOpenMenuFor(null); }}
                         onRemove={() => removeStudent(s)}
@@ -306,6 +307,14 @@ export default function ScreenStudents({ E, refresh }) {
 
       {showAdmission && <AdmissionModal onClose={() => setShowAdmission(false)} onSubmit={submitAdmission} />}
       {showImport && <ImportModal onClose={() => setShowImport(false)} onFile={handleImportFile} />}
+      {profileOf && (
+        <ProfileModal
+          student={profileOf}
+          onClose={() => setProfileOf(null)}
+          onMessage={() => { window.open(`https://wa.me/${profileOf.parent.replace(/[^0-9]/g, "")}`, "_blank"); flash("Opened WhatsApp"); }}
+          onTC={() => { flash(`TC requested for ${profileOf.name} · queued`); setProfileOf(null); }}
+        />
+      )}
     </div>
   );
 }
@@ -421,22 +430,61 @@ function ModalShell({ title, sub, onClose, children, width = 460 }) {
 }
 
 function AdmissionModal({ onClose, onSubmit }) {
-  const [form, setForm] = useState({ name: "", cls: "1", section: "A", parent: "", transport: "—" });
+  const [form, setForm] = useState({ name: "", cls: "1", section: "A", phoneDigits: "", transport: "—" });
   const [busy, setBusy] = useState(false);
+  const [touched, setTouched] = useState({});
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  // ---- Indian phone helpers ----
+  const onPhoneChange = (e) => {
+    const onlyDigits = e.target.value.replace(/\D/g, "").slice(0, 10);
+    set("phoneDigits", onlyDigits);
+  };
+  const phoneError = (() => {
+    if (!form.phoneDigits) return null; // optional until user types
+    if (form.phoneDigits.length !== 10) return "Phone must be exactly 10 digits";
+    if (!/^[6-9]/.test(form.phoneDigits)) return "Indian mobile numbers start with 6, 7, 8 or 9";
+    return null;
+  })();
+  const formattedPhone = form.phoneDigits.length === 10
+    ? `+91 ${form.phoneDigits.slice(0, 5)} ${form.phoneDigits.slice(5)}`
+    : "";
+  const phoneOk = !form.phoneDigits || (form.phoneDigits.length === 10 && /^[6-9]/.test(form.phoneDigits));
+  const formValid = form.name.trim() && phoneOk;
+
   const submit = async (e) => {
     e.preventDefault();
-    if (!form.name.trim()) return;
+    setTouched({ name: true, phone: true });
+    if (!formValid) return;
     setBusy(true);
-    await onSubmit(form);
+    await onSubmit({
+      name: form.name,
+      cls: form.cls,
+      section: form.section,
+      parent: form.phoneDigits ? formattedPhone : "",
+      transport: form.transport,
+    });
     setBusy(false);
   };
+
   return (
     <ModalShell title="New admission" sub="Auto-assigned ID · auto fee schedule" onClose={onClose}>
       <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <Field label="Student full name *">
-          <input className="input" autoFocus value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. Anaika Sharma" />
+          <input
+            className="input"
+            autoFocus
+            value={form.name}
+            onChange={(e) => set("name", e.target.value)}
+            onBlur={() => setTouched((t) => ({ ...t, name: true }))}
+            placeholder="e.g. Anaika Sharma"
+            style={touched.name && !form.name.trim() ? { borderColor: "var(--bad)" } : undefined}
+          />
+          {touched.name && !form.name.trim() && (
+            <span style={{ fontSize: 11, color: "var(--bad)" }}>Name is required</span>
+          )}
         </Field>
+
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           <Field label="Class">
             <select className="select" value={form.cls} onChange={(e) => set("cls", e.target.value)}>
@@ -450,9 +498,63 @@ function AdmissionModal({ onClose, onSubmit }) {
             </select>
           </Field>
         </div>
-        <Field label="Parent contact">
-          <input className="input" value={form.parent} onChange={(e) => set("parent", e.target.value)} placeholder="+91 9XXXX XXXXX" />
+
+        <Field label="Parent mobile (10 digits, Indian)">
+          <div style={{
+            display: "flex",
+            border: "1px solid",
+            borderColor: phoneError ? "var(--bad)" : "var(--rule)",
+            borderRadius: 9,
+            background: "var(--card)",
+            overflow: "hidden",
+            height: 34,
+          }}>
+            <span style={{
+              display: "inline-flex",
+              alignItems: "center",
+              padding: "0 10px",
+              background: "var(--card-2)",
+              borderRight: "1px solid var(--rule)",
+              fontFamily: "var(--font-mono)",
+              fontSize: 12.5,
+              color: "var(--ink-3)",
+            }}>+91</span>
+            <input
+              type="tel"
+              inputMode="numeric"
+              maxLength={10}
+              value={form.phoneDigits}
+              onChange={onPhoneChange}
+              onBlur={() => setTouched((t) => ({ ...t, phone: true }))}
+              placeholder="98765 43210"
+              style={{
+                flex: 1,
+                border: 0,
+                background: "transparent",
+                outline: "none",
+                padding: "0 10px",
+                fontSize: 13,
+                fontFamily: "var(--font-mono)",
+                letterSpacing: "0.05em",
+              }}
+            />
+            <span style={{
+              display: "inline-flex",
+              alignItems: "center",
+              padding: "0 10px",
+              fontSize: 11,
+              fontFamily: "var(--font-mono)",
+              color: form.phoneDigits.length === 10 ? "var(--ok)" : "var(--ink-4)",
+            }}>{form.phoneDigits.length}/10</span>
+          </div>
+          {touched.phone && phoneError && (
+            <span style={{ fontSize: 11, color: "var(--bad)" }}>{phoneError}</span>
+          )}
+          {!phoneError && formattedPhone && (
+            <span style={{ fontSize: 11, color: "var(--ok)" }}>Saved as {formattedPhone}</span>
+          )}
         </Field>
+
         <Field label="Transport route">
           <select className="select" value={form.transport} onChange={(e) => set("transport", e.target.value)}>
             <option value="—">No transport</option>
@@ -461,9 +563,10 @@ function AdmissionModal({ onClose, onSubmit }) {
             <option value="R3">R3 · Indiranagar – Koramangala</option>
           </select>
         </Field>
+
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
           <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
-          <button type="submit" className="btn accent" disabled={busy || !form.name.trim()}>
+          <button type="submit" className="btn accent" disabled={busy || !formValid}>
             <Icon name="check" size={13} />{busy ? "Admitting…" : "Admit student"}
           </button>
         </div>
@@ -519,6 +622,192 @@ function ImportModal({ onClose, onFile }) {
         </div>
       </div>
     </ModalShell>
+  );
+}
+
+function ProfileModal({ student, onClose, onMessage, onTC }) {
+  // Derive a stable 28-day attendance pattern from the student id
+  const heatmap = useMemo(() => {
+    const seedChar = student.id.charCodeAt(student.id.length - 1) || 7;
+    return Array.from({ length: 28 }, (_, i) => {
+      const v = ((seedChar * (i + 1) * 9301 + 49297) % 233280) / 233280;
+      if (i % 7 === 6) return { v: -1 };
+      if (v < 0.08) return { v: 0 };
+      return { v: Math.min(4, Math.floor(v * 5)) };
+    });
+  }, [student.id]);
+
+  // Activity history — synthesised from what we know about the student
+  const feeTone = student.fee === "paid" ? "ok" : student.fee === "overdue" ? "bad" : "warn";
+  const timeline = [
+    { t: "Today", i: "fees", tone: feeTone, line: `Fee status · ${student.fee}`, sub: student.fee === "paid" ? "Last receipt auto-sent" : "Reminder scheduled" },
+    { t: "Yesterday", i: "students", tone: "ok", line: "Attendance recorded", sub: `Present · ${student.attendance}% this term` },
+    { t: "3 days ago", i: "book", tone: "info", line: "Homework submitted", sub: "English comprehension · on time" },
+    { t: "1 week ago", i: "bus", tone: student.transport === "—" ? "" : "info", line: student.transport === "—" ? "No transport route" : `Boarded ${student.transport}`, sub: student.transport === "—" ? "Self pick-up/drop" : "Morning run · on time" },
+    { t: "1 month ago", i: "enquiry", tone: "", line: `Joined ${student.joined}`, sub: "Admission confirmed · onboarding complete" },
+  ];
+
+  const phoneDigits = (student.parent || "").replace(/\D/g, "");
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)",
+        display: "grid", placeItems: "center", zIndex: 250, padding: 16, overflowY: "auto",
+      }}
+    >
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 720, maxHeight: "calc(100vh - 32px)", overflowY: "auto" }}>
+        {/* Header strip with avatar */}
+        <div style={{ padding: "22px 24px", display: "flex", alignItems: "center", gap: 16, borderBottom: "1px solid var(--rule-2)" }}>
+          <div style={{
+            width: 56, height: 56, borderRadius: 14,
+            background: "linear-gradient(135deg, var(--accent), var(--accent-2))",
+            color: "var(--accent-ink)",
+            display: "grid", placeItems: "center",
+            fontWeight: 600, fontSize: 20,
+          }}>
+            {student.name.split(" ").map((n) => n[0]).join("")}
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 20, fontWeight: 600, letterSpacing: "-0.01em", fontFamily: "var(--font-serif)" }}>{student.name}</span>
+              {student.__added && (
+                <span className="chip ok" style={{ fontSize: 10, height: 20 }}><span className="dot" />new admission</span>
+              )}
+            </div>
+            <div style={{ color: "var(--ink-3)", fontSize: 12.5, marginTop: 4, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <span className="mono">{student.id}</span>
+              <span className="meta-dot">·</span>
+              <span>Class {student.cls}</span>
+              <span className="meta-dot">·</span>
+              <span>Joined {student.joined}</span>
+            </div>
+          </div>
+          <button className="icon-btn" onClick={onClose} style={{ alignSelf: "flex-start" }}>
+            <Icon name="x" size={14} />
+          </button>
+        </div>
+
+        {/* Stats row */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", borderBottom: "1px solid var(--rule-2)" }}>
+          <Stat label="Attendance" value={`${student.attendance}%`} tone={student.attendance < 85 ? "warn" : "ok"} />
+          <Stat label="Fee" value={student.fee.charAt(0).toUpperCase() + student.fee.slice(1)} tone={feeTone} />
+          <Stat label="Transport" value={student.transport} />
+          <Stat label="Section" value={student.cls.split("-")[1] || "—"} />
+        </div>
+
+        {/* Body — two columns */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0 }}>
+          {/* Left: Parent contact + transport */}
+          <div style={{ padding: "20px 22px", borderRight: "1px solid var(--rule-2)", display: "flex", flexDirection: "column", gap: 16 }}>
+            <ProfileSection title="Parent contact">
+              {student.parent && student.parent !== "—" ? (
+                <>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5 }}>
+                    <Icon name="phone" size={14} style={{ color: "var(--ink-3)" }} />
+                    <span className="mono">{student.parent}</span>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap" }}>
+                    <button className="btn sm" onClick={() => window.open(`tel:${student.parent.replace(/\s/g, "")}`, "_self")}>
+                      <Icon name="phone" size={11} />Call
+                    </button>
+                    <button className="btn sm accent" onClick={onMessage}>
+                      <Icon name="whatsapp" size={11} />WhatsApp
+                    </button>
+                    <button className="btn sm" onClick={() => window.open(`sms:${student.parent.replace(/\s/g, "")}`, "_self")}>
+                      <Icon name="sms" size={11} />SMS
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div style={{ fontSize: 12.5, color: "var(--ink-3)" }}>No parent contact on file.</div>
+              )}
+            </ProfileSection>
+
+            <ProfileSection title="Attendance · 28-day">
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 }}>
+                {["M", "T", "W", "T", "F", "S", "S"].map((d, i) => (
+                  <div key={i} style={{ fontSize: 9.5, color: "var(--ink-4)", textAlign: "center" }}>{d}</div>
+                ))}
+                {heatmap.map((c, i) => {
+                  const bg =
+                    c.v === -1 ? "var(--rule-2)" :
+                    c.v === 0 ? "var(--bad)" :
+                    `color-mix(in oklch, var(--accent) ${40 + c.v * 15}%, var(--rule-2))`;
+                  return <div key={i} className="hm-cell" style={{ background: bg, opacity: c.v === -1 ? 0.5 : 1 }} />;
+                })}
+              </div>
+              <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 8 }}>
+                {heatmap.filter((c) => c.v > 0).length} present · {heatmap.filter((c) => c.v === 0).length} absent · {heatmap.filter((c) => c.v === -1).length} off days
+              </div>
+            </ProfileSection>
+          </div>
+
+          {/* Right: Timeline */}
+          <div style={{ padding: "20px 22px", display: "flex", flexDirection: "column", gap: 10 }}>
+            <ProfileSection title="Recent activity">
+              <div style={{ display: "flex", flexDirection: "column" }}>
+                {timeline.map((row, i) => (
+                  <div key={i} style={{
+                    display: "grid",
+                    gridTemplateColumns: "28px 1fr auto",
+                    gap: 10,
+                    padding: "9px 0",
+                    borderBottom: i < timeline.length - 1 ? "1px solid var(--rule-2)" : "none",
+                  }}>
+                    <div className={`act-ico ${row.tone || ""}`} style={{ width: 26, height: 26 }}>
+                      <Icon name={row.i} size={12} />
+                    </div>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 12.5 }}>{row.line}</div>
+                      <div style={{ fontSize: 11, color: "var(--ink-3)" }}>{row.sub}</div>
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>{row.t}</div>
+                  </div>
+                ))}
+              </div>
+            </ProfileSection>
+          </div>
+        </div>
+
+        {/* Footer actions */}
+        <div style={{ padding: "14px 22px", borderTop: "1px solid var(--rule-2)", display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button className="btn" onClick={onTC}><Icon name="book" size={12} />Issue TC</button>
+          {phoneDigits && (
+            <button className="btn" onClick={onMessage}><Icon name="whatsapp" size={12} />Message parent</button>
+          )}
+          <button className="btn accent" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Stat({ label, value, tone }) {
+  const color = tone === "ok" ? "var(--ok)" : tone === "warn" ? "var(--warn)" : tone === "bad" ? "var(--bad)" : "var(--ink)";
+  return (
+    <div style={{ padding: "14px 18px", borderRight: "1px solid var(--rule-2)" }}>
+      <div style={{ fontSize: 10, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 500 }}>{label}</div>
+      <div style={{ fontFamily: "var(--font-serif)", fontSize: 22, marginTop: 4, letterSpacing: "-0.02em", color }}>{value}</div>
+    </div>
+  );
+}
+
+function ProfileSection({ title, children }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.09em", fontWeight: 500, marginBottom: 10 }}>
+        {title}
+      </div>
+      {children}
+    </div>
   );
 }
 

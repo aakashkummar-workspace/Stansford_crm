@@ -6,10 +6,35 @@ const monthYear = () =>
 
 const newId = () => `STN-${9000 + Math.floor(Math.random() * 999)}`;
 
+// Accepts a 10-digit Indian mobile and returns the canonical
+// "+91 XXXXX XXXXX" form. Returns null on anything that isn't valid.
+// Strips a leading "+91" / "91" / "0" courtesy prefix before counting digits,
+// but the remaining number must be exactly 10 digits and start with 6/7/8/9.
+function formatIndianPhone(raw) {
+  if (!raw) return "—";
+  let digits = String(raw).replace(/\D/g, "");
+  // Strip a single courtesy country/trunk prefix ONCE.
+  if (digits.startsWith("91") && digits.length === 12) digits = digits.slice(2);
+  else if (digits.startsWith("0") && digits.length === 11) digits = digits.slice(1);
+  if (digits.length !== 10 || !/^[6-9]/.test(digits)) return null;
+  return `+91 ${digits.slice(0, 5)} ${digits.slice(5)}`;
+}
+
 export async function POST(req) {
   const body = await req.json();
   if (!body || !body.name || !body.name.trim()) {
     return NextResponse.json({ ok: false, error: "Name is required" }, { status: 400 });
+  }
+  let parent = "—";
+  if (body.parent && String(body.parent).trim() && String(body.parent).trim() !== "—") {
+    const formatted = formatIndianPhone(body.parent);
+    if (formatted === null) {
+      return NextResponse.json(
+        { ok: false, error: "Parent phone must be a 10-digit Indian mobile number starting with 6, 7, 8 or 9" },
+        { status: 400 }
+      );
+    }
+    parent = formatted;
   }
   const cls = Number(body.cls) || 1;
   const section = (body.section || "A").toUpperCase();
@@ -17,7 +42,7 @@ export async function POST(req) {
     id: newId(),
     name: body.name.trim(),
     cls: `${cls}-${section}`,
-    parent: (body.parent && body.parent.trim()) || "—",
+    parent,
     fee: "pending",
     attendance: 0,
     transport: body.transport || "—",
