@@ -18,6 +18,7 @@ export default function ScreenFees({ E, refresh }) {
   const [statusFilter, setStatusFilter] = useState("All");
   const [classFilter, setClassFilter] = useState("All");
   const [filterOpen, setFilterOpen] = useState(false);
+  const [collectOpen, setCollectOpen] = useState(false);
   const [picked, setPicked] = useState(new Set());
 
   // ---------- toast ----------
@@ -122,14 +123,17 @@ export default function ScreenFees({ E, refresh }) {
   };
 
   const headerCollect = () => {
-    const next = E.PENDING_FEES[0];
-    if (!next) {
+    if (E.PENDING_FEES.length === 0) {
       flash("No pending fees right now", "ok");
       return;
     }
-    setSelected(next);
+    setCollectOpen((v) => !v);
+  };
+  const pickFromCollect = (fee) => {
+    setSelected(fee);
     setStage("pick");
-    flash(`Ready to collect from ${next.name}`);
+    setCollectOpen(false);
+    flash(`Loaded ${fee.name} · choose method and proceed`);
   };
 
   const togglePick = (id) =>
@@ -238,7 +242,23 @@ export default function ScreenFees({ E, refresh }) {
         <div className="page-actions">
           <button className="btn" onClick={importStructure}><Icon name="upload" size={13} />Import structure</button>
           <button className="btn" onClick={exportCsv}><Icon name="download" size={13} />Export CSV</button>
-          <button className="btn accent" onClick={headerCollect}><Icon name="plus" size={13} />Collect fee</button>
+          <div style={{ position: "relative" }}>
+            <button className="btn accent" onClick={headerCollect}>
+              <Icon name="plus" size={13} />Collect fee
+              {E.PENDING_FEES.length > 0 && (
+                <span className="mono" style={{ marginLeft: 4, fontSize: 11, opacity: 0.85 }}>
+                  · {E.PENDING_FEES.length} pending
+                </span>
+              )}
+            </button>
+            {collectOpen && (
+              <CollectMenu
+                items={E.PENDING_FEES}
+                onPick={pickFromCollect}
+                onClose={() => setCollectOpen(false)}
+              />
+            )}
+          </div>
         </div>
       </div>
 
@@ -531,6 +551,74 @@ function Toast({ toast }) {
       }}
     >
       {toast.msg}
+    </div>
+  );
+}
+
+function CollectMenu({ items, onPick, onClose }) {
+  useEffect(() => {
+    const onDoc = (e) => {
+      if (!e.target.closest(".collect-menu") && !e.target.closest(".btn")) onClose();
+    };
+    setTimeout(() => document.addEventListener("click", onDoc), 0);
+    return () => document.removeEventListener("click", onDoc);
+  }, [onClose]);
+
+  return (
+    <div
+      className="collect-menu"
+      style={{
+        position: "absolute",
+        top: "calc(100% + 6px)",
+        right: 0,
+        zIndex: 60,
+        background: "var(--card)",
+        border: "1px solid var(--rule)",
+        borderRadius: 12,
+        boxShadow: "var(--shadow-lg)",
+        padding: 6,
+        width: 320,
+        maxHeight: 380,
+        overflowY: "auto",
+      }}
+    >
+      <div style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.08em", padding: "8px 10px 6px", display: "flex", alignItems: "center", gap: 8 }}>
+        Pending fees · pick a student
+        <span className="mono" style={{ marginLeft: "auto", color: "var(--ink-4)" }}>{items.length}</span>
+      </div>
+      {items.length === 0 && <div className="empty" style={{ padding: 16 }}>No pending fees.</div>}
+      {items.map((f) => (
+        <button
+          key={f.id}
+          onClick={() => onPick(f)}
+          className="btn ghost"
+          style={{
+            width: "100%",
+            justifyContent: "flex-start",
+            height: "auto",
+            padding: "10px 10px",
+            gap: 10,
+            display: "flex",
+            alignItems: "center",
+          }}
+        >
+          <span style={{
+            width: 30, height: 30, borderRadius: "50%",
+            background: "linear-gradient(135deg, var(--accent), var(--accent-2))",
+            color: "#fff", display: "grid", placeItems: "center",
+            fontWeight: 600, fontSize: 11.5, flexShrink: 0,
+          }}>
+            {f.name.split(" ").map((n) => n[0]).join("")}
+          </span>
+          <span style={{ flex: 1, minWidth: 0, textAlign: "left" }}>
+            <span style={{ display: "block", fontSize: 13, fontWeight: 500, color: "var(--ink)" }}>{f.name}</span>
+            <span style={{ display: "block", fontSize: 11, color: "var(--ink-3)" }}>{f.cls} · {f.id} · due {f.due}</span>
+          </span>
+          <span className="mono" style={{ fontSize: 12, fontWeight: 500, color: f.overdue ? "var(--bad)" : "var(--ink-2)" }}>
+            ₹{f.amount.toLocaleString("en-IN")}
+          </span>
+        </button>
+      ))}
     </div>
   );
 }
