@@ -412,7 +412,13 @@ const moneyK = (n) => {
 };
 `;
 
-let bigJs = STORE_JS + "\n" + FORMAT_JS + "\n";
+// Components/screens use bare hook names like `useState(...)` because their
+// imports were stripped. Alias them once globally so they resolve to React.X.
+const HOOKS_JS = `
+const { useState, useEffect, useRef, useMemo, useCallback, useContext, Fragment, createContext } = React;
+`;
+
+let bigJs = HOOKS_JS + "\n" + STORE_JS + "\n" + FORMAT_JS + "\n";
 // Components are flat helpers — they need to be in the global scope so screens
 // and AppShell can use them. No wrapping needed.
 for (const f of components) bigJs += "\n// ===== " + f + " =====\n" + patch(r(f)) + "\n";
