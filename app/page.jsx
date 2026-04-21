@@ -29,6 +29,7 @@ function shapeForScreens(db) {
     USERS: db.users,
     AUDIT: db.audit,
     ADDED_STUDENTS: db.addedStudents || [],
+    DAILY_LOGS: db.dailyLogs || [],
   };
 }
 

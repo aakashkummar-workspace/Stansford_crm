@@ -140,6 +140,7 @@ export default function AppShell({ initialData }) {
         USERS: json.users,
         AUDIT: json.audit,
         ADDED_STUDENTS: json.addedStudents || [],
+        DAILY_LOGS: json.dailyLogs || [],
       });
     } catch {}
   };
