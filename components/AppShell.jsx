@@ -24,6 +24,7 @@ import ScreenAutomation from "./screens/Automation";
 import ScreenUsers from "./screens/Users";
 import ScreenAudit from "./screens/Audit";
 import ScreenSettings from "./screens/Settings";
+import ScreenClasses from "./screens/Classes";
 
 const SCREENS = {
   dashboard: ScreenDashboard,
@@ -44,6 +45,7 @@ const SCREENS = {
   users: ScreenUsers,
   audit: ScreenAudit,
   settings: ScreenSettings,
+  classes: ScreenClasses,
 };
 
 const DEFAULT_SCREEN_BY_ROLE = {

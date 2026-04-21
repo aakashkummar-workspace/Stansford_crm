@@ -115,6 +115,26 @@ create table if not exists audit_log (
   created_at timestamptz default now()
 );
 
+-- ---------- classes + sections ----------
+-- Configurable per school. Seeded with Class 1–8, sections A & B on first
+-- install; safe to re-run — the INSERT uses ON CONFLICT DO NOTHING.
+create table if not exists classes (
+  n int primary key,
+  label text,
+  sections jsonb default '[]'::jsonb,
+  created_at timestamptz default now()
+);
+insert into classes (n, label, sections) values
+  (1, 'Class 1', '["A","B"]'::jsonb),
+  (2, 'Class 2', '["A","B"]'::jsonb),
+  (3, 'Class 3', '["A","B"]'::jsonb),
+  (4, 'Class 4', '["A","B"]'::jsonb),
+  (5, 'Class 5', '["A","B"]'::jsonb),
+  (6, 'Class 6', '["A","B"]'::jsonb),
+  (7, 'Class 7', '["A","B"]'::jsonb),
+  (8, 'Class 8', '["A","B"]'::jsonb)
+on conflict (n) do nothing;
+
 -- ---------- activity feed ----------
 create table if not exists activities (
   id bigserial primary key,

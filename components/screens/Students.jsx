@@ -332,7 +332,7 @@ export default function ScreenStudents({ E, refresh }) {
           onConfirm={() => archiveStudent(confirmArchive)}
         />
       )}
-      {showAdmission && <AdmissionModal onClose={() => setShowAdmission(false)} onSubmit={submitAdmission} />}
+      {showAdmission && <AdmissionModal classes={E.CLASSES || []} onClose={() => setShowAdmission(false)} onSubmit={submitAdmission} />}
       {showImport && <ImportModal onClose={() => setShowImport(false)} onFile={handleImportFile} />}
       {profileOf && (
         <ProfileModal
@@ -481,8 +481,21 @@ function ModalShell({ title, sub, onClose, children, width = 460 }) {
   );
 }
 
-function AdmissionModal({ onClose, onSubmit }) {
-  const [form, setForm] = useState({ name: "", cls: "1", section: "A", phoneDigits: "", transport: "—" });
+function AdmissionModal({ classes = [], onClose, onSubmit }) {
+  // Fall back to class 1 if the configured list is empty.
+  const classList = classes.length ? classes : [{ n: 1, label: "Class 1", sections: ["A", "B"] }];
+  const initialCls = String(classList[0].n);
+  const sectionsFor = (n) => {
+    const c = classList.find((x) => String(x.n) === String(n));
+    return (c && c.sections && c.sections.length) ? c.sections : ["A"];
+  };
+  const [form, setForm] = useState({ name: "", cls: initialCls, section: sectionsFor(initialCls)[0], phoneDigits: "", transport: "—" });
+  // Keep the section valid when the class changes.
+  useEffect(() => {
+    const avail = sectionsFor(form.cls);
+    if (!avail.includes(form.section)) setForm((f) => ({ ...f, section: avail[0] }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.cls]);
   const [busy, setBusy] = useState(false);
   const [touched, setTouched] = useState({});
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
@@ -543,13 +556,12 @@ function AdmissionModal({ onClose, onSubmit }) {
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           <Field label="Class">
             <select className="select" value={form.cls} onChange={(e) => set("cls", e.target.value)}>
-              {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => <option key={n} value={n}>Class {n}</option>)}
+              {classList.map((c) => <option key={c.n} value={c.n}>{c.label || `Class ${c.n}`}</option>)}
             </select>
           </Field>
           <Field label="Section">
             <select className="select" value={form.section} onChange={(e) => set("section", e.target.value)}>
-              <option value="A">Section A</option>
-              <option value="B">Section B</option>
+              {sectionsFor(form.cls).map((s) => <option key={s} value={s}>Section {s}</option>)}
             </select>
           </Field>
         </div>

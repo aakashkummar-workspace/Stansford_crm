@@ -22,6 +22,7 @@ export const NAV_BY_ROLE = {
     { id: "fees", label: "Fees & UPI", icon: "fees" },
     { section: "People" },
     { id: "students", label: "Students", icon: "students" },
+    { id: "classes", label: "Classes", icon: "book" },
     { id: "academic", label: "Academic", icon: "academic" },
     { id: "staff", label: "Staff", icon: "staff" },
     { section: "Operations" },
