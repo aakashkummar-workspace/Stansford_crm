@@ -32,8 +32,12 @@ const PLACEHOLDER_WEEKS = Array.from({ length: 8 }, (_, i) => ({
 }));
 
 const EMPTY_LOG = {
+  attendance: "present",
+  leaveReason: "",
   classwork: "",
+  classworkStatus: null,
   homework: "",
+  homeworkStatus: null,
   topics: "",
   handwritingNote: "",
   handwritingGrade: "",
@@ -357,14 +361,36 @@ export default function ScreenAcademic({ E, refresh, role }) {
                 {!isUserSaved && (
                   <div className="empty" style={{ padding: 24 }}>Nothing posted for {student.name} today.</div>
                 )}
-                {isUserSaved && [
-                  { l: "Classwork", v: logToShow.classwork, c: logToShow.classwork ? <span className="chip ok"><span className="dot" />Logged</span> : null },
-                  { l: "Homework", v: logToShow.homework, c: logToShow.homework ? <span className="chip ok"><span className="dot" />Logged</span> : null },
-                  { l: "Topics covered today", v: logToShow.topics, c: null },
-                  { l: "Handwriting", v: logToShow.handwritingNote, c: logToShow.handwritingGrade ? <span className="chip accent"><span className="dot" />{logToShow.handwritingGrade}</span> : null },
-                  { l: "Behaviour", v: logToShow.behaviour, c: null },
-                  { l: "Extra-curricular", v: logToShow.extra, c: null },
-                ].map((r, i, arr) => (
+                {isUserSaved && (() => {
+                  const absent = logToShow.attendance === "absent";
+                  const cwStatus = logToShow.classworkStatus;
+                  const hwStatus = logToShow.homeworkStatus;
+                  const rows = [
+                    { l: "Attendance", v: absent ? "Absent" : "Present",
+                      c: absent
+                        ? <span className="chip bad"><Icon name="x" size={10} stroke={2.5} />Absent</span>
+                        : <span className="chip ok"><Icon name="check" size={10} stroke={2.5} />Present</span> },
+                  ];
+                  if (absent) {
+                    rows.push({ l: "Leave reason", v: logToShow.leaveReason || "—", c: null });
+                  } else {
+                    rows.push(
+                      { l: "Classwork", v: logToShow.classwork,
+                        c: cwStatus === "completed" ? <span className="chip ok"><span className="dot" />Completed</span>
+                          : cwStatus === "not_completed" ? <span className="chip bad"><span className="dot" />Not completed</span>
+                          : null },
+                      { l: "Homework", v: logToShow.homework,
+                        c: hwStatus === "completed" ? <span className="chip ok"><span className="dot" />Completed</span>
+                          : hwStatus === "pending" ? <span className="chip warn"><span className="dot" />Pending</span>
+                          : null },
+                      { l: "Topics covered today", v: logToShow.topics, c: null },
+                      { l: "Handwriting", v: logToShow.handwritingNote, c: logToShow.handwritingGrade ? <span className="chip accent"><span className="dot" />{logToShow.handwritingGrade}</span> : null },
+                      { l: "Behaviour", v: logToShow.behaviour, c: null },
+                      { l: "Extra-curricular", v: logToShow.extra, c: null },
+                    );
+                  }
+                  return rows;
+                })().map((r, i, arr) => (
                   <div key={i} style={{ display: "grid", gridTemplateColumns: "130px 1fr auto", gap: 12, alignItems: "flex-start", paddingBottom: 10, borderBottom: i < arr.length - 1 ? "1px solid var(--rule-2)" : "none" }}>
                     <div style={{ fontSize: 11.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.05em", paddingTop: 1 }}>{r.l}</div>
                     <div style={{ fontSize: 13 }}>{r.v || <span style={{ color: "var(--ink-4)" }}>—</span>}</div>
@@ -457,8 +483,12 @@ function WeekMenu({ weeks, value, onPick, onClose }) {
 
 function LogModal({ student, cls, existing, onClose, onSubmit }) {
   const [form, setForm] = useState({
+    attendance: existing?.attendance || "present",
+    leaveReason: existing?.leaveReason || "",
     classwork: existing?.classwork || "",
+    classworkStatus: existing?.classworkStatus || "completed",
     homework: existing?.homework || "",
+    homeworkStatus: existing?.homeworkStatus || "completed",
     topics: existing?.topics || "",
     handwritingNote: existing?.handwritingNote || "",
     handwritingGrade: existing?.handwritingGrade || "A",
@@ -467,6 +497,7 @@ function LogModal({ student, cls, existing, onClose, onSubmit }) {
   });
   const [busy, setBusy] = useState(false);
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const isAbsent = form.attendance === "absent";
 
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
@@ -495,30 +526,81 @@ function LogModal({ student, cls, existing, onClose, onSubmit }) {
           <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
         </div>
         <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <Field label="Classwork">
-            <input className="input" value={form.classwork} onChange={(e) => set("classwork", e.target.value)} placeholder="e.g. Fractions · Ex 3.2 pp. 54–56" />
+          <Field label="Attendance">
+            <div className="segmented">
+              <button type="button" className={!isAbsent ? "active" : ""} onClick={() => set("attendance", "present")}>
+                <Icon name="check" size={11} />Present
+              </button>
+              <button type="button" className={isAbsent ? "active" : ""} onClick={() => set("attendance", "absent")}>
+                <Icon name="x" size={11} />Absent
+              </button>
+            </div>
           </Field>
-          <Field label="Homework">
-            <input className="input" value={form.homework} onChange={(e) => set("homework", e.target.value)} placeholder="What's due tomorrow" />
-          </Field>
+          {isAbsent && (
+            <Field label="Leave reason">
+              <input
+                className="input"
+                value={form.leaveReason}
+                onChange={(e) => set("leaveReason", e.target.value)}
+                placeholder="Why is the student absent today?"
+              />
+            </Field>
+          )}
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 160px", gap: 10 }}>
+            <Field label="Classwork">
+              <input
+                className="input"
+                value={form.classwork}
+                onChange={(e) => set("classwork", e.target.value)}
+                placeholder="e.g. Fractions · Ex 3.2 pp. 54–56"
+                disabled={isAbsent}
+              />
+            </Field>
+            <Field label="Status">
+              <div className="segmented">
+                <button type="button" className={form.classworkStatus === "completed" ? "active" : ""} onClick={() => set("classworkStatus", "completed")} disabled={isAbsent}>Done</button>
+                <button type="button" className={form.classworkStatus === "not_completed" ? "active" : ""} onClick={() => set("classworkStatus", "not_completed")} disabled={isAbsent}>Pending</button>
+              </div>
+            </Field>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 160px", gap: 10 }}>
+            <Field label="Homework">
+              <input
+                className="input"
+                value={form.homework}
+                onChange={(e) => set("homework", e.target.value)}
+                placeholder="What's due tomorrow"
+                disabled={isAbsent}
+              />
+            </Field>
+            <Field label="Status">
+              <div className="segmented">
+                <button type="button" className={form.homeworkStatus === "completed" ? "active" : ""} onClick={() => set("homeworkStatus", "completed")} disabled={isAbsent}>Done</button>
+                <button type="button" className={form.homeworkStatus === "pending" ? "active" : ""} onClick={() => set("homeworkStatus", "pending")} disabled={isAbsent}>Pending</button>
+              </div>
+            </Field>
+          </div>
+
           <Field label="Topics covered today">
-            <input className="input" value={form.topics} onChange={(e) => set("topics", e.target.value)} placeholder="Brief subject-wise summary" />
+            <input className="input" value={form.topics} onChange={(e) => set("topics", e.target.value)} placeholder="Brief subject-wise summary" disabled={isAbsent} />
           </Field>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 110px", gap: 10 }}>
             <Field label="Handwriting note">
-              <input className="input" value={form.handwritingNote} onChange={(e) => set("handwritingNote", e.target.value)} />
+              <input className="input" value={form.handwritingNote} onChange={(e) => set("handwritingNote", e.target.value)} disabled={isAbsent} />
             </Field>
             <Field label="Grade">
-              <select className="select" value={form.handwritingGrade} onChange={(e) => set("handwritingGrade", e.target.value)}>
+              <select className="select" value={form.handwritingGrade} onChange={(e) => set("handwritingGrade", e.target.value)} disabled={isAbsent}>
                 {["A+", "A", "A-", "B+", "B", "B-", "C", "D"].map((g) => <option key={g} value={g}>{g}</option>)}
               </select>
             </Field>
           </div>
           <Field label="Behaviour">
-            <input className="input" value={form.behaviour} onChange={(e) => set("behaviour", e.target.value)} placeholder="One sentence on how the day went" />
+            <input className="input" value={form.behaviour} onChange={(e) => set("behaviour", e.target.value)} placeholder="One sentence on how the day went" disabled={isAbsent} />
           </Field>
           <Field label="Extra-curricular">
-            <input className="input" value={form.extra} onChange={(e) => set("extra", e.target.value)} placeholder="Clubs, sports, art, etc." />
+            <input className="input" value={form.extra} onChange={(e) => set("extra", e.target.value)} placeholder="Clubs, sports, art, etc." disabled={isAbsent} />
           </Field>
 
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>

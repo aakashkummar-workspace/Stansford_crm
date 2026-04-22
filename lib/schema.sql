@@ -49,17 +49,25 @@ create table if not exists recent_fees (
 );
 
 -- ---------- complaints ----------
+-- Tickets raised by parents (or staff). `type` distinguishes a regular
+-- complaint from a leave-request submission; `submitted_by` records the role.
 create table if not exists complaints (
   id text primary key,
   student text,
+  student_id text,
   cls text,
   parent text,
   issue text,
+  type text default 'general',          -- 'general' | 'leave_request'
   date text,
-  status text default 'Open',
+  status text default 'Open',           -- Open | In Progress | Resolved
   assigned text,
+  submitted_by text default 'parent',   -- 'parent' | 'teacher' | 'principal'
   created_at timestamptz default now()
 );
+alter table complaints add column if not exists student_id text;
+alter table complaints add column if not exists type text default 'general';
+alter table complaints add column if not exists submitted_by text default 'parent';
 
 -- ---------- enquiries ----------
 create table if not exists enquiries (
@@ -75,13 +83,20 @@ create table if not exists enquiries (
 );
 
 -- ---------- daily logs (composite key student + date) ----------
+-- The Daily Monitoring Panel records what a teacher logs per student per day:
+-- attendance + leave reason if absent, classwork/homework completion status,
+-- handwriting feedback, behaviour and extra-curricular notes.
 create table if not exists daily_logs (
   student_id text not null,
   date text not null,
   student_name text,
   cls text,
+  attendance text default 'present',     -- 'present' | 'absent'
+  leave_reason text,                     -- only filled when attendance='absent'
   classwork text,
+  classwork_status text,                 -- 'completed' | 'not_completed' | null
   homework text,
+  homework_status text,                  -- 'completed' | 'pending' | null
   topics text,
   handwriting_note text,
   handwriting_grade text,
@@ -91,6 +106,11 @@ create table if not exists daily_logs (
   posted_at timestamptz default now(),
   primary key (student_id, date)
 );
+-- Idempotent ALTERs for installs that ran an earlier schema.
+alter table daily_logs add column if not exists attendance text default 'present';
+alter table daily_logs add column if not exists leave_reason text;
+alter table daily_logs add column if not exists classwork_status text;
+alter table daily_logs add column if not exists homework_status text;
 
 -- ---------- transport routes (stops as JSONB for flexibility) ----------
 create table if not exists routes (

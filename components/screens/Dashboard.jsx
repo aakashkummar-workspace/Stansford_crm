@@ -146,6 +146,43 @@ export default function ScreenDashboard({ E, role }) {
         </div>
       </div>
 
+      {/* Live alerts strip — pulls from real data so the principal can act in one click */}
+      {!isParent && (() => {
+        const todayIso = new Date().toISOString().slice(0, 10);
+        const todaysLogs = (E.DAILY_LOGS || []).filter((l) => l.date === todayIso);
+        const absentToday = todaysLogs.filter((l) => l.attendance === "absent");
+        const pendingHomework = todaysLogs.filter((l) => l.homeworkStatus === "pending");
+        const incompleteClasswork = todaysLogs.filter((l) => l.classworkStatus === "not_completed");
+        const openComplaints = (E.COMPLAINTS || []).filter((c) => c.status === "Open");
+        const overdueFees = (PENDING_FEES || []).filter((f) => f.overdue);
+        const items = [
+          openComplaints.length && { tone: "bad", icon: "complaint", title: `${openComplaints.length} pending complaint${openComplaints.length === 1 ? "" : "s"}`, sub: openComplaints.slice(0, 3).map((c) => c.student || "—").join(" · ") },
+          absentToday.length      && { tone: "warn", icon: "users",     title: `${absentToday.length} student${absentToday.length === 1 ? "" : "s"} absent today`, sub: absentToday.slice(0, 3).map((l) => l.studentName).join(" · ") },
+          pendingHomework.length  && { tone: "warn", icon: "book",      title: `${pendingHomework.length} pending homework`, sub: pendingHomework.slice(0, 3).map((l) => l.studentName).join(" · ") },
+          incompleteClasswork.length && { tone: "warn", icon: "pencil", title: `${incompleteClasswork.length} classwork not completed`, sub: incompleteClasswork.slice(0, 3).map((l) => l.studentName).join(" · ") },
+          overdueFees.length      && { tone: "bad",  icon: "fees",      title: `${overdueFees.length} overdue fee${overdueFees.length === 1 ? "" : "s"}`, sub: overdueFees.slice(0, 3).map((f) => f.name).join(" · ") },
+        ].filter(Boolean);
+        if (items.length === 0) return null;
+        return (
+          <div className="card" style={{ marginBottom: 20 }}>
+            <div className="card-head">
+              <div><div className="card-title">Live alerts</div><div className="card-sub">{items.length} item{items.length === 1 ? "" : "s"} need attention</div></div>
+            </div>
+            <div>
+              {items.map((it, i) => (
+                <div key={i} className="lrow">
+                  <div className={`act-ico ${it.tone}`}><Icon name={it.icon} size={13} /></div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 500 }}>{it.title}</div>
+                    <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 2 }}>{it.sub || "—"}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
+
       <div className="grid g-12" style={{ marginBottom: 20 }}>
         <div className="card col-5">
           <div className="card-head">

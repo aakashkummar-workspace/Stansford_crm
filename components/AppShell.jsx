@@ -168,9 +168,12 @@ export default function AppShell({ initialData }) {
       RECENT_FEES:       (data.RECENT_FEES  || []).filter((f) => f.id === myChild.id),
       DAILY_LOGS:        (data.DAILY_LOGS   || []).filter((l) => l.studentId === myChild.id),
       ROUTES:            (data.ROUTES || []).filter((r) => r.code === myChild.transport),
-      // Hide all admin-level data from the parent view.
+      // Parents see their OWN complaints (matching by studentId, or by student
+      // name as a fallback for complaints submitted before student_id was tracked).
+      COMPLAINTS:        (data.COMPLAINTS || []).filter((c) => c.studentId === myChild.id || c.student === myChild.name),
+      // Everything else admin-only is hidden from the parent view.
       STAFF: [], AUDIT: [], INVENTORY: [], DONORS: [],
-      ENQUIRIES: [], COMPLAINTS: [], AUTOMATIONS: [],
+      ENQUIRIES: [], AUTOMATIONS: [],
       SCHOOLS: [], USERS: [], ANOMALIES: [], DONATION_PIPELINE: [],
       COMPLIANCE: [], AI_BRIEF: [],
     };
