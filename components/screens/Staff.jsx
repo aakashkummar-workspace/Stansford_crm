@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI, AvatarChip } from "../ui";
+import DocumentsPanel from "../DocumentsPanel";
 
 const FILTERS = [
   { k: "all", label: "All" },
@@ -37,6 +38,7 @@ export default function ScreenStaff({ E, refresh, role }) {
   const [showAdd, setShowAdd] = useState(false);
   const [toast, setToast] = useState(null);
   const [openMenuId, setOpenMenuId] = useState(null);
+  const [docsFor, setDocsFor] = useState(null); // staff being shown in the docs modal
   const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
 
   const allStaff = E.STAFF || [];
@@ -342,6 +344,17 @@ export default function ScreenStaff({ E, refresh, role }) {
             }}
           >
             <button
+              onClick={() => { setDocsFor(s); setOpenMenuId(null); }}
+              style={{
+                width: "100%", textAlign: "left",
+                padding: "7px 10px", background: "transparent",
+                border: 0, borderRadius: 5, cursor: "pointer",
+                color: "var(--ink-2)", fontSize: 12,
+              }}
+            >
+              View documents
+            </button>
+            <button
               onClick={() => handleRemove(s)}
               style={{
                 width: "100%", textAlign: "left",
@@ -358,6 +371,14 @@ export default function ScreenStaff({ E, refresh, role }) {
 
       {showAdd && (
         <AddStaffModal onClose={() => setShowAdd(false)} onSubmit={handleAdd} />
+      )}
+
+      {docsFor && (
+        <ModalShell title={`Documents · ${docsFor.name}`} sub={`${docsFor.id || ""} · ${docsFor.role}`} onClose={() => setDocsFor(null)} width={520}>
+          <div className="card-body">
+            <DocumentsPanel entityType="staff" entityId={docsFor.id || docsFor.name} canEdit={canEdit} />
+          </div>
+        </ModalShell>
       )}
 
       <Toast msg={toast?.msg} tone={toast?.tone} onClose={() => setToast(null)} />

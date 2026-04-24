@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI, AvatarChip, StatusChip } from "../ui";
+import DocumentsPanel from "../DocumentsPanel";
 
 export default function ScreenStudents({ E, refresh, role }) {
   // Teachers, principals and admin can edit student details. Parents cannot —
@@ -1136,6 +1137,10 @@ function ProfileModal({ student, onClose, onMessage, onTC }) {
               <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 8 }}>
                 {heatmap.filter((c) => c.v > 0).length} present · {heatmap.filter((c) => c.v === 0).length} absent · {heatmap.filter((c) => c.v === -1).length} off days
               </div>
+            </ProfileSection>
+
+            <ProfileSection title="Documents">
+              <DocumentsPanel entityType="student" entityId={student.id} canEdit compact />
             </ProfileSection>
           </div>
 

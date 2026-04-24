@@ -30,6 +30,11 @@ import ScreenClasses from "./screens/Classes";
 import ScreenAttendance from "./screens/Attendance";
 import ScreenAccessControl from "./screens/AccessControl";
 import ScreenTasks from "./screens/Tasks";
+import ScreenReports from "./screens/Reports";
+import ScreenTc from "./screens/Tc";
+import ScreenChat from "./screens/Chat";
+import ScreenMeetings from "./screens/Meetings";
+import ScreenVolunteers from "./screens/Volunteers";
 
 const SCREENS = {
   dashboard: ScreenDashboard,
@@ -54,6 +59,11 @@ const SCREENS = {
   attendance: ScreenAttendance,
   access: ScreenAccessControl,
   tasks: ScreenTasks,
+  reports: ScreenReports,
+  tc: ScreenTc,
+  chat: ScreenChat,
+  meetings: ScreenMeetings,
+  volunteers: ScreenVolunteers,
 };
 
 const DEFAULT_SCREEN_BY_ROLE = {
@@ -205,6 +215,13 @@ export default function AppShell({ initialData, session }) {
         DONORS: json.donors || [],
         CAMPAIGNS: json.campaigns || [],
         DONOR_RECEIPTS: json.donorReceipts || [],
+        EXPENSES: json.expenses || [],
+        TASKS: json.tasks || [],
+        TC_REQUESTS: json.tcRequests || [],
+        MEETINGS: json.meetings || [],
+        VOLUNTEERS: json.volunteers || [],
+        CHAT_THREADS: json.chatThreads || [],
+        FEE_REMINDERS: json.feeReminders || [],
         INCOME_SERIES: json.incomeSeries,
         AUTOMATIONS: json.automations,
         SCHOOLS: json.schools,

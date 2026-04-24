@@ -311,6 +311,28 @@ export default function ScreenFees({ E, refresh, role }) {
             </span>
           ) : (
             <>
+              <button
+                className="btn"
+                onClick={async () => {
+                  if (scopedPending.length === 0) { flash("No pending fees to remind about", "bad"); return; }
+                  if (!confirm(`Send fee reminder to ${scopedPending.length} parent${scopedPending.length === 1 ? "" : "s"}?`)) return;
+                  try {
+                    const r = await fetch("/api/fees/remind", {
+                      method: "POST",
+                      headers: { "content-type": "application/json" },
+                      body: JSON.stringify({}),  // no ids = remind all pending
+                    });
+                    const j = await r.json();
+                    if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
+                    flash(`Reminder sent to ${j.sent.length} parent${j.sent.length === 1 ? "" : "s"}`, "ok");
+                    await refresh?.();
+                  } catch (e) { flash(e.message, "bad"); }
+                }}
+                disabled={scopedPending.length === 0}
+                title={scopedPending.length === 0 ? "No pending fees" : `Reminds all ${scopedPending.length} parents with pending fees`}
+              >
+                <Icon name="megaphone" size={13} />Remind overdue
+              </button>
               <button className="btn" onClick={importStructure}><Icon name="upload" size={13} />Import structure</button>
               <button className="btn" onClick={exportCsv}><Icon name="download" size={13} />Export CSV</button>
               <div style={{ position: "relative" }}>
@@ -457,6 +479,7 @@ export default function ScreenFees({ E, refresh, role }) {
             scopedRecent={scopedRecent}
             child={E.ADDED_STUDENTS && E.ADDED_STUDENTS[0]}
             openReceipt={openReceipt}
+            onRefresh={refresh}
           />
         ) : (
         <div className="card col-4">
@@ -680,11 +703,46 @@ export default function ScreenFees({ E, refresh, role }) {
 // pending balance broken into term/activity/late, plus a list of past
 // receipts — but with no payment controls. Parents pay at the school
 // office; this card is purely informational.
-function ParentFeesSummary({ scopedPending, scopedRecent, child, openReceipt }) {
+function ParentFeesSummary({ scopedPending, scopedRecent, child, openReceipt, onRefresh }) {
   const totalPending = scopedPending.reduce((a, f) => a + (f.amount || 0), 0);
   const overdueChip  = scopedPending.some((f) => f.overdue);
   const totalPaid    = scopedRecent.reduce((a, f) => a + (f.amount || 0), 0);
   const initials = (n) => (n || "?").trim().split(/\s+/).map((p) => p[0]).slice(0, 2).join("").toUpperCase();
+  const [payingOrder, setPayingOrder] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  async function startOnlinePayment() {
+    if (!child || totalPending === 0) return;
+    setBusy(true);
+    try {
+      const r = await fetch("/api/fees/pay-online", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: child.id, amount: scopedPending[0].amount, intent: "create" }),
+      });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || "Could not start payment");
+      setPayingOrder(j.order);
+    } catch (e) { alert(e.message); }
+    finally { setBusy(false); }
+  }
+
+  async function confirmOnlinePayment() {
+    if (!payingOrder) return;
+    setBusy(true);
+    try {
+      const r = await fetch("/api/fees/pay-online", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: payingOrder.studentId, amount: payingOrder.amount, intent: "verify" }),
+      });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || "Verify failed");
+      setPayingOrder(null);
+      await onRefresh?.();
+    } catch (e) { alert(e.message); }
+    finally { setBusy(false); }
+  }
 
   return (
     <div className="card col-4">
@@ -715,9 +773,19 @@ function ParentFeesSummary({ scopedPending, scopedRecent, child, openReceipt }) 
             </span>
           </div>
           {totalPending > 0 && (
-            <div style={{ marginTop: 8, fontSize: 11.5, color: overdueChip ? "var(--bad)" : "var(--warn)" }}>
-              {overdueChip ? "One or more items overdue · please pay at the school office" : "Pending — pay at the school office"}
-            </div>
+            <>
+              <div style={{ marginTop: 8, fontSize: 11.5, color: overdueChip ? "var(--bad)" : "var(--warn)" }}>
+                {overdueChip ? "One or more items overdue" : "Pending — settle online or at the office"}
+              </div>
+              <button
+                className="btn accent"
+                style={{ marginTop: 10, width: "100%", justifyContent: "center" }}
+                onClick={startOnlinePayment}
+                disabled={busy}
+              >
+                <Icon name="fees" size={12} />Pay online (UPI / Razorpay)
+              </button>
+            </>
           )}
         </div>
 
@@ -749,7 +817,55 @@ function ParentFeesSummary({ scopedPending, scopedRecent, child, openReceipt }) 
         </div>
 
         <div style={{ fontSize: 11, color: "var(--ink-4)", lineHeight: 1.5 }}>
-          To pay, visit the school office during working hours. Receipts will appear here as soon as the office records the payment.
+          You can pay online from this app, or visit the school office during working hours. Receipts appear here as soon as payment is captured.
+        </div>
+      </div>
+
+      {payingOrder && (
+        <PayOnlineModal order={payingOrder} busy={busy} onClose={() => setPayingOrder(null)} onConfirm={confirmOnlinePayment} />
+      )}
+    </div>
+  );
+}
+
+function PayOnlineModal({ order, busy, onClose, onConfirm }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)",
+      display: "grid", placeItems: "center", zIndex: 250, padding: 16,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 460 }}>
+        <div className="card-head">
+          <div>
+            <div className="card-title">Confirm online payment</div>
+            <div className="card-sub">Order {order.orderId} · {order.gateway}</div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
+        <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ background: "var(--bg-2)", padding: 16, borderRadius: 10, textAlign: "center" }}>
+            <div style={{ fontSize: 11, color: "var(--ink-4)", textTransform: "uppercase", letterSpacing: 0.5 }}>Amount</div>
+            <div style={{ fontSize: 28, fontWeight: 600, color: "var(--ink)" }}>₹{order.amount.toLocaleString("en-IN")}</div>
+            <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 4 }}>For {order.studentName} · {order.cls}</div>
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--ink-3)", lineHeight: 1.5 }}>
+            In production this opens the Razorpay / PhonePe checkout. For this demo, click <b>Confirm payment</b> to simulate
+            a successful capture — the receipt will be generated and the fee marked paid.
+          </div>
+          <a className="btn" href={order.payUrl} target="_blank" rel="noreferrer" style={{ justifyContent: "center" }}>
+            <Icon name="upload" size={12} />Open UPI app
+          </a>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <button className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button className="btn accent" onClick={onConfirm} disabled={busy}>
+              <Icon name="check" size={13} />{busy ? "Verifying…" : "Confirm payment"}
+            </button>
+          </div>
         </div>
       </div>
     </div>
