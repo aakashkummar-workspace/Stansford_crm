@@ -2,7 +2,7 @@ import "./globals.css";
 
 export const metadata = {
   title: "Stansford International HR.Sec.School · Vidyalaya360",
-  description: "School ERP & CRM control tower — multi-school trust admin, principal, teacher and parent views.",
+  description: "School ERP & CRM control tower — multi-school trust for admin, principal, teacher and parent views.",
 };
 
 export default function RootLayout({ children }) {

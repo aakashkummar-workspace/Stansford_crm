@@ -1,36 +1,111 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Icon from "./Icon";
 
-export const KPI = ({ label, value, unit, delta, deltaDir, sub, sparkData, puck, puckIcon }) => {
+// KPI card. Pass `details` to make it clickable — clicking opens a popup
+// with `details.title`, `details.sub`, and either `details.items` (a list of
+// rows: [{ label, value, sub? }]) or `details.body` (free-form node).
+export const KPI = ({ label, value, unit, delta, deltaDir, sub, sparkData, puck, puckIcon, details }) => {
   const arrow = deltaDir === "up" ? "arrowUp" : deltaDir === "down" ? "arrowDown" : null;
+  const [open, setOpen] = useState(false);
+  const clickable = !!details;
   return (
-    <div className="kpi">
-      <div className="kpi-top">
-        <div className="lbl">{label}</div>
-        {puck && (
-          <div className={`kpi-puck ${puck}`}>
-            <Icon name={puckIcon || "spark"} size={16} />
-          </div>
-        )}
-      </div>
-      <div className="val-row">
-        <div className="val">
-          {value}
-          {unit ? <span className="unit">{unit}</span> : null}
+    <>
+      <div
+        className={`kpi ${clickable ? "kpi-clickable" : ""}`}
+        onClick={clickable ? () => setOpen(true) : undefined}
+        style={clickable ? { cursor: "pointer" } : undefined}
+        role={clickable ? "button" : undefined}
+        tabIndex={clickable ? 0 : undefined}
+        onKeyDown={clickable ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen(true); } } : undefined}
+      >
+        <div className="kpi-top">
+          <div className="lbl">{label}</div>
+          {puck && (
+            <div className={`kpi-puck ${puck}`}>
+              <Icon name={puckIcon || "spark"} size={16} />
+            </div>
+          )}
         </div>
-        {delta && (
-          <span className={`delta ${deltaDir}`}>
-            {arrow && <Icon name={arrow} size={10} stroke={2.2} />}
-            {delta}
-          </span>
-        )}
+        <div className="val-row">
+          <div className="val">
+            {value}
+            {unit ? <span className="unit">{unit}</span> : null}
+          </div>
+          {delta && (
+            <span className={`delta ${deltaDir}`}>
+              {arrow && <Icon name={arrow} size={10} stroke={2.2} />}
+              {delta}
+            </span>
+          )}
+        </div>
+        <div className="meta">{sub && <span>{sub}</span>}</div>
+        {sparkData && <Sparkline data={sparkData} w={80} h={24} className="spark" />}
       </div>
-      <div className="meta">{sub && <span>{sub}</span>}</div>
-      {sparkData && <Sparkline data={sparkData} w={80} h={24} className="spark" />}
-    </div>
+      {open && clickable && (
+        <KpiDetailsModal
+          title={details.title || label}
+          sub={details.sub}
+          items={details.items}
+          body={details.body}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
   );
 };
+
+function KpiDetailsModal({ title, sub, items, body, onClose }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)",
+      display: "grid", placeItems: "center", zIndex: 250, padding: 16,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 480, maxHeight: "calc(100vh - 32px)", overflowY: "auto" }}>
+        <div className="card-head">
+          <div>
+            <div className="card-title">{title}</div>
+            {sub && <div className="card-sub">{sub}</div>}
+          </div>
+          <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
+        <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {body}
+          {Array.isArray(items) && items.length === 0 && (
+            <div className="empty">Nothing to show yet.</div>
+          )}
+          {Array.isArray(items) && items.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {items.map((it, i) => (
+                <div key={i} style={{
+                  display: "flex", alignItems: "center", gap: 10,
+                  padding: "8px 10px", background: "var(--bg-2)",
+                  border: "1px solid var(--rule-2)", borderRadius: 8,
+                }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 500, color: "var(--ink)" }}>{it.label}</div>
+                    {it.sub && <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{it.sub}</div>}
+                  </div>
+                  {it.value != null && (
+                    <span className="mono" style={{ fontSize: 13, fontWeight: 500, color: it.tone === "ok" ? "var(--ok)" : it.tone === "bad" ? "var(--bad)" : "var(--ink-2)" }}>
+                      {it.value}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export const Sparkline = ({ data, w = 100, h = 28, stroke = "var(--accent-2)", fill = "var(--accent-soft)", className }) => {
   const max = Math.max(...data);

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { addStudent, archiveStudent, addPendingFee, logAudit } from "@/lib/db";
+import { addStudent, archiveStudent, addPendingFee, logAudit, updateStudent } from "@/lib/db";
+import { getSession } from "@/lib/auth";
 
 const monthYear = () =>
   new Date().toLocaleDateString("en-IN", { month: "short", year: "numeric" });
@@ -48,6 +49,7 @@ export async function POST(req) {
     fee: "pending",
     attendance: 0,
     transport: body.transport || "—",
+    pickupStop: String(body.pickupStop || "").trim() || null,
     joined: monthYear(),
   };
 
@@ -63,6 +65,76 @@ export async function POST(req) {
   await logAudit("Rashmi Iyer", "New admission", `${row.id} ${row.name}`);
 
   return NextResponse.json({ ok: true, student });
+}
+
+// PATCH /api/students { id, name?, cls?, section?, parent?, transport?, pickupStop? }
+// Used by the Transport screen (bus/pickup), and by the Students screen's
+// "Edit details" modal (name/class/parent).
+// Role gating is enforced in the Students screen UI (principal/admin/teacher);
+// the API trusts that gate + session for now.
+export async function PATCH(req) {
+  const session = await getSession();
+  const actor = session?.name || "Principal";
+  let body; try { body = await req.json(); } catch { body = null; }
+  if (!body?.id) return NextResponse.json({ ok: false, error: "id required" }, { status: 400 });
+
+  const patch = {};
+  if ("transport" in body)  patch.transport  = body.transport;
+  if ("pickupStop" in body) patch.pickupStop = body.pickupStop;
+  if ("name" in body) {
+    const n = String(body.name || "").trim();
+    if (!n) return NextResponse.json({ ok: false, error: "Name cannot be empty" }, { status: 400 });
+    patch.name = n;
+  }
+  // Accept either a pre-joined "1-A" cls string, or separate cls + section.
+  if ("cls" in body || "section" in body) {
+    const rawCls = body.cls != null ? String(body.cls) : "";
+    let clsN, sec;
+    if (rawCls.includes("-")) {
+      const [a, b] = rawCls.split("-");
+      clsN = Number(a); sec = String(b || "A").toUpperCase();
+    } else {
+      clsN = Number(rawCls) || 0;
+      sec = String(body.section || "A").toUpperCase();
+    }
+    if (!clsN || clsN < 1) return NextResponse.json({ ok: false, error: "Invalid class" }, { status: 400 });
+    patch.cls = `${clsN}-${sec}`;
+  }
+  if ("parent" in body) {
+    const raw = String(body.parent || "").trim();
+    if (!raw || raw === "—") {
+      patch.parent = "—";
+    } else {
+      const formatted = formatIndianPhone(raw);
+      if (formatted === null) {
+        return NextResponse.json(
+          { ok: false, error: "Parent phone must be a 10-digit Indian mobile number starting with 6, 7, 8 or 9" },
+          { status: 400 }
+        );
+      }
+      patch.parent = formatted;
+    }
+  }
+
+  if (Object.keys(patch).length === 0) {
+    return NextResponse.json({ ok: false, error: "Nothing to update" }, { status: 400 });
+  }
+  const updated = await updateStudent(body.id, patch);
+  if (!updated) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 });
+
+  try {
+    const trail = [];
+    if ("name" in patch)       trail.push(`name=${patch.name}`);
+    if ("cls" in patch)        trail.push(`class=${patch.cls}`);
+    if ("parent" in patch)     trail.push(`parent=${patch.parent}`);
+    if ("transport" in patch)  trail.push(`bus=${patch.transport || "(none)"}`);
+    if ("pickupStop" in patch) trail.push(`stop=${patch.pickupStop || "(none)"}`);
+    const action = ("transport" in patch || "pickupStop" in patch) && trail.length <= 2
+      ? "Updated transport assignment"
+      : "Updated student details";
+    await logAudit(actor, action, `${updated.id} ${updated.name} · ${trail.join(" · ")}`);
+  } catch {}
+  return NextResponse.json({ ok: true, student: updated });
 }
 
 // "Withdraw" — soft-delete. Student record + all financial history are kept;

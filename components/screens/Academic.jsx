@@ -45,15 +45,28 @@ const EMPTY_LOG = {
   extra: "",
 };
 
-export default function ScreenAcademic({ E, refresh, role }) {
+export default function ScreenAcademic({ E, refresh, role, session }) {
   const classes = E.CLASSES;
-  const [cls, setCls] = useState(5);
-  const [sec, setSec] = useState("A");
+
+  // For teachers, build the list of assigned class-sections (e.g. ["2-A","5-B"]).
+  // The Academic screen lets them switch between their own classes; they
+  // can't see classes they aren't assigned to.
+  const teacherClassList = role === "teacher"
+    ? (Array.isArray(session?.linkedClasses) && session.linkedClasses.length
+        ? session.linkedClasses
+        : (session?.linkedId ? [session.linkedId] : []))
+    : [];
+  const firstTeacherKey = teacherClassList[0] || null;
+  const firstTeacherSplit = firstTeacherKey
+    ? (() => { const [c, s] = String(firstTeacherKey).split("-"); return { c: Number(c), s }; })()
+    : null;
+
+  const [cls, setCls] = useState(firstTeacherSplit?.c || 5);
+  const [sec, setSec] = useState(firstTeacherSplit?.s || "A");
   const [selectedStudent, setSelectedStudent] = useState(0);
 
-  // Parent view: pin the class/section to the parent's child and skip the
-  // class picker altogether. This runs whenever the parent's child (or role)
-  // changes so switching roles redirects correctly.
+  // Parent view: pin to the child's class. Teacher: snap to the first
+  // assigned class on mount/role-change (they can switch via the picker).
   useEffect(() => {
     if (role === "parent" && E.ADDED_STUDENTS && E.ADDED_STUDENTS[0]) {
       const child = E.ADDED_STUDENTS[0];
@@ -62,7 +75,11 @@ export default function ScreenAcademic({ E, refresh, role }) {
       if (!Number.isNaN(n)) setCls(n);
       if (s) setSec(s);
     }
-  }, [role, E.ADDED_STUDENTS]);
+    if (role === "teacher" && firstTeacherSplit) {
+      setCls(firstTeacherSplit.c);
+      setSec(firstTeacherSplit.s);
+    }
+  }, [role, E.ADDED_STUDENTS, session?.linkedId, session?.linkedClasses?.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
   // WEEKS + TODAY_ISO depend on the client clock; populate after mount.
   const [WEEKS, setWeeks] = useState(PLACEHOLDER_WEEKS);
   const [TODAY_ISO, setTodayIso] = useState("");
@@ -75,6 +92,7 @@ export default function ScreenAcademic({ E, refresh, role }) {
   }, []);
   const [weekOpen, setWeekOpen] = useState(false);
   const [showLog, setShowLog] = useState(false);
+  const [showAnnounce, setShowAnnounce] = useState(false);
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
   const flash = (msg, tone = "ok") => {
@@ -109,15 +127,53 @@ export default function ScreenAcademic({ E, refresh, role }) {
 
   const student = roster[selectedStudent] || null;
 
-  const heatmap = student
-    ? Array.from({ length: 28 }, (_, i) => {
-        const seed = student.id.charCodeAt(student.id.length - 1) * (i + 1);
-        const v = ((seed * 9301 + 49297) % 233280) / 233280;
-        if (i % 7 === 6) return { v: -1 };
-        if (v < 0.08) return { v: 0 };
-        return { v: Math.min(4, Math.floor(v * 5)) };
-      })
+  // All daily logs for this student (used for the KPI roll-ups + heatmap).
+  const studentLogs = student
+    ? (E.DAILY_LOGS || []).filter((l) => l.studentId === student.id)
     : [];
+
+  // 28-day attendance heatmap built from the student's real daily_logs.
+  // Cell states:
+  //   present | absent | weekend (Sunday) | empty (no log posted that day)
+  // Grid runs Mon → Sun, ending on the most recent Sunday so the last column
+  // is always Sunday and Today sits inside the bottom row.
+  const heatmap = (() => {
+    if (!student || !TODAY_ISO) return [];
+    const today = new Date(`${TODAY_ISO}T00:00:00`);
+    // Find the upcoming Sunday so the trailing column lines up cleanly.
+    const dow = today.getDay(); // 0=Sun..6=Sat
+    const daysToSun = dow === 0 ? 0 : 7 - dow;
+    const lastSun = new Date(today);
+    lastSun.setDate(today.getDate() + daysToSun);
+    const isoOf = (d) => d.toISOString().slice(0, 10);
+    const logsByDate = new Map(studentLogs.map((l) => [l.date, l]));
+    const cells = [];
+    for (let i = 27; i >= 0; i--) {
+      const d = new Date(lastSun);
+      d.setDate(lastSun.getDate() - i);
+      const iso = isoOf(d);
+      const isFuture = d > today;
+      const isSunday = d.getDay() === 0;
+      const log = logsByDate.get(iso);
+      let state = "empty";
+      if (isFuture) state = "future";
+      else if (isSunday) state = "weekend";
+      else if (log) state = log.attendance === "absent" ? "absent" : "present";
+      cells.push({ iso, state, log });
+    }
+    return cells;
+  })();
+
+  const heatColors = {
+    present: "var(--ok, #4a7a54)",
+    absent:  "var(--err, #b13c1c)",
+    weekend: "var(--rule-2, #d6cdb8)",
+    empty:   "var(--bg-2, #ebe4d6)",
+    future:  "transparent",
+  };
+  const heatBorders = {
+    future: "1px dashed var(--rule, #cbc1aa)",
+  };
 
   // Saved daily log for this student today, if any.
   const savedLog = student
@@ -125,6 +181,16 @@ export default function ScreenAcademic({ E, refresh, role }) {
     : null;
   const logToShow = savedLog || { ...EMPTY_LOG, postedBy: "", postedAt: null };
   const isUserSaved = Boolean(savedLog);
+
+  // KPI roll-ups computed from the student's daily logs (defined above).
+  const presentCount = studentLogs.filter((l) => l.attendance !== "absent").length;
+  const cwDone = studentLogs.filter((l) => l.classworkStatus === "completed").length;
+  const hwDone = studentLogs.filter((l) => l.homeworkStatus === "completed").length;
+  const totalLogs = studentLogs.length;
+  const attendancePct = totalLogs ? Math.round((presentCount / totalLogs) * 100) : (student?.attendance ?? 0);
+  const homeworkPct   = totalLogs ? Math.round((hwDone / totalLogs) * 100) : 0;
+  const classworkPct  = totalLogs ? Math.round((cwDone / totalLogs) * 100) : 0;
+  const lastGrade     = studentLogs.find((l) => l.handwritingGrade)?.handwritingGrade || "—";
 
   // ---------- Handlers ----------
   const submitLog = async (form) => {
@@ -216,6 +282,11 @@ export default function ScreenAcademic({ E, refresh, role }) {
           </div>
           {role !== "parent" && (
             <>
+              {role === "teacher" && (
+                <button className="btn" onClick={() => setShowAnnounce(true)}>
+                  <Icon name="megaphone" size={13} />Announce to class
+                </button>
+              )}
               <button className="btn" onClick={downloadMonthlyReport}>
                 <Icon name="download" size={13} />Monthly report
               </button>
@@ -227,8 +298,44 @@ export default function ScreenAcademic({ E, refresh, role }) {
         </div>
       </div>
 
+      {/* Teacher class picker — chips for each assigned class. If only one
+          class is assigned this acts like a locked banner. */}
+      {role === "teacher" && teacherClassList.length > 0 && (
+        <div className="card" style={{ marginBottom: 14, padding: "12px 16px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <Icon name="academic" size={16} />
+          <span style={{ fontSize: 13, fontWeight: 500 }}>
+            Your {teacherClassList.length === 1 ? "class" : "classes"} ·
+          </span>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {teacherClassList.map((key) => {
+              const [c, s] = String(key).split("-");
+              const active = `${cls}-${sec}` === key;
+              return (
+                <button
+                  key={key}
+                  onClick={() => { setCls(Number(c)); setSec(s); setSelectedStudent(0); }}
+                  className="btn sm"
+                  style={{
+                    background: active ? "var(--accent-soft)" : "var(--card)",
+                    color: active ? "var(--accent-2)" : "var(--ink-2)",
+                    borderColor: active ? "var(--accent)" : "var(--rule)",
+                  }}
+                >
+                  Class {key}
+                </button>
+              );
+            })}
+          </div>
+          <span style={{ fontSize: 11.5, color: "var(--ink-3)", marginLeft: "auto" }}>
+            {teacherClassList.length === 1
+              ? `Daily logs and announcements you post go to ${cls}-${sec} parents.`
+              : `Pick a class to work on. You can post for each class separately.`}
+          </span>
+        </div>
+      )}
+
       <div className="grid g-12">
-        {role !== "parent" && (
+        {role !== "parent" && role !== "teacher" && (
         <div className="col-12" style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <span style={{ fontSize: 11.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", marginRight: 4 }}>Class</span>
           {classes.map((c) => (
@@ -334,10 +441,10 @@ export default function ScreenAcademic({ E, refresh, role }) {
           </div>
 
           <div className="grid g-4">
-            <KPI label="Attendance" value={student.attendance ? `${student.attendance}%` : "—"} sub="this term" puck="mint" puckIcon="check" />
-            <KPI label="Homework" value={student.homework ? `${student.homework}%` : "—"} sub="completion" puck="peach" puckIcon="book" />
-            <KPI label="Classwork" value={student.classwork ? `${student.classwork}%` : "—"} sub="recent" puck="cream" puckIcon="pencil" />
-            <KPI label="Handwriting" value={student.handwriting} sub="avg grade" puck="sky" puckIcon="pencil" />
+            <KPI label="Attendance" value={totalLogs ? `${attendancePct}%` : "—"} sub={totalLogs ? `${presentCount}/${totalLogs} days present` : "no logs yet"} puck="mint" puckIcon="check" />
+            <KPI label="Homework" value={totalLogs ? `${homeworkPct}%` : "—"} sub={totalLogs ? `${hwDone}/${totalLogs} completed` : "no logs yet"} puck="peach" puckIcon="book" />
+            <KPI label="Classwork" value={totalLogs ? `${classworkPct}%` : "—"} sub={totalLogs ? `${cwDone}/${totalLogs} completed` : "no logs yet"} puck="cream" puckIcon="pencil" />
+            <KPI label="Handwriting" value={lastGrade} sub="last graded" puck="sky" puckIcon="pencil" />
           </div>
 
           <div className="grid g-12">
@@ -410,12 +517,37 @@ export default function ScreenAcademic({ E, refresh, role }) {
                     <div key={i} style={{ fontSize: 10, color: "var(--ink-4)", textAlign: "center" }}>{d}</div>
                   ))}
                   {heatmap.map((c, i) => {
-                    const color =
-                      c.v === -1 ? "var(--rule-2)" :
-                      c.v === 0 ? "var(--bad)" :
-                      `color-mix(in oklch, var(--accent) ${40 + c.v * 15}%, var(--rule-2))`;
-                    return <div key={i} className="hm-cell" style={{ background: color, opacity: c.v === -1 ? 0.5 : 1 }} />;
+                    const isToday = c.iso === TODAY_ISO;
+                    const titleParts = [
+                      new Date(`${c.iso}T00:00:00`).toLocaleDateString("en-IN", { weekday: "short", day: "2-digit", month: "short" }),
+                      c.state === "present" ? "Present" :
+                      c.state === "absent"  ? `Absent${c.log?.leaveReason ? " — " + c.log.leaveReason : ""}` :
+                      c.state === "weekend" ? "Weekend (Sunday)" :
+                      c.state === "future"  ? "Upcoming" :
+                                              "No log posted",
+                    ];
+                    return (
+                      <div
+                        key={i}
+                        className="hm-cell"
+                        title={titleParts.join(" — ")}
+                        style={{
+                          background: heatColors[c.state],
+                          border: heatBorders[c.state] || (isToday ? "1.5px solid var(--ink)" : undefined),
+                          opacity: c.state === "weekend" ? 0.55 : 1,
+                          cursor: c.state === "future" ? "default" : "help",
+                        }}
+                      />
+                    );
                   })}
+                </div>
+                {/* Legend */}
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 12, paddingTop: 10, borderTop: "1px dashed var(--rule, #e5dfd1)", fontSize: 10.5, color: "var(--ink-3)" }}>
+                  <Legend swatch={heatColors.present} label="Present" />
+                  <Legend swatch={heatColors.absent}  label="Absent" />
+                  <Legend swatch={heatColors.empty}   label="No log" />
+                  <Legend swatch={heatColors.weekend} label="Sun" />
+                  <span style={{ marginLeft: "auto", color: "var(--ink-4)" }}>Hover a cell for the date</span>
                 </div>
               </div>
             </div>
@@ -429,10 +561,119 @@ export default function ScreenAcademic({ E, refresh, role }) {
           student={student}
           cls={`${cls}-${sec}`}
           existing={savedLog}
+          today={TODAY_ISO}
           onClose={() => setShowLog(false)}
           onSubmit={submitLog}
         />
       )}
+
+      {showAnnounce && role === "teacher" && (
+        <AnnounceClassModal
+          cls={`${cls}-${sec}`}
+          recipientCount={roster.length}
+          teacherName={session?.name || "Teacher"}
+          onClose={() => setShowAnnounce(false)}
+          onSent={(msg) => { setShowAnnounce(false); flash(msg); refresh?.(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ---------- announce-to-class modal (teacher) ----------
+// Posts a broadcast tagged to the teacher's class so parents of that class
+// see it in their Communication / Messages screen.
+function AnnounceClassModal({ cls, recipientCount, teacherName, onClose, onSent }) {
+  const [channel, setChannel] = useState("whatsapp");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    if (!message.trim()) { setErr("Type a message first"); return; }
+    setBusy(true); setErr("");
+    try {
+      const r = await fetch("/api/communication/broadcast", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          campaign: `Class ${cls} announcement · ${teacherName}`,
+          audience: `class_${cls}`,
+          audienceLabel: `Class ${cls} parents`,
+          channel,
+          message: message.trim(),
+          sent: recipientCount,
+        }),
+      });
+      const json = await r.json().catch(() => ({}));
+      if (!r.ok || !json.ok) throw new Error(json.error || "Failed");
+      onSent(`Announced to ${recipientCount} parent${recipientCount === 1 ? "" : "s"} of Class ${cls}`);
+    } catch (ex) { setErr(ex.message); setBusy(false); }
+  };
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)",
+      display: "grid", placeItems: "center", zIndex: 250, padding: 16,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 520 }}>
+        <div className="card-head">
+          <div>
+            <div className="card-title">Announce to Class {cls}</div>
+            <div className="card-sub">Sent to {recipientCount} parent{recipientCount === 1 ? "" : "s"} via {channel}</div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
+        <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <Field label="Channel">
+            <div className="segmented">
+              <button type="button" className={channel === "whatsapp" ? "active" : ""} onClick={() => setChannel("whatsapp")}>
+                <Icon name="whatsapp" size={11} />WhatsApp
+              </button>
+              <button type="button" className={channel === "sms" ? "active" : ""} onClick={() => setChannel("sms")}>
+                <Icon name="sms" size={11} />SMS
+              </button>
+              <button type="button" className={channel === "both" ? "active" : ""} onClick={() => setChannel("both")}>
+                Both
+              </button>
+            </div>
+          </Field>
+          <Field label="Message">
+            <textarea
+              className="input"
+              autoFocus
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              style={{ width: "100%", height: 110, padding: "10px 12px", lineHeight: 1.5, resize: "vertical", fontFamily: "var(--font-sans)" }}
+              placeholder={`e.g. Reminder: bring your art supplies for tomorrow's class. — ${teacherName}`}
+            />
+          </Field>
+          {err && (
+            <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "9px 12px", borderRadius: 7, fontSize: 12 }}>
+              {err}
+            </div>
+          )}
+          {recipientCount === 0 && (
+            <div style={{ background: "var(--warn-soft)", color: "var(--warn)", padding: "9px 12px", borderRadius: 7, fontSize: 12 }}>
+              No students in Class {cls} yet — announcement won't reach anyone.
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
+            <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn accent" disabled={busy || !message.trim() || recipientCount === 0}>
+              <Icon name="send" size={13} />{busy ? "Sending…" : `Send to ${recipientCount}`}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
@@ -481,7 +722,7 @@ function WeekMenu({ weeks, value, onPick, onClose }) {
   );
 }
 
-function LogModal({ student, cls, existing, onClose, onSubmit }) {
+function LogModal({ student, cls, existing, today, onClose, onSubmit }) {
   const [form, setForm] = useState({
     attendance: existing?.attendance || "present",
     leaveReason: existing?.leaveReason || "",
@@ -521,7 +762,7 @@ function LogModal({ student, cls, existing, onClose, onSubmit }) {
         <div className="card-head">
           <div>
             <div className="card-title">{existing ? "Edit today's log" : "Log today"}</div>
-            <div className="card-sub">{student?.name || "—"} · {student?.id || ""} · Class {cls} · {TODAY_ISO}</div>
+            <div className="card-sub">{student?.name || "—"} · {student?.id || ""} · Class {cls} · {today}</div>
           </div>
           <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
         </div>
@@ -612,6 +853,18 @@ function LogModal({ student, cls, existing, onClose, onSubmit }) {
         </form>
       </div>
     </div>
+  );
+}
+
+function Legend({ swatch, label }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+      <span style={{
+        width: 9, height: 9, borderRadius: 2,
+        background: swatch, border: "1px solid var(--rule, #e5dfd1)",
+      }} />
+      {label}
+    </span>
   );
 }
 

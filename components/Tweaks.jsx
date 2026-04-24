@@ -2,11 +2,14 @@
 
 import Icon from "./Icon";
 
+// Roles list is no longer toggleable here — the signed-in role comes from the
+// server session. Kept exported for screens that still import it for labels.
 const ROLES = [
-  { k: "super", label: "Super Admin", icon: "shield" },
-  { k: "principal", label: "Principal", icon: "school" },
-  { k: "teacher", label: "Teacher", icon: "book" },
-  { k: "parent", label: "Parent", icon: "heart" },
+  { k: "admin",             label: "Admin",             icon: "shield" },
+  { k: "academic_director", label: "Academic Director", icon: "academic" },
+  { k: "principal",         label: "Principal",         icon: "school" },
+  { k: "teacher",           label: "Teacher",           icon: "book" },
+  { k: "parent",            label: "Parent",            icon: "heart" },
 ];
 
 export default function Tweaks({ show, settings, setSetting }) {
@@ -19,21 +22,6 @@ export default function Tweaks({ show, settings, setSetting }) {
         <div className="k">⌘K</div>
       </div>
       <div className="tweaks-body">
-        <div className="tweak-row">
-          <div className="lbl">Viewing as</div>
-          <div className="segmented" style={{ flexWrap: "wrap" }}>
-            {ROLES.map((r) => (
-              <button
-                key={r.k}
-                className={settings.role === r.k ? "active" : ""}
-                onClick={() => setSetting("role", r.k)}
-              >
-                <Icon name={r.icon} size={11} />
-                {r.label.split(" ")[0]}
-              </button>
-            ))}
-          </div>
-        </div>
         <div className="tweak-row">
           <div className="lbl">View</div>
           <div className="segmented">

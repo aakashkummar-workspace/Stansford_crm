@@ -17,12 +17,21 @@ export default function ScreenFees({ E, refresh, role }) {
     const childId = role === "parent" && E.ADDED_STUDENTS && E.ADDED_STUDENTS[0]
       ? E.ADDED_STUDENTS[0].id : null;
     const p = childId ? (E.PENDING_FEES || []).filter((f) => f.id === childId) : (E.PENDING_FEES || []);
-    const r = childId ? (E.RECENT_FEES  || []).filter((f) => f.id === childId) : (E.RECENT_FEES  || []);
+    const r = childId ? (E.RECENT_FEES  || []).filter((f) => (f.studentId || f.id) === childId) : (E.RECENT_FEES  || []);
     return p[0] || r[0];
   });
   const [stage, setStage] = useState("pick");
   const [method, setMethod] = useState("UPI");
   const [busy, setBusy] = useState(false);
+  // Amount the parent is paying right now. Empty string = pay full balance.
+  // Validated against the selected fee's outstanding amount in markPaid().
+  const [payAmount, setPayAmount] = useState("");
+  // Last-completed payment summary for the receipt (so the receipt reflects
+  // what was actually paid, even after the pending row is updated).
+  const [lastPayment, setLastPayment] = useState(null);
+
+  // Reset the pay-amount whenever the selected fee changes.
+  useEffect(() => { setPayAmount(""); setLastPayment(null); }, [selected?.id, selected?.amount]);
 
   // ---------- filters / selection ----------
   const [statusFilter, setStatusFilter] = useState("All");
@@ -51,7 +60,7 @@ export default function ScreenFees({ E, refresh, role }) {
     [E.PENDING_FEES, myChildId]
   );
   const scopedRecent = useMemo(
-    () => (myChildId ? (E.RECENT_FEES || []).filter((f) => f.id === myChildId) : (E.RECENT_FEES || [])),
+    () => (myChildId ? (E.RECENT_FEES || []).filter((f) => (f.studentId || f.id) === myChildId) : (E.RECENT_FEES || [])),
     [E.RECENT_FEES, myChildId]
   );
 
@@ -118,21 +127,44 @@ export default function ScreenFees({ E, refresh, role }) {
       setStage("paid");
       return;
     }
+    // Validate the partial-amount input before hitting the API.
+    const balance = (selected.amount || 0) + (selected.overdue ? 200 : 0);
+    const amt = payAmount.trim() === "" ? null : Math.floor(Number(payAmount));
+    if (amt !== null) {
+      if (!Number.isFinite(amt) || amt <= 0) {
+        flash("Enter a valid amount", "bad");
+        return;
+      }
+      if (amt > balance) {
+        flash(`Amount can't exceed ₹${balance.toLocaleString("en-IN")}`, "bad");
+        return;
+      }
+    }
     setBusy(true);
     try {
       const r = await fetch("/api/fees/pay", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: selected.id, method }),
+        body: JSON.stringify({ id: selected.id, method, amount: amt }),
       });
       const json = await r.json();
       if (!json.ok) {
-        flash("Could not post payment", "bad");
+        flash(json.error || "Could not post payment", "bad");
         setBusy(false);
         return;
       }
+      // Stash the payment details for the receipt + remember the partial state.
+      setLastPayment({
+        amount: json.fee.amount,
+        remaining: json.remaining,
+        partial: json.partial,
+        method,
+      });
       await refresh?.();
-      flash("Payment posted · receipt auto-sent", "ok");
+      flash(json.partial
+        ? `Partial payment posted · ₹${json.remaining.toLocaleString("en-IN")} still pending`
+        : "Payment posted · receipt auto-sent",
+        "ok");
     } finally {
       setBusy(false);
       setStage("paid");
@@ -257,7 +289,7 @@ export default function ScreenFees({ E, refresh, role }) {
       <div className="page-head">
         <div>
           <div className="page-eyebrow">Finance · Fees register</div>
-          <div className="page-title">Fees & <span className="amber">UPI</span></div>
+          <div className="page-title">Fees & <span className="amber">Transaction</span></div>
           <div style={{ display: "flex", gap: 10, color: "var(--ink-3)", fontSize: 12, marginTop: 12, flexWrap: "wrap" }}>
             <span className="chip ok"><span className="dot" />{moneyK(totals.collected)} collected (live)</span>
             <span className="chip warn"><span className="dot" />{moneyK(totals.pending)} pending</span>
@@ -266,12 +298,17 @@ export default function ScreenFees({ E, refresh, role }) {
         </div>
         <div className="page-actions">
           {isParent ? (
-            /* Parent view: one primary call-to-action when a pending fee exists */
-            scopedPending.length > 0 && (
-              <button className="btn accent" onClick={() => { setSelected(scopedPending[0]); setStage("pick"); flash("Let's pay this term's fee"); }}>
-                <Icon name="fees" size={13} />Pay now · {moneyK(scopedPending[0].amount)}
-              </button>
-            )
+            /* Parent view is read-only — payments are taken at the school
+               office; this screen just shows what's pending and what's been
+               recorded against this child. */
+            <span style={{
+              display: "inline-flex", alignItems: "center", gap: 6,
+              height: 30, padding: "0 12px",
+              background: "var(--bg-2)", border: "1px solid var(--rule)",
+              borderRadius: 999, fontSize: 11.5, color: "var(--ink-3)",
+            }}>
+              <Icon name="audit" size={11} />Read-only · pay at the school office
+            </span>
           ) : (
             <>
               <button className="btn" onClick={importStructure}><Icon name="upload" size={13} />Import structure</button>
@@ -398,10 +435,12 @@ export default function ScreenFees({ E, refresh, role }) {
                     <td><StatusChip status={f.status}>{f.status.charAt(0).toUpperCase() + f.status.slice(1)}</StatusChip></td>
                     <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{f.time}</td>
                     <td>
-                      {f.status !== "paid" ? (
-                        <button className="btn sm accent" onClick={() => { setSelected(f); setStage("pick"); flash(`Loaded ${f.name}`); }}>Collect</button>
-                      ) : (
+                      {f.status === "paid" ? (
                         <button className="btn sm ghost" onClick={() => openReceipt(f)}>Receipt</button>
+                      ) : isParent ? (
+                        <span style={{ fontSize: 11, color: "var(--ink-4)" }}>Pay at office</span>
+                      ) : (
+                        <button className="btn sm accent" onClick={() => { setSelected(f); setStage("pick"); flash(`Loaded ${f.name}`); }}>Collect</button>
                       )}
                     </td>
                   </tr>
@@ -411,6 +450,15 @@ export default function ScreenFees({ E, refresh, role }) {
           </div>
         </div>
 
+        {/* Parents get a read-only summary card; staff get the live Collect flow. */}
+        {isParent ? (
+          <ParentFeesSummary
+            scopedPending={scopedPending}
+            scopedRecent={scopedRecent}
+            child={E.ADDED_STUDENTS && E.ADDED_STUDENTS[0]}
+            openReceipt={openReceipt}
+          />
+        ) : (
         <div className="card col-4">
           <div className="card-head">
             <div>
@@ -470,6 +518,61 @@ export default function ScreenFees({ E, refresh, role }) {
 
               {stage === "pick" && (
                 <>
+                  {selected.status !== "paid" && (() => {
+                    const balance = (selected.amount || 0) + (selected.overdue ? 200 : 0);
+                    const amt = payAmount.trim() === "" ? balance : Math.floor(Number(payAmount) || 0);
+                    const valid = amt > 0 && amt <= balance;
+                    const remaining = balance - amt;
+                    const isPartial = remaining > 0;
+                    return (
+                      <div>
+                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                          <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Amount to pay</span>
+                          <button
+                            type="button"
+                            onClick={() => setPayAmount(String(balance))}
+                            style={{ background: "none", border: 0, color: "var(--accent)", fontSize: 11, fontWeight: 500, cursor: "pointer", padding: 0 }}
+                          >
+                            Pay full ₹{balance.toLocaleString("en-IN")}
+                          </button>
+                        </div>
+                        <div style={{
+                          display: "flex", alignItems: "center", height: 38,
+                          background: "var(--card-2)", border: `1px solid ${valid ? "var(--rule)" : "var(--bad)"}`,
+                          borderRadius: 9, overflow: "hidden",
+                        }}>
+                          <span style={{
+                            display: "inline-flex", alignItems: "center", height: "100%",
+                            padding: "0 11px",
+                            background: "var(--bg-2)", borderRight: "1px solid var(--rule)",
+                            fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--ink-3)",
+                          }}>₹</span>
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            value={payAmount}
+                            onChange={(e) => setPayAmount(e.target.value.replace(/\D/g, ""))}
+                            placeholder={String(balance)}
+                            style={{
+                              flex: 1, height: "100%", border: 0, background: "transparent",
+                              outline: "none", padding: "0 12px",
+                              fontFamily: "var(--font-mono)", fontSize: 14, color: "var(--ink)",
+                            }}
+                          />
+                        </div>
+                        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 11.5 }}>
+                          <span style={{ color: isPartial ? "var(--warn)" : "var(--ok)" }}>
+                            {!valid
+                              ? <span style={{ color: "var(--bad)" }}>Enter a valid amount up to ₹{balance.toLocaleString("en-IN")}</span>
+                              : isPartial
+                                ? <>Partial · ₹{remaining.toLocaleString("en-IN")} will remain pending</>
+                                : <>Full payment · this clears the balance</>
+                            }
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })()}
                   <div>
                     <div style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Method</div>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
@@ -543,8 +646,14 @@ export default function ScreenFees({ E, refresh, role }) {
                       )}
                     </div>
                     <div style={{ borderTop: "1px dashed var(--rule)", paddingTop: 6, display: "flex", justifyContent: "space-between", fontWeight: 600 }}>
-                      <span>PAID</span><span>{money(selected.amount + (selected.overdue ? 200 : 0))}</span>
+                      <span>PAID</span>
+                      <span>{money(lastPayment?.amount ?? (selected.amount + (selected.overdue ? 200 : 0)))}</span>
                     </div>
+                    {lastPayment?.partial && lastPayment.remaining > 0 && (
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: "var(--warn)", marginTop: 4 }}>
+                        <span>BALANCE</span><span>{money(lastPayment.remaining)} pending</span>
+                      </div>
+                    )}
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
                     <button className="btn" onClick={sendWhatsApp}><Icon name="whatsapp" size={12} />WhatsApp</button>
@@ -559,6 +668,88 @@ export default function ScreenFees({ E, refresh, role }) {
               )}
             </div>
           )}
+        </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------- parent fees summary (read-only) ----------
+// Shows the same financial picture as the staff "Collect fee" panel —
+// pending balance broken into term/activity/late, plus a list of past
+// receipts — but with no payment controls. Parents pay at the school
+// office; this card is purely informational.
+function ParentFeesSummary({ scopedPending, scopedRecent, child, openReceipt }) {
+  const totalPending = scopedPending.reduce((a, f) => a + (f.amount || 0), 0);
+  const overdueChip  = scopedPending.some((f) => f.overdue);
+  const totalPaid    = scopedRecent.reduce((a, f) => a + (f.amount || 0), 0);
+  const initials = (n) => (n || "?").trim().split(/\s+/).map((p) => p[0]).slice(0, 2).join("").toUpperCase();
+
+  return (
+    <div className="card col-4">
+      <div className="card-head">
+        <div>
+          <div className="card-title">{child?.name ? `${child.name.split(" ")[0]}'s fees` : "Fees · summary"}</div>
+          <div className="card-sub">Read-only · payments are recorded by the school office</div>
+        </div>
+      </div>
+      <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {child && (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 10, background: "var(--card-2)", border: "1px solid var(--rule)", borderRadius: 10 }}>
+            <div style={{ width: 38, height: 38, borderRadius: 9, background: "linear-gradient(135deg, var(--accent), var(--accent-2))", color: "var(--accent-ink)", display: "grid", placeItems: "center", fontWeight: 600, fontSize: 13 }}>
+              {initials(child.name)}
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 500 }}>{child.name}</div>
+              <div style={{ fontSize: 11, color: "var(--ink-3)" }}>{child.cls} · {child.id}</div>
+            </div>
+          </div>
+        )}
+
+        <div style={{ background: "var(--card-2)", border: "1px solid var(--rule)", borderRadius: 10, padding: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+            <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Outstanding</span>
+            <span className="mono" style={{ fontSize: 20, fontWeight: 500, color: totalPending > 0 ? "var(--ink)" : "var(--ok)" }}>
+              {totalPending > 0 ? `₹${totalPending.toLocaleString("en-IN")}` : "All clear"}
+            </span>
+          </div>
+          {totalPending > 0 && (
+            <div style={{ marginTop: 8, fontSize: 11.5, color: overdueChip ? "var(--bad)" : "var(--warn)" }}>
+              {overdueChip ? "One or more items overdue · please pay at the school office" : "Pending — pay at the school office"}
+            </div>
+          )}
+        </div>
+
+        <div style={{ background: "var(--card-2)", border: "1px solid var(--rule)", borderRadius: 10, padding: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+            <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Paid this term</span>
+            <span className="mono" style={{ fontSize: 14, fontWeight: 500, color: "var(--ok)" }}>₹{totalPaid.toLocaleString("en-IN")}</span>
+          </div>
+          {scopedRecent.length === 0 ? (
+            <div style={{ fontSize: 11.5, color: "var(--ink-4)" }}>No receipts on file yet.</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {scopedRecent.slice(0, 4).map((r) => (
+                <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5 }}>
+                  <span style={{ color: "var(--ink-3)" }}>
+                    {r.method} · {r.time} {r.status === "partial" && <span style={{ color: "var(--warn)" }}>· partial</span>}
+                  </span>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <span className="mono">₹{(r.amount || 0).toLocaleString("en-IN")}</span>
+                    <button className="btn sm ghost" style={{ height: 22, padding: "0 6px", fontSize: 10.5 }} onClick={() => openReceipt(r)}>Receipt</button>
+                  </span>
+                </div>
+              ))}
+              {scopedRecent.length > 4 && (
+                <div style={{ fontSize: 10.5, color: "var(--ink-4)", marginTop: 4 }}>+{scopedRecent.length - 4} more in the table on the left</div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div style={{ fontSize: 11, color: "var(--ink-4)", lineHeight: 1.5 }}>
+          To pay, visit the school office during working hours. Receipts will appear here as soon as the office records the payment.
         </div>
       </div>
     </div>

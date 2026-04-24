@@ -6,7 +6,7 @@ import { KPI, StatusChip } from "../ui";
 
 export default function ScreenComplaints({ E, refresh, role }) {
   const isParent = role === "parent";
-  const isStaff = role === "principal" || role === "teacher" || role === "super";
+  const isStaff = role === "principal" || role === "teacher" || role === "admin" || role === "academic_director";
 
   const [status, setStatus] = useState("All");
   const complaints = E.COMPLAINTS || [];
@@ -23,6 +23,8 @@ export default function ScreenComplaints({ E, refresh, role }) {
 
   const child = isParent ? (E.ADDED_STUDENTS || [])[0] : null;
   const [showForm, setShowForm] = useState(false);
+  const [showStaffLog, setShowStaffLog] = useState(false);
+  const students = E.ADDED_STUDENTS || [];
 
   const change = async (id, newStatus) => {
     try {
@@ -60,6 +62,60 @@ export default function ScreenComplaints({ E, refresh, role }) {
     } catch (e) { flash("Network error", "bad"); }
   };
 
+  // Staff (principal/admin/director/teacher) logs a complaint on behalf of a
+  // walk-in or phone-call parent. Picks the student from the roster.
+  const submitStaffLog = async (form) => {
+    try {
+      const stu = students.find((s) => s.id === form.studentId);
+      const r = await fetch("/api/complaints", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          student: stu?.name || "—",
+          studentId: stu?.id || null,
+          cls: stu?.cls || "",
+          parent: form.parent || (stu ? `Parent of ${stu.name}` : "Walk-in"),
+          issue: form.issue,
+          type: form.type,
+          submittedBy: role,
+          assigned: form.assigned || (form.type === "leave_request" ? "Class Teacher" : "Admin Desk"),
+        }),
+      });
+      const json = await r.json().catch(() => ({}));
+      if (json.ok) {
+        flash("Complaint logged");
+        setShowStaffLog(false);
+        await refresh?.();
+      } else flash(json.error || "Could not log", "bad");
+    } catch (e) { flash("Network error", "bad"); }
+  };
+
+  const exportCsv = () => {
+    if (complaints.length === 0) { flash("Nothing to export", "bad"); return; }
+    const today = new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+    const header = ["#", "ID", "Student", "Class", "Parent", "Type", "Issue", "Assigned", "Status", "Date", "Submitted by"];
+    const rows = filtered.length ? filtered : complaints;
+    const csv = [
+      `# Vidyalaya360 — Parent Complaints — ${today} (${status})`,
+      `# Generated: ${new Date().toLocaleString("en-IN")}`,
+      `# Counts: Open=${complaints.filter((c) => c.status === "Open").length} · In Progress=${complaints.filter((c) => c.status === "In Progress").length} · Resolved=${complaints.filter((c) => c.status === "Resolved").length}`,
+      header.join(","),
+      ...rows.map((c, i) => [
+        i + 1, c.id, csvEsc(c.student), csvEsc(c.cls), csvEsc(c.parent),
+        c.type === "leave_request" ? "Leave request" : "Complaint",
+        csvEsc(c.issue), csvEsc(c.assigned), c.status, csvEsc(c.date),
+        c.submittedBy || "parent",
+      ].join(",")),
+    ].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `complaints-${status.toLowerCase().replace(" ", "-")}-${today.replace(/\s+/g, "-").toLowerCase()}.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    flash(`Exported ${rows.length} complaint${rows.length === 1 ? "" : "s"}`);
+  };
+
   return (
     <div className="page">
       <Toast toast={toast} />
@@ -81,8 +137,14 @@ export default function ScreenComplaints({ E, refresh, role }) {
             <button className="btn accent" onClick={() => setShowForm(true)}><Icon name="plus" size={13} />New ticket</button>
           ) : (
             <>
-              <button className="btn"><Icon name="download" size={13} />Export</button>
-              <button className="btn accent"><Icon name="plus" size={13} />Log complaint</button>
+              <button className="btn" onClick={exportCsv} disabled={complaints.length === 0}>
+                <Icon name="download" size={13} />Export
+              </button>
+              {isStaff && (
+                <button className="btn accent" onClick={() => setShowStaffLog(true)}>
+                  <Icon name="plus" size={13} />Log complaint
+                </button>
+              )}
             </>
           )}
         </div>
@@ -181,6 +243,128 @@ export default function ScreenComplaints({ E, refresh, role }) {
           onSubmit={submitNew}
         />
       )}
+      {showStaffLog && isStaff && (
+        <StaffLogModal
+          students={students}
+          onClose={() => setShowStaffLog(false)}
+          onSubmit={submitStaffLog}
+        />
+      )}
+    </div>
+  );
+}
+
+function csvEsc(v) {
+  const s = String(v ?? "");
+  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+// ---------- log complaint modal (staff side) ----------
+// Used when a parent walks in or calls — staff records the complaint on
+// their behalf, picking the student from the live roster so it links.
+function StaffLogModal({ students, onClose, onSubmit }) {
+  const [type, setType] = useState("general");
+  const [studentId, setStudentId] = useState(students[0]?.id || "");
+  const [parent, setParent] = useState("");
+  const [issue, setIssue] = useState("");
+  const [assigned, setAssigned] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const stu = students.find((s) => s.id === studentId);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!issue.trim()) { setErr("Describe the issue"); return; }
+    if (!studentId) { setErr("Pick a student"); return; }
+    setErr("");
+    setBusy(true);
+    try {
+      await onSubmit({
+        studentId, type, issue: issue.trim(),
+        parent: parent.trim() || (stu ? `Parent of ${stu.name}` : "Walk-in"),
+        assigned: assigned.trim() || (type === "leave_request" ? "Class Teacher" : "Admin Desk"),
+      });
+    } catch (ex) { setErr(ex.message || String(ex)); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)",
+      display: "grid", placeItems: "center", zIndex: 250, padding: 16, overflowY: "auto",
+    }}>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 560, maxHeight: "calc(100vh - 32px)", overflowY: "auto" }}>
+        <div className="card-head">
+          <div>
+            <div className="card-title">Log complaint</div>
+            <div className="card-sub">Walk-in or phone-call complaint · routed to the assignee</div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
+        <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <Field label="Type">
+            <div className="segmented">
+              <button type="button" className={type === "general" ? "active" : ""} onClick={() => setType("general")}>
+                <Icon name="complaint" size={11} />Complaint / issue
+              </button>
+              <button type="button" className={type === "leave_request" ? "active" : ""} onClick={() => setType("leave_request")}>
+                <Icon name="calendar" size={11} />Leave request
+              </button>
+            </div>
+          </Field>
+          <Field label="Student *">
+            {students.length === 0 ? (
+              <div className="empty" style={{ padding: 12, fontSize: 12 }}>
+                No students on the roster yet. Add students from the Students screen first.
+              </div>
+            ) : (
+              <select className="select" value={studentId} onChange={(e) => setStudentId(e.target.value)} autoFocus>
+                {students.map((s) => (
+                  <option key={s.id} value={s.id}>{s.name} · {s.cls} · {s.id}</option>
+                ))}
+              </select>
+            )}
+          </Field>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <Field label="Parent name (optional)">
+              <input className="input" value={parent} onChange={(e) => setParent(e.target.value)} placeholder={stu ? `Parent of ${stu.name}` : "Parent"} />
+            </Field>
+            <Field label="Assign to">
+              <input className="input" value={assigned} onChange={(e) => setAssigned(e.target.value)} placeholder={type === "leave_request" ? "Class Teacher" : "Admin Desk"} />
+            </Field>
+          </div>
+          <Field label={type === "leave_request" ? "Reason and dates" : "Describe the issue"}>
+            <textarea
+              className="input"
+              value={issue}
+              onChange={(e) => setIssue(e.target.value)}
+              style={{ width: "100%", height: 96, padding: "8px 10px", lineHeight: 1.5, resize: "vertical", fontFamily: "var(--font-sans)" }}
+              placeholder={type === "leave_request"
+                ? "e.g. Family wedding 24-26 May, please grant 3 days leave"
+                : "What happened? When? Any details that help us act."}
+            />
+          </Field>
+
+          {err && (
+            <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "9px 12px", borderRadius: 7, fontSize: 12 }}>{err}</div>
+          )}
+
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
+            <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn accent" disabled={busy || !issue.trim() || !studentId}>
+              <Icon name="check" size={13} />{busy ? "Logging…" : "Log complaint"}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
