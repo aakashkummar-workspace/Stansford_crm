@@ -140,10 +140,56 @@ export default function ScreenTc({ E, refresh, role }) {
       </div>
 
       <div className="grid g-4" style={{ marginBottom: 14 }}>
-        <KPI label="Total requests" value={counts.total} sub="all-time" puck="mint" puckIcon="reports" />
-        <KPI label="Awaiting" value={counts.requested} sub={counts.requested ? "needs action" : "none pending"} puck="cream" puckIcon="clock" />
-        <KPI label="Issued" value={counts.issued} sub="printed & handed over" puck="peach" puckIcon="check" />
-        <KPI label="Rejected" value={counts.rejected} sub="declined" puck="rose" puckIcon="x" />
+        {(() => {
+          const byStatus = (s) => requests.filter((r) => r.status === s);
+          const itemFor = (r) => ({
+            label: r.studentName || r.studentId,
+            value: r.cls || "—",
+            sub: r.requestedAt ? `Requested ${String(r.requestedAt).slice(0, 10)}` : "",
+            tone: r.status === "issued" ? "ok" : r.status === "rejected" ? "bad" : "warn",
+          });
+          return (
+            <>
+              <KPI
+                label="Total requests" value={counts.total} sub="all-time"
+                puck="mint" puckIcon="reports"
+                details={{
+                  title: `TC requests · ${counts.total}`,
+                  sub: "Most recent first",
+                  items: requests.slice(0, 12).map(itemFor),
+                }}
+              />
+              <KPI
+                label="Awaiting" value={counts.requested}
+                sub={counts.requested ? "needs action" : "none pending"}
+                puck="cream" puckIcon="clock"
+                details={{
+                  title: `Awaiting · ${counts.requested}`,
+                  sub: counts.requested === 0 ? "All TC requests actioned" : "Pending review",
+                  items: byStatus("requested").map(itemFor),
+                }}
+              />
+              <KPI
+                label="Issued" value={counts.issued} sub="printed & handed over"
+                puck="peach" puckIcon="check"
+                details={{
+                  title: `Issued · ${counts.issued}`,
+                  sub: "TCs already issued",
+                  items: byStatus("issued").map(itemFor),
+                }}
+              />
+              <KPI
+                label="Rejected" value={counts.rejected} sub="declined"
+                puck="rose" puckIcon="x"
+                details={{
+                  title: `Rejected · ${counts.rejected}`,
+                  sub: counts.rejected === 0 ? "No TCs declined" : "Declined requests",
+                  items: byStatus("rejected").map(itemFor),
+                }}
+              />
+            </>
+          );
+        })()}
       </div>
 
       <div className="card">
@@ -268,52 +314,191 @@ function PrintTcModal({ tc, onClose }) {
     if (!w) return;
     const doc = w.document;
     doc.title = `TC ${tc.serialNo}`;
+    // Pretty-print a date if we have one; otherwise leave blank for hand-fill.
+    const fmt = (iso) => iso ? new Date(iso).toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric" }) : "";
+    const academicYear = (() => {
+      const d = tc.issuedAt ? new Date(tc.issuedAt) : new Date();
+      const y = d.getMonth() < 3 ? d.getFullYear() - 1 : d.getFullYear();
+      return `${y}-${String((y + 1) % 100).padStart(2, "0")}`;
+    })();
     const style = doc.createElement("style");
     style.textContent = `
-      body { font-family: ui-serif, Georgia, "Times New Roman", serif; padding: 60px 60px; color: #20140c; }
-      .head { text-align: center; border-bottom: 2px solid #20140c; padding-bottom: 12px; margin-bottom: 24px; }
-      .school { font-size: 24px; font-weight: 700; letter-spacing: 0.5px; }
-      .sub { font-size: 12px; color: #555; margin-top: 4px; }
-      .title { text-align: center; font-size: 20px; font-weight: 600; margin: 22px 0 6px; text-decoration: underline; }
-      .serial { text-align: right; font-size: 12px; color: #555; margin-bottom: 8px; }
-      .row { padding: 6px 0; font-size: 13px; border-bottom: 1px dotted #ccc; display: flex; }
-      .row .lbl { color: #666; width: 220px; flex-shrink: 0; }
-      .body { font-size: 13px; line-height: 1.7; margin-top: 18px; }
-      .sign { margin-top: 80px; display: flex; justify-content: space-between; font-size: 12px; color: #444; }
-      .sign div { border-top: 1px solid #20140c; padding-top: 6px; min-width: 200px; text-align: center; }
+      @page { size: A4; margin: 14mm 16mm; }
+      * { box-sizing: border-box; }
+      body { font-family: Arial, Helvetica, sans-serif; padding: 0; color: #000; font-size: 12px; line-height: 1.45; }
+      .head { display: flex; align-items: center; gap: 14px; border-bottom: 1.5px solid #000; padding-bottom: 10px; }
+      .head img { width: 64px; height: 64px; object-fit: contain; flex-shrink: 0; }
+      .head .school { flex: 1; text-align: center; }
+      .head .school-name { font-size: 19px; font-weight: 700; letter-spacing: 0.5px; }
+      .head .addr { font-size: 11.5px; font-weight: 600; margin-top: 2px; }
+      .head .reco { font-size: 11px; font-weight: 700; margin-top: 1px; }
+      .title { text-align: center; font-size: 15px; font-weight: 700; margin: 10px 0 14px; text-decoration: underline; letter-spacing: 0.5px; }
+      .top-meta { display: grid; grid-template-columns: 1fr; row-gap: 4px; margin-bottom: 10px; }
+      .top-meta .row { display: flex; gap: 6px; }
+      .top-meta .lbl { width: 110px; font-weight: 600; }
+      .top-meta .blank { flex: 1; border-bottom: 1px dotted #555; min-height: 14px; padding: 0 4px; }
+      .item { display: grid; grid-template-columns: 4fr 6fr; column-gap: 12px; padding: 3px 0; align-items: end; }
+      .item .l { font-size: 12px; }
+      .item .r { display: flex; align-items: end; gap: 6px; min-height: 16px; }
+      .item .r .colon { width: 6px; }
+      .item .r .val { flex: 1; border-bottom: 1px dotted #555; padding: 0 4px; min-height: 14px; }
+      .item.subline .l { padding-left: 14px; color: #222; }
+      .item.tall .r { min-height: 28px; }
+      table.cs { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 11.5px; }
+      table.cs th, table.cs td { border: 1px solid #000; padding: 6px 8px; text-align: center; vertical-align: middle; }
+      table.cs th { font-weight: 700; background: #fafafa; text-transform: uppercase; font-size: 10.5px; letter-spacing: 0.4px; }
+      .sign-block { display: flex; justify-content: flex-end; margin-top: 28px; font-size: 12px; }
+      .sign-block .col { text-align: center; }
+      .notes { margin-top: 26px; font-size: 11px; line-height: 1.5; }
+      .notes b { font-weight: 700; }
+      .declar { text-align: center; margin-top: 20px; font-weight: 700; text-decoration: underline; font-size: 12.5px; }
+      .declar-body { margin-top: 8px; font-size: 11.5px; line-height: 1.6; text-indent: 18px; }
+      .parent-sign { display: flex; justify-content: flex-end; margin-top: 28px; font-size: 12px; }
     `;
     doc.head.appendChild(style);
     doc.body.innerHTML = `
       <div class="head">
-        <div class="school">Stansford International HR.Sec.School</div>
-        <div class="sub">Run by Stansford Educational Trust &middot; Vidyalaya360</div>
+        <img src="${window.location.origin}/logo.png" alt="logo" />
+        <div class="school">
+          <div class="school-name">SANFORT INTERNATIONAL SCHOOL</div>
+          <div class="addr">No. 57, KAMARAJ SALAI POORANANKUPPAM PUDUCHERRY -605007</div>
+          <div class="reco">(RECOGNISED BY THE GOVT. OF PUDUCHERRY)</div>
+        </div>
       </div>
-      <div class="serial">Serial No: <b>${tc.serialNo}</b><br/>Date: ${new Date(tc.issuedAt).toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric" })}</div>
+
       <div class="title">TRANSFER CERTIFICATE</div>
-      <div class="row"><span class="lbl">1. Name of the student</span><span>${tc.studentName}</span></div>
-      <div class="row"><span class="lbl">2. Student ID</span><span>${tc.studentId}</span></div>
-      <div class="row"><span class="lbl">3. Class &amp; Section last attended</span><span>${tc.cls}</span></div>
-      <div class="row"><span class="lbl">4. Date of admission to school</span><span>—</span></div>
-      <div class="row"><span class="lbl">5. Date of leaving the school</span><span>${new Date(tc.issuedAt).toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric" })}</span></div>
-      <div class="row"><span class="lbl">6. Reason for leaving</span><span>${tc.reason || "—"}</span></div>
-      <div class="row"><span class="lbl">7. Conduct &amp; character</span><span>Good</span></div>
-      <div class="row"><span class="lbl">8. Whether qualified for promotion</span><span>Yes</span></div>
-      <div class="row"><span class="lbl">9. Any dues outstanding</span><span>None</span></div>
 
-      <div class="body">
-        Certified that the above particulars are correct as per the school records and that the student bearing the
-        above-named details has been granted Transfer Certificate to enable continuance of studies elsewhere.
+      <div class="top-meta">
+        <div class="row"><span class="lbl">T.C No</span><span>:</span><span class="blank">${escape(tc.serialNo || "")}</span></div>
+        <div class="row"><span class="lbl">Admission No</span><span>:</span><span class="blank">${escape(tc.studentId || "")}</span></div>
+        <div class="row"><span class="lbl">U. I .D. No</span><span>:</span><span class="blank"></span></div>
       </div>
 
-      <div class="sign">
-        <div>Class Teacher</div>
-        <div>Principal</div>
-        <div>School Seal</div>
+      <div class="item">
+        <div class="l">1. a) Name of the School</div>
+        <div class="r"><span class="colon">:</span><span class="val">SANFORT INTERNATIONAL SCHOOL</span></div>
       </div>
+      <div class="item subline">
+        <div class="l">b) Name of the Education District / Revenue District</div>
+        <div class="r"><span class="colon">:</span><span class="val">PUDUCHERRY</span></div>
+      </div>
+      <div class="item">
+        <div class="l">2. Name of the Pupil (in Block letters)</div>
+        <div class="r"><span class="colon">:</span><span class="val">${escape((tc.studentName || "").toUpperCase())}</span></div>
+      </div>
+      <div class="item">
+        <div class="l">3. Name of the Father and Mother of the pupil</div>
+        <div class="r"><span class="colon">:</span><span class="val"></span></div>
+      </div>
+      <div class="item">
+        <div class="l">4. Nationality and Religion</div>
+        <div class="r"><span class="colon">:</span><span class="val"></span></div>
+      </div>
+      <div class="item">
+        <div class="l">5. Community<br/><span style="padding-left:0">&nbsp;&nbsp;&nbsp;&nbsp;Whether He/ She belongs to SC/ST/BC/MBC</span></div>
+        <div class="r"><span class="colon">:</span><span class="val"></span></div>
+      </div>
+      <div class="item">
+        <div class="l">6. Gender</div>
+        <div class="r"><span class="colon">:</span><span class="val"></span></div>
+      </div>
+      <div class="item tall">
+        <div class="l">7. Date of Birth as entered in the Admission<br/>&nbsp;&nbsp;&nbsp;&nbsp;Register in figures and words</div>
+        <div class="r"><span class="colon">:</span><span class="val"></span></div>
+      </div>
+      <div class="item">
+        <div class="l">8. Personal Marks of Identification</div>
+        <div class="r"><span class="colon">:</span><span class="val"></span></div>
+      </div>
+      <div class="item">
+        <div class="l">9. Date of Admission and Standard in Which admitted</div>
+        <div class="r"><span class="colon">:</span><span class="val"></span></div>
+      </div>
+      <div class="item tall">
+        <div class="l">10. Standard in which the pupil was studying at the time<br/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Of leaving (in words)</div>
+        <div class="r"><span class="colon">:</span><span class="val">${escape(tc.cls || "")}</span></div>
+      </div>
+      <div class="item">
+        <div class="l">11. Whether qualified for promotion to higher standard</div>
+        <div class="r"><span class="colon">:</span><span class="val">Yes</span></div>
+      </div>
+      <div class="item tall">
+        <div class="l">12. Whether the pupil was in the receipt of any scholarship?<br/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(Nature of the scholarship to be specified)</div>
+        <div class="r"><span class="colon">:</span><span class="val"></span></div>
+      </div>
+      <div class="item tall">
+        <div class="l">13. Whether the pupil has undergone Medical inspection<br/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;During the last academic year</div>
+        <div class="r"><span class="colon">:</span><span class="val"></span></div>
+      </div>
+      <div class="item">
+        <div class="l">14. Date on which the pupil actually left the School</div>
+        <div class="r"><span class="colon">:</span><span class="val">${escape(fmt(tc.issuedAt))}</span></div>
+      </div>
+      <div class="item">
+        <div class="l">15. The Pupil's conduct and character</div>
+        <div class="r"><span class="colon">:</span><span class="val">Good</span></div>
+      </div>
+      <div class="item tall">
+        <div class="l">16. Date on which application for Transfer Certificate was<br/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Made on behalf of the pupil by the parent or guardian</div>
+        <div class="r"><span class="colon">:</span><span class="val">${escape(fmt(tc.requestedAt))}</span></div>
+      </div>
+      <div class="item">
+        <div class="l">17. Date of the Transfer Certificate</div>
+        <div class="r"><span class="colon">:</span><span class="val">${escape(fmt(tc.issuedAt))}</span></div>
+      </div>
+
+      <div style="margin-top:14px;font-weight:600;">18. Course of Study</div>
+      <table class="cs">
+        <thead>
+          <tr>
+            <th>Name of the<br/>School</th>
+            <th>Academic Year</th>
+            <th>Standard<br/>Studied</th>
+            <th>First Language</th>
+            <th>Medium of<br/>Instruction</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>SANFORT<br/>INTERNATIONAL<br/>SCHOOL</td>
+            <td>${academicYear}</td>
+            <td>${escape(tc.cls || "")}</td>
+            <td>TAMIL</td>
+            <td>ENGLISH</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="sign-block">
+        <div class="col">
+          Signature of the Headmistress<br/>
+          With date and school seal
+        </div>
+      </div>
+
+      <div class="notes">
+        <b>Note:</b>
+        <ol style="margin:6px 0 0 22px;padding:0;">
+          <li>Erasures and unauthenticated of fraudulent alterations<br/>In the certificate will lead to is cancellation.</li>
+          <li>Should be signed in ink by the Head of the Institution<br/>Who will be held responsible for the correctness of the entries.</li>
+        </ol>
+      </div>
+
+      <div class="declar">DECLARATION BY THE PARENT OR GUARDIAN</div>
+      <div class="declar-body">
+        I hereby declare that the particulars recorded against items 2 to 7 are correct and that no Change will be demanded by me in future.
+      </div>
+
+      <div class="parent-sign">Signature of the Parent of Guardian</div>
     `;
     w.focus();
     setTimeout(() => w.print(), 250);
   };
+
+  // Local HTML escaper for the print template strings.
+  function escape(s) {
+    return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
 
   return (
     <ModalShell title={`Transfer Certificate · ${tc.serialNo}`} sub={`${tc.studentName} (${tc.cls})`} onClose={onClose} width={500}>

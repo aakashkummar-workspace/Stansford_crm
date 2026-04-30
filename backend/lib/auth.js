@@ -26,8 +26,12 @@ if (!process.env.AUTH_SECRET) {
 
 const SECRET = new TextEncoder().encode(SECRET_RAW);
 
-// Five recognised roles. Anything else is rejected at login time.
-export const ROLE_KEYS = ["admin", "academic_director", "principal", "teacher", "parent"];
+// Seven canonical roles. Anything else is rejected at login time.
+// School / Trust Accountant were added in v2 alongside the finance split.
+export const ROLE_KEYS = [
+  "admin", "academic_director", "principal", "teacher", "parent",
+  "school_accountant", "trust_accountant",
+];
 
 export const ROLE_LABEL = {
   admin: "Admin",
@@ -35,6 +39,8 @@ export const ROLE_LABEL = {
   principal: "Principal",
   teacher: "Teacher",
   parent: "Parent",
+  school_accountant: "School Accountant",
+  trust_accountant: "Trust Accountant",
 };
 
 export async function hashPassword(plain) {

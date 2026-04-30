@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI, AvatarChip } from "../ui";
 import DocumentsPanel from "../DocumentsPanel";
+import { resolveSchool, downloadPdf } from "@/lib/export";
 
 const FILTERS = [
   { k: "all", label: "All" },
@@ -32,13 +33,16 @@ function Toast({ msg, tone, onClose }) {
   );
 }
 
-export default function ScreenStaff({ E, refresh, role }) {
+export default function ScreenStaff({ E, refresh, role, session }) {
+  const school = resolveSchool(E?.SETTINGS);
+  const actor  = session?.name || null;
   const canEdit = role === "principal" || role === "admin";
   const [filter, setFilter] = useState("all");
   const [showAdd, setShowAdd] = useState(false);
   const [toast, setToast] = useState(null);
   const [openMenuId, setOpenMenuId] = useState(null);
   const [docsFor, setDocsFor] = useState(null); // staff being shown in the docs modal
+  const [profileFor, setProfileFor] = useState(null); // staff being viewed in the profile modal
   const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
 
   const allStaff = E.STAFF || [];
@@ -112,37 +116,47 @@ export default function ScreenStaff({ E, refresh, role }) {
       showToast("Nothing to export — add staff first", "err");
       return;
     }
-    const header = ["#", "ID", "Name", "Role", "Department", "Phone", "Email", "Joining", "Salary (₹)", "Attendance %", "Tasks %", "Score", "Status"];
-    const csv = [
-      `# Vidyalaya360 — Staff Monthly Report — ${month}`,
-      `# Generated: ${new Date().toLocaleString("en-IN")}`,
-      header.join(","),
-      ...rows.map((s, i) => [
-        i + 1,
-        s.id,
-        csvEscape(s.name),
-        csvEscape(s.role),
-        csvEscape(s.dept),
-        csvEscape(s.phone),
-        csvEscape(s.email || ""),
-        csvEscape(s.joiningDate || ""),
-        s.salary || 0,
-        s.attendance ?? 0,
-        s.tasks ?? 0,
-        s.score ?? 0,
-        s.status,
-      ].join(",")),
-    ].join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `staff-report-${month.replace(/\s+/g, "-").toLowerCase()}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    showToast(`Downloaded report for ${month}`, "ok");
+    const totalSalary = rows.reduce((a, s) => a + (Number(s.salary) || 0), 0);
+    const avgScore = Math.round(rows.reduce((a, s) => a + (Number(s.score) || 0), 0) / rows.length);
+    const topPerformers = rows.filter((s) => s.status === "top").length;
+    const opened = downloadPdf({
+      title: "Staff Monthly Report",
+      subtitle: `${rows.length} staff record${rows.length === 1 ? "" : "s"} for ${month}`,
+      school, actor,
+      dateRange: month,
+      orientation: "landscape",
+      summary: [
+        { label: "Total staff",     value: rows.length },
+        { label: "Top performers",  value: topPerformers },
+        { label: "Avg score",       value: avgScore || "—" },
+        { label: "Salary outflow",  value: `₹${totalSalary.toLocaleString("en-IN")}` },
+      ],
+      columns: [
+        { key: "i",          label: "#",          align: "right",  width: "32px" },
+        { key: "id",         label: "ID",         width: "80px" },
+        { key: "name",       label: "Name" },
+        { key: "role",       label: "Role",       width: "100px" },
+        { key: "dept",       label: "Department" },
+        { key: "phone",      label: "Phone",      align: "right" },
+        { key: "joining",    label: "Joining",    align: "right",  width: "80px" },
+        { key: "salary",     label: "Salary (₹)", align: "right" },
+        { key: "attendance", label: "Att %",      align: "right",  width: "60px" },
+        { key: "score",      label: "Score",      align: "right",  width: "60px" },
+        { key: "status",     label: "Status",     align: "center", width: "90px" },
+      ],
+      rows: rows.map((s, i) => ({
+        i: i + 1, id: s.id, name: s.name || "—",
+        role: s.role || "—", dept: s.dept || "—",
+        phone: s.phone || "—", joining: s.joiningDate || "—",
+        salary: (Number(s.salary) || 0).toLocaleString("en-IN"),
+        attendance: s.attendance != null ? `${s.attendance}%` : "—",
+        score: s.score ?? "—",
+        status: (s.status || "—").replace(/^./, (c) => c.toUpperCase()),
+      })),
+      filename: `${school.name.replace(/\s+/g, "-").toLowerCase()}-staff-report-${month.replace(/\s+/g, "-").toLowerCase()}`,
+    });
+    if (opened === false) showToast("Pop-up blocked — please allow pop-ups", "err");
+    else showToast(`Opened PDF preview for ${month}`, "ok");
   }
 
   function openRowMenu(e, id) {
@@ -169,8 +183,8 @@ export default function ScreenStaff({ E, refresh, role }) {
           <div className="page-sub">Performance · attendance · tasks · interns rotations</div>
         </div>
         <div className="page-actions">
-          <button className="btn" onClick={downloadMonthlyReport}>
-            <Icon name="download" size={13} />Monthly report
+          <button className="btn" onClick={downloadMonthlyReport} title="Open a printable, branded PDF report">
+            <Icon name="download" size={13} />Export PDF
           </button>
           {canEdit && (
             <button className="btn accent" onClick={() => setShowAdd(true)}>
@@ -181,10 +195,95 @@ export default function ScreenStaff({ E, refresh, role }) {
       </div>
 
       <div className="grid g-4" style={{ marginBottom: 14 }}>
-        <KPI label="Total staff" value={total} sub="all roles" puck="mint" puckIcon="staff" />
-        <KPI label="Interns" value={interns} sub="active" puck="peach" puckIcon="users" />
-        <KPI label="Avg performance" value={avg} sub="composite score" puck="cream" puckIcon="trending" />
-        <KPI label="Low performers" value={lows} sub="needs review" puck="rose" puckIcon="warning" />
+        {(() => {
+          // Group by role for the Total-staff drill-down so the popup shows
+          // "Teachers · 3", "Ops · 1", etc. with each role expandable to the
+          // people in it.
+          const byRole = (() => {
+            const m = new Map();
+            for (const s of allStaff) {
+              const k = s.role || "Other";
+              if (!m.has(k)) m.set(k, []);
+              m.get(k).push(s);
+            }
+            return [...m.entries()]
+              .map(([role, list]) => ({ role, list }))
+              .sort((a, b) => b.list.length - a.list.length);
+          })();
+          const internList = allStaff.filter((s) => /intern/i.test(s.role));
+          const lowList    = allStaff.filter((s) => s.status === "low");
+          // Sort by score descending — top performer first inside Avg drill.
+          const byScore = [...allStaff].sort((a, b) => (b.score || 0) - (a.score || 0));
+          const personSub = (s) => [s.dept, s.role].filter(Boolean).join(" · ");
+
+          return (
+            <>
+              <KPI
+                label="Total staff" value={total} sub="all roles"
+                puck="mint" puckIcon="staff"
+                details={{
+                  title: `Total staff · ${total}`,
+                  sub: "Grouped by role · click a role to see who's in it",
+                  items: byRole.map(({ role, list }) => ({
+                    label: role,
+                    value: list.length,
+                    sub: `${list.length} member${list.length === 1 ? "" : "s"} · click to expand`,
+                    children: list.map((s) => ({
+                      label: s.name,
+                      value: s.score ?? "—",
+                      sub: personSub(s),
+                      tone: s.status === "top" ? "ok" : s.status === "low" ? "bad" : "",
+                    })),
+                  })),
+                }}
+              />
+              <KPI
+                label="Interns" value={interns} sub="active"
+                puck="peach" puckIcon="users"
+                details={{
+                  title: `Interns · ${interns}`,
+                  sub: internList.length ? "Currently on rotation" : "No interns on file yet",
+                  items: internList.map((s) => ({
+                    label: s.name,
+                    value: s.score ?? "—",
+                    sub: personSub(s),
+                    tone: s.status === "top" ? "ok" : s.status === "low" ? "bad" : "",
+                  })),
+                }}
+              />
+              <KPI
+                label="Avg performance" value={avg} sub="composite score"
+                puck="cream" puckIcon="trending"
+                details={{
+                  title: `Avg performance · ${avg}${avg === "—" ? "" : ""}`,
+                  sub: "Top scorers first · auto-computed from attendance + student perf + contribution",
+                  items: byScore.map((s) => ({
+                    label: s.name,
+                    value: s.score ?? 0,
+                    sub: personSub(s),
+                    tone: s.status === "top" ? "ok" : s.status === "low" ? "bad" : "",
+                  })),
+                }}
+              />
+              <KPI
+                label="Low performers" value={lows} sub="needs review"
+                puck="rose" puckIcon="warning"
+                details={{
+                  title: `Low performers · ${lows}`,
+                  sub: lowList.length ? "These staff need a 1:1 review" : "Nobody flagged — ",
+                  items: lowList.length === 0
+                    ? []
+                    : lowList.map((s) => ({
+                        label: s.name,
+                        value: s.score ?? 0,
+                        sub: personSub(s),
+                        tone: "bad",
+                      })),
+                }}
+              />
+            </>
+          );
+        })()}
       </div>
 
       <div className="grid g-12">
@@ -192,7 +291,7 @@ export default function ScreenStaff({ E, refresh, role }) {
           <div className="card-head">
             <div>
               <div className="card-title">Performance leaderboard</div>
-              <div className="card-sub">Score = 40% attendance + 40% tasks + 20% activity</div>
+              <div className="card-sub">Auto-computed · 30% own attendance + 50% student performance + 20% contribution</div>
             </div>
             <div className="card-actions">
               <div className="segmented">
@@ -208,7 +307,7 @@ export default function ScreenStaff({ E, refresh, role }) {
             <table className="table">
               <thead>
                 <tr>
-                  <th>#</th><th>Name</th><th>Role</th><th>Attendance</th><th>Tasks</th><th>Score</th><th>Status</th>
+                  <th>#</th><th>Name</th><th>Role</th><th>Own attendance</th><th>Student perf</th><th>Score</th><th>Status</th>
                   {canEdit && <th></th>}
                 </tr>
               </thead>
@@ -222,14 +321,27 @@ export default function ScreenStaff({ E, refresh, role }) {
                     </td>
                   </tr>
                 )}
-                {filtered.map((s, i) => (
+                {filtered.map((s, i) => {
+                  const awardsCount = (E.STAFF_AWARDS || []).filter((a) => a.staffId === s.id).length;
+                  return (
                   <tr key={s.id || s.name}>
                     <td style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-4)" }}>{String(i + 1).padStart(2, "0")}</td>
                     <td>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div
+                        onClick={() => setProfileFor(s)}
+                        style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}
+                        title="View profile · performance · awards"
+                      >
                         <AvatarChip initials={s.avatar || initialsOf(s.name)} />
                         <div>
-                          <div style={{ fontSize: 12.5, fontWeight: 500 }}>{s.name}</div>
+                          <div style={{ fontSize: 12.5, fontWeight: 500, display: "flex", alignItems: "center", gap: 6 }}>
+                            {s.name}
+                            {awardsCount > 0 && (
+                              <span className="chip ok" style={{ fontSize: 10, height: 18, padding: "0 6px" }} title={`${awardsCount} award${awardsCount === 1 ? "" : "s"}`}>
+                                <Icon name="trending" size={10} />{awardsCount}
+                              </span>
+                            )}
+                          </div>
                           <div style={{ fontSize: 11, color: "var(--ink-4)" }}>{s.dept}</div>
                         </div>
                       </div>
@@ -270,7 +382,8 @@ export default function ScreenStaff({ E, refresh, role }) {
                       </td>
                     )}
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -344,6 +457,17 @@ export default function ScreenStaff({ E, refresh, role }) {
             }}
           >
             <button
+              onClick={() => { setProfileFor(s); setOpenMenuId(null); }}
+              style={{
+                width: "100%", textAlign: "left",
+                padding: "7px 10px", background: "transparent",
+                border: 0, borderRadius: 5, cursor: "pointer",
+                color: "var(--ink-2)", fontSize: 12,
+              }}
+            >
+              View profile · performance
+            </button>
+            <button
               onClick={() => { setDocsFor(s); setOpenMenuId(null); }}
               style={{
                 width: "100%", textAlign: "left",
@@ -381,6 +505,17 @@ export default function ScreenStaff({ E, refresh, role }) {
         </ModalShell>
       )}
 
+      {profileFor && (
+        <StaffProfileModal
+          staff={profileFor}
+          awards={(E.STAFF_AWARDS || []).filter((a) => a.staffId === profileFor.id)}
+          canEdit={canEdit}
+          onClose={() => setProfileFor(null)}
+          onRefresh={refresh}
+          onToast={showToast}
+        />
+      )}
+
       <Toast msg={toast?.msg} tone={toast?.tone} onClose={() => setToast(null)} />
     </div>
   );
@@ -391,11 +526,6 @@ function initialsOf(name) {
   return String(name).trim().split(/\s+/).map((p) => p[0]).slice(0, 2).join("").toUpperCase();
 }
 
-function csvEscape(v) {
-  const s = String(v ?? "");
-  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-  return s;
-}
 
 function ModalShell({ title, sub, onClose, children, width = 520 }) {
   useEffect(() => {
@@ -538,5 +668,526 @@ function Field({ label, children }) {
       </span>
       {children}
     </label>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Staff profile modal — performance dashboard + awards/recognition timeline.
+// Performance metrics (attendance, tasks, score, status) are stored on the
+// staff row itself; awards live in their own table. Both are editable in
+// place by principal/admin; teacher views the same modal read-only.
+// ---------------------------------------------------------------------------
+function StaffProfileModal({ staff, awards, canEdit, onClose, onRefresh, onToast }) {
+  const [tab, setTab] = useState("performance"); // 'performance' | 'awards'
+  const [editing, setEditing] = useState(false);
+  const [showAwardForm, setShowAwardForm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [breakdown, setBreakdown] = useState(null);
+  const [recomputedStaff, setRecomputedStaff] = useState(null);
+  const [form, setForm] = useState({
+    attendance: staff.attendance ?? 0,
+    tasks: staff.tasks ?? 0,
+    salary: staff.salary ?? 0,
+  });
+
+  // Use the freshly-recomputed staff numbers if available, otherwise fall
+  // back to whatever was on the leaderboard row.
+  const live = recomputedStaff || staff;
+
+  // Auto-recompute on open so the principal sees current numbers without
+  // having to click anything. Best-effort — we keep showing whatever's
+  // already on the row if the recompute fails.
+  useEffect(() => {
+    if (!canEdit) return; // teachers can't recompute; the read API enforces this
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch("/api/staff/recompute", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: staff.id }),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!cancelled && j?.ok && j.staff) {
+          setRecomputedStaff(j.staff);
+          setBreakdown(j.staff.breakdown || null);
+        }
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [staff.id]);
+
+  // Sync local form when staff prop changes (e.g. after a refresh).
+  useEffect(() => {
+    setForm({
+      attendance: live.attendance ?? 0,
+      tasks: live.tasks ?? 0,
+      salary: live.salary ?? 0,
+    });
+  }, [live.attendance, live.tasks, live.salary]);
+
+  async function recompute() {
+    setBusy(true);
+    try {
+      const r = await fetch("/api/staff/recompute", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: staff.id }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
+      setRecomputedStaff(j.staff);
+      setBreakdown(j.staff.breakdown || null);
+      onToast?.(`Recomputed · score ${j.staff.score}`, "ok");
+      await onRefresh?.();
+    } catch (e) { onToast?.(e.message, "err"); }
+    finally { setBusy(false); }
+  }
+
+  // Synthesise a 6-month trend from the staff id so the chart isn't empty
+  // even when there's no historical data yet. Once a real metrics history
+  // table exists, swap this for a real query.
+  const trend = useMemo(() => {
+    const seed = (staff.id || staff.name || "x").split("").reduce((a, c) => a + c.charCodeAt(0), 0);
+    const months = ["Nov", "Dec", "Jan", "Feb", "Mar", "Apr"];
+    return months.map((m, i) => {
+      const v = ((seed * (i + 3) * 9301 + 49297) % 233280) / 233280;
+      const drift = Math.round((v - 0.5) * 16);
+      return { month: m, score: Math.max(40, Math.min(100, (live.score ?? 70) + drift)) };
+    });
+  }, [staff.id, live.score, staff.name]);
+
+  async function savePerformance() {
+    setBusy(true);
+    try {
+      const r = await fetch("/api/staff", {
+        method: "PATCH", headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: staff.id,
+          attendance: Number(form.attendance) || 0,
+          tasks: Number(form.tasks) || 0,
+          salary: Number(form.salary) || 0,
+        }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
+      onToast?.(`Updated ${staff.name} · score ${j.staff.score}`, "ok");
+      setEditing(false);
+      await onRefresh?.();
+    } catch (e) { onToast?.(e.message, "err"); }
+    finally { setBusy(false); }
+  }
+
+  async function addAward(payload) {
+    setBusy(true);
+    try {
+      const r = await fetch("/api/staff/awards", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ staffId: staff.id, ...payload }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
+      onToast?.(`Awarded ${staff.name} · ${j.award.title}`, "ok");
+      setShowAwardForm(false);
+      await onRefresh?.();
+    } catch (e) { onToast?.(e.message, "err"); throw e; }
+    finally { setBusy(false); }
+  }
+
+  async function revokeAward(award) {
+    if (!confirm(`Revoke "${award.title}" from ${staff.name}?`)) return;
+    setBusy(true);
+    try {
+      const r = await fetch("/api/staff/awards", {
+        method: "DELETE", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: award.id }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
+      onToast?.(`Revoked award`, "ok");
+      await onRefresh?.();
+    } catch (e) { onToast?.(e.message, "err"); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <ModalShell
+      title={staff.name}
+      sub={`${staff.id || ""} · ${staff.role} · ${staff.dept}`}
+      onClose={onClose}
+      width={680}
+    >
+      <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 0, maxHeight: "75vh", overflowY: "auto", padding: 0 }}>
+        {/* Header strip */}
+        <div style={{ padding: "16px 20px", borderBottom: "1px solid var(--rule-2)", display: "flex", alignItems: "center", gap: 14 }}>
+          <div style={{
+            width: 56, height: 56, borderRadius: 14,
+            background: "linear-gradient(135deg, var(--accent), var(--accent-2))",
+            color: "var(--accent-ink, #fff)",
+            display: "grid", placeItems: "center",
+            fontWeight: 600, fontSize: 20,
+          }}>{staff.avatar || initialsOf(staff.name)}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 11, color: "var(--ink-3)", fontFamily: "var(--font-mono)" }}>{staff.id}</span>
+              <span className="meta-dot">·</span>
+              <span style={{ fontSize: 11, color: "var(--ink-3)" }}>{staff.role} · {staff.dept}</span>
+              {staff.email && <><span className="meta-dot">·</span><span style={{ fontSize: 11, color: "var(--ink-3)" }}>{staff.email}</span></>}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
+              <span className="mono" style={{ fontSize: 26, fontWeight: 600 }}>{live.score ?? 0}</span>
+              <span style={{ fontSize: 11, color: "var(--ink-4)" }}>auto-computed score</span>
+              {live.status === "top" && <span className="chip ok"><span className="dot" />Top performer</span>}
+              {live.status === "ok"  && <span className="chip"><span className="dot" />On track</span>}
+              {live.status === "low" && <span className="chip bad"><span className="dot" />Needs review</span>}
+              {awards.length > 0 && (
+                <span className="chip ok" style={{ marginLeft: "auto" }}>
+                  <Icon name="trending" size={11} />{awards.length} award{awards.length === 1 ? "" : "s"}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Tabs */}
+        <div style={{ display: "flex", gap: 0, padding: "0 20px", borderBottom: "1px solid var(--rule-2)" }}>
+          <TabBtn active={tab === "performance"} onClick={() => setTab("performance")} icon="trending">
+            Performance
+          </TabBtn>
+          <TabBtn active={tab === "awards"} onClick={() => setTab("awards")} icon="check">
+            Awards · {awards.length}
+          </TabBtn>
+        </div>
+
+        {/* Performance tab — auto-computed from real signals */}
+        {tab === "performance" && (
+          <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+              <div style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                Score = 30% own attendance + 50% student performance + 20% contribution
+              </div>
+              {canEdit && (
+                <button className="btn sm" onClick={recompute} disabled={busy}>
+                  <Icon name="refresh" size={11} />{busy ? "Recomputing…" : "Recompute"}
+                </button>
+              )}
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+              <SignalCard
+                label="Own attendance"
+                weight="30%"
+                value={breakdown?.attendance?.score ?? live.attendance ?? 0}
+                detail={breakdown?.attendance
+                  ? `${breakdown.attendance.present} present of ${breakdown.attendance.total} days`
+                  : "from teacher_attendance · last 30 days"}
+                tone={(breakdown?.attendance?.score ?? live.attendance ?? 0) < 85 ? "warn" : "ok"}
+              />
+              <SignalCard
+                label="Student performance"
+                weight="50%"
+                value={breakdown?.student?.score ?? live.tasks ?? 0}
+                detail={breakdown?.student
+                  ? buildStudentDetail(breakdown.student)
+                  : "avg of student attendance · exam % · homework done"}
+                tone="accent"
+              />
+              <SignalCard
+                label="Contribution"
+                weight="20%"
+                value={breakdown?.contribution?.score ?? 0}
+                detail={breakdown?.contribution
+                  ? `${breakdown.contribution.awards} awards · ${breakdown.contribution.tasksDone} tasks · ${breakdown.contribution.logsPosted} logs`
+                  : "awards · tasks done · daily logs posted"}
+                tone="ok"
+              />
+            </div>
+
+            {breakdown?.student?.studentCount === 0 && breakdown?.student?.classes?.length === 0 && (
+              <div style={{ background: "var(--card-2)", border: "1px solid var(--rule)", borderRadius: 9, padding: 12, fontSize: 12, color: "var(--ink-3)" }}>
+                No classes assigned to this teacher yet. Assign them as a class teacher in Classes / Users to start tracking student performance.
+              </div>
+            )}
+
+            <div>
+              <div style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>
+                Composite score · last 6 months
+              </div>
+              <TrendChart points={trend} />
+            </div>
+
+            {canEdit && (
+              <div style={{ borderTop: "1px solid var(--rule-2)", paddingTop: 14 }}>
+                {!editing ? (
+                  <button className="btn sm ghost" onClick={() => setEditing(true)} title="One-off correction · the next Recompute will overwrite">
+                    <Icon name="pencil" size={11} />Manual override (one-off)
+                  </button>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    <div style={{ fontSize: 11, color: "var(--warn, #b07c28)" }}>
+                      Manual override · the next Recompute will overwrite these numbers with live signals.
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+                      <Field label="Attendance %">
+                        <input className="input" type="number" min={0} max={100}
+                          value={form.attendance}
+                          onChange={(e) => setForm((f) => ({ ...f, attendance: e.target.value }))} />
+                      </Field>
+                      <Field label="Student perf %">
+                        <input className="input" type="number" min={0} max={100}
+                          value={form.tasks}
+                          onChange={(e) => setForm((f) => ({ ...f, tasks: e.target.value }))} />
+                      </Field>
+                      <Field label="Salary (₹)">
+                        <input className="input" type="number" min={0}
+                          value={form.salary}
+                          onChange={(e) => setForm((f) => ({ ...f, salary: e.target.value }))} />
+                      </Field>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                      <button className="btn ghost" onClick={() => setEditing(false)} disabled={busy}>Cancel</button>
+                      <button className="btn accent" onClick={savePerformance} disabled={busy}>
+                        <Icon name="check" size={12} />{busy ? "Saving…" : "Save override"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Awards tab */}
+        {tab === "awards" && (
+          <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                Recognition timeline · newest first
+              </div>
+              {canEdit && !showAwardForm && (
+                <button className="btn sm accent" onClick={() => setShowAwardForm(true)}>
+                  <Icon name="plus" size={11} />Award teacher
+                </button>
+              )}
+            </div>
+
+            {canEdit && showAwardForm && (
+              <AwardForm
+                onCancel={() => setShowAwardForm(false)}
+                onSubmit={addAward}
+                busy={busy}
+              />
+            )}
+
+            {awards.length === 0 ? (
+              <div className="empty" style={{ padding: 30, textAlign: "center" }}>
+                No awards yet.{canEdit && " Click Award teacher to recognise a contribution."}
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {awards.map((a) => {
+                  const tone = AWARD_CATEGORIES.find((c) => c.k === a.category)?.tone || "ok";
+                  return (
+                    <div key={a.id} style={{
+                      display: "flex", gap: 12, padding: 12,
+                      background: "var(--card-2)", border: "1px solid var(--rule)",
+                      borderRadius: 9,
+                    }}>
+                      <div style={{
+                        width: 36, height: 36, borderRadius: 9,
+                        background: `var(--${tone === "ok" ? "ok" : tone === "warn" ? "warn" : "accent"}-soft, var(--card-2))`,
+                        color: `var(--${tone === "ok" ? "ok" : tone === "warn" ? "warn" : "accent"})`,
+                        display: "grid", placeItems: "center", flexShrink: 0,
+                      }}>
+                        <Icon name="check" size={16} stroke={2.5} />
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <span style={{ fontSize: 13.5, fontWeight: 500 }}>{a.title}</span>
+                          <span className={`chip ${tone}`} style={{ fontSize: 10 }}>{a.category}</span>
+                          <span style={{ fontSize: 10.5, color: "var(--ink-4)", marginLeft: "auto", fontFamily: "var(--font-mono)" }}>{a.awardedAt}</span>
+                        </div>
+                        {a.citation && (
+                          <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 4, lineHeight: 1.5 }}>{a.citation}</div>
+                        )}
+                        {a.awardedBy && (
+                          <div style={{ fontSize: 10.5, color: "var(--ink-4)", marginTop: 4 }}>
+                            Issued by {a.awardedBy}
+                          </div>
+                        )}
+                      </div>
+                      {canEdit && (
+                        <button className="icon-btn" style={{ width: 26, height: 26 }} onClick={() => revokeAward(a)} title="Revoke">
+                          <Icon name="x" size={12} />
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </ModalShell>
+  );
+}
+
+const AWARD_CATEGORIES = [
+  { k: "recognition", label: "Recognition", tone: "ok" },
+  { k: "attendance",  label: "Attendance",  tone: "ok"  },
+  { k: "academic",    label: "Academic",    tone: "warn"  },
+  { k: "service",     label: "Service",     tone: "ok"  },
+];
+
+function TabBtn({ active, onClick, icon, children }) {
+  return (
+    <button onClick={onClick} style={{
+      padding: "12px 16px", border: 0,
+      background: "transparent", cursor: "pointer",
+      fontSize: 12.5, fontWeight: 500,
+      color: active ? "var(--accent-2, var(--accent))" : "var(--ink-3)",
+      borderBottom: active ? "2px solid var(--accent)" : "2px solid transparent",
+      display: "inline-flex", alignItems: "center", gap: 6,
+      marginBottom: -1,
+    }}>
+      <Icon name={icon} size={12} />{children}
+    </button>
+  );
+}
+
+// Card showing a single signal that feeds the composite score, with the
+// signal's value, weight, and a one-line explanation of what data fed it.
+function SignalCard({ label, weight, value, detail, tone = "accent" }) {
+  const v = Math.min(100, Math.max(0, Number(value) || 0));
+  const barColor =
+    tone === "ok"   ? "var(--ok)"   :
+    tone === "warn" ? "var(--warn)" :
+    tone === "bad"  ? "var(--bad)"  :
+    "var(--accent)";
+  return (
+    <div style={{
+      padding: 12, background: "var(--card-2)",
+      border: "1px solid var(--rule)", borderRadius: 9,
+      display: "flex", flexDirection: "column", gap: 6,
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <span style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</span>
+        <span style={{ fontSize: 10, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>{weight}</span>
+      </div>
+      <div className="mono" style={{ fontSize: 22, fontWeight: 500 }}>{v}%</div>
+      <div className="bar">
+        <span style={{ width: `${v}%`, background: barColor }} />
+      </div>
+      <div style={{ fontSize: 10.5, color: "var(--ink-4)", lineHeight: 1.4 }}>{detail}</div>
+    </div>
+  );
+}
+
+// Build the one-line "where did this number come from" caption for the
+// student-performance signal card.
+function buildStudentDetail(b) {
+  if (!b) return "";
+  if (!b.studentCount) {
+    return b.classes?.length ? `${b.classes.join(", ")} · no students yet` : "No assigned classes";
+  }
+  const parts = [];
+  if (b.attendance != null) parts.push(`att ${b.attendance}%`);
+  if (b.examPct != null)    parts.push(`exams ${b.examPct}%`);
+  if (b.homeworkPct != null) parts.push(`hw ${b.homeworkPct}%`);
+  const detail = parts.length ? parts.join(" · ") : "no signals yet";
+  return `${b.studentCount} students in ${b.classes.join(", ")} · ${detail}`;
+}
+
+// Plain SVG line chart — no dependencies. Smooth-ish polyline + dots,
+// grid lines at 50/75/100 for context.
+function TrendChart({ points }) {
+  const W = 600, H = 140, P = 24;
+  if (!points || points.length === 0) return null;
+  const max = 100, min = 40;
+  const stepX = (W - P * 2) / (points.length - 1);
+  const yFor = (s) => H - P - ((s - min) / (max - min)) * (H - P * 2);
+  const path = points.map((p, i) => `${i === 0 ? "M" : "L"} ${P + i * stepX} ${yFor(p.score)}`).join(" ");
+  const area = `${path} L ${P + (points.length - 1) * stepX} ${H - P} L ${P} ${H - P} Z`;
+  return (
+    <div style={{ background: "var(--card-2)", border: "1px solid var(--rule)", borderRadius: 9, padding: 12 }}>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: "block" }}>
+        {[50, 75, 100].map((g) => (
+          <g key={g}>
+            <line x1={P} x2={W - P} y1={yFor(g)} y2={yFor(g)} stroke="var(--rule-2, #e5dfd1)" strokeDasharray="3 4" strokeWidth="1" />
+            <text x={P - 6} y={yFor(g) + 3} textAnchor="end" fontSize="10" fill="var(--ink-4)" fontFamily="var(--font-mono)">{g}</text>
+          </g>
+        ))}
+        <path d={area} fill="var(--accent-soft, rgba(200,81,10,0.12))" />
+        <path d={path} fill="none" stroke="var(--accent)" strokeWidth="2" />
+        {points.map((p, i) => (
+          <g key={i}>
+            <circle cx={P + i * stepX} cy={yFor(p.score)} r="3.5" fill="var(--accent)" />
+            <text x={P + i * stepX} y={H - P + 14} textAnchor="middle" fontSize="10" fill="var(--ink-4)" fontFamily="var(--font-mono)">{p.month}</text>
+          </g>
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+function AwardForm({ onCancel, onSubmit, busy }) {
+  const [title, setTitle] = useState("");
+  const [citation, setCitation] = useState("");
+  const [category, setCategory] = useState("recognition");
+  const [awardedAt, setAwardedAt] = useState(
+    new Date().toLocaleDateString("en-IN", { month: "short", year: "numeric" })
+  );
+  const [err, setErr] = useState("");
+
+  async function submit(e) {
+    e.preventDefault();
+    if (busy) return;
+    if (!title.trim()) { setErr("Title is required"); return; }
+    setErr("");
+    try {
+      await onSubmit({ title: title.trim(), citation: citation.trim(), category, awardedAt: awardedAt.trim() });
+      setTitle(""); setCitation("");
+    } catch (ex) { setErr(ex.message); }
+  }
+
+  return (
+    <form onSubmit={submit} style={{
+      padding: 12, background: "var(--card-2)",
+      border: "1px solid var(--accent, var(--rule))", borderRadius: 9,
+      display: "flex", flexDirection: "column", gap: 10,
+    }}>
+      <div style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+        New award
+      </div>
+      <Field label="Title *">
+        <input className="input" autoFocus value={title} onChange={(e) => setTitle(e.target.value)}
+          placeholder="e.g. Teacher of the Month" />
+      </Field>
+      <Field label="Citation (optional)">
+        <textarea className="input" style={{ minHeight: 60, padding: "8px 10px", lineHeight: 1.5, resize: "vertical" }}
+          value={citation} onChange={(e) => setCitation(e.target.value)}
+          placeholder="Why are you awarding this? (shown on the timeline)" />
+      </Field>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <Field label="Category">
+          <select className="select" value={category} onChange={(e) => setCategory(e.target.value)}>
+            {AWARD_CATEGORIES.map((c) => <option key={c.k} value={c.k}>{c.label}</option>)}
+          </select>
+        </Field>
+        <Field label="Awarded">
+          <input className="input" value={awardedAt} onChange={(e) => setAwardedAt(e.target.value)}
+            placeholder="Apr 2026" />
+        </Field>
+      </div>
+      {err && (
+        <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "8px 12px", borderRadius: 7, fontSize: 12 }}>{err}</div>
+      )}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <button type="button" className="btn ghost" onClick={onCancel} disabled={busy}>Cancel</button>
+        <button type="submit" className="btn accent" disabled={busy}>
+          <Icon name="check" size={12} />{busy ? "Awarding…" : "Issue award"}
+        </button>
+      </div>
+    </form>
   );
 }

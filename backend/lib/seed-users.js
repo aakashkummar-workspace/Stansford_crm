@@ -15,6 +15,11 @@ export const DEMO_ACCOUNTS = [
   // Parent's linkedId is the student id (set via auto-link to the first
   // student if missing — see app/api/auth/login/route.js fallback).
   { id: "USR-PARENT", email: "parent@school.com", password: "parent123", role: "parent", name: "Parent Demo" },
+  // Two finance roles introduced in v2. School Accountant sees school
+  // finance only (fees + school expenses); Trust Accountant sees trust
+  // finance only (donations + trust expenses).
+  { id: "USR-SCHOOL-ACC", email: "school.accountant@school.com", password: "school123", role: "school_accountant", name: "School Accountant" },
+  { id: "USR-TRUST-ACC",  email: "trust.accountant@school.com",  password: "trust123",  role: "trust_accountant",  name: "Trust Accountant"  },
 ];
 
 export async function ensureDemoUsers() {

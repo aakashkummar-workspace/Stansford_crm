@@ -2,12 +2,21 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
-import { AvatarChip, FakeQR, StatusChip } from "../ui";
-import { money, moneyK } from "@/lib/format";
+import { AvatarChip, FakeQR, StatusChip, UpiQR, buildUpiUri } from "../ui";
+import { money, moneyK, FEE_TYPES, feeTypeLabel } from "@/lib/format";
+import { resolveSchool, downloadPdf } from "@/lib/export";
 
 const DEMO_PARENT_PHONE = "+919876543210";
 
-export default function ScreenFees({ E, refresh, role }) {
+// Escape HTML for the print-popup template (the receipt is built as a string
+// because it lives in a fresh window outside React's reach).
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+export default function ScreenFees({ E, refresh, role, session }) {
+  const school = resolveSchool(E?.SETTINGS);
+  const actor  = session?.name || null;
   const isParent = role === "parent";
   // ---------- core state ----------
   // Parent-aware initial selection: pick the first PENDING (or the first
@@ -33,6 +42,27 @@ export default function ScreenFees({ E, refresh, role }) {
   // Reset the pay-amount whenever the selected fee changes.
   useEffect(() => { setPayAmount(""); setLastPayment(null); }, [selected?.id, selected?.amount]);
 
+  // Trust-wide finance settings (UPI ID, payee name) — used to build the
+  // scannable QR on the Pay step. Fetched once on mount; admin changes them
+  // under Settings → Finance.
+  const [finance, setFinance] = useState({ upi: "", upiPayeeName: "" });
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch("/api/settings", { cache: "no-store" });
+        const j = await r.json();
+        if (!cancelled && j.ok) {
+          setFinance({
+            upi: j.settings?.finance?.upi || "",
+            upiPayeeName: j.settings?.finance?.upiPayeeName || "",
+          });
+        }
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   // ---------- filters / selection ----------
   const [statusFilter, setStatusFilter] = useState("All");
   const [classFilter, setClassFilter] = useState("All");
@@ -47,6 +77,44 @@ export default function ScreenFees({ E, refresh, role }) {
     setToast({ msg, tone });
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 2400);
+  };
+
+  // Pending row currently being edited (amount-only). Staff-only.
+  const [editingFee, setEditingFee] = useState(null);
+  // "Add fee" modal — staff picks a student + fee type + amount to create a
+  // brand-new pending row. Lets the school collect Application, Kit, ECA,
+  // Uniform, Term I/II/III, Van, STEM, Annual Day fees as separate items.
+  const [addFeeOpen, setAddFeeOpen] = useState(false);
+
+  const handleAddFee = async (payload) => {
+    const r = await fetch("/api/fees/add", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) {
+      flash(j.error || "Could not add fee", "bad");
+      return false;
+    }
+    flash(`${feeTypeLabel(payload.feeType)} added · ₹${Number(payload.amount).toLocaleString("en-IN")}`);
+    await refresh?.();
+    return true;
+  };
+  const saveFeeAmount = async (id, amount) => {
+    const r = await fetch("/api/fees/amount", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id, amount }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      flash(j.error || "Could not update fee", "bad");
+      return false;
+    }
+    flash(`Fee updated · ₹${Number(amount).toLocaleString("en-IN")} outstanding`);
+    await refresh?.();
+    return true;
   };
 
   // ---------- parent-scoped fee lists ----------
@@ -119,7 +187,29 @@ export default function ScreenFees({ E, refresh, role }) {
   }, [all]);
 
   // ---------- handlers ----------
-  const proceed = () => setStage("qr");
+  // UPI needs the QR step so the parent can scan and the office can wait
+  // for a "Mark paid" tap once the bank confirms. Cash is collected
+  // physically at the counter — there's nothing to scan, so we skip
+  // straight to recording the payment.
+  //
+  // For UPI specifically: as soon as we move to the QR step we ALSO fire
+  // the QR off to the parent's WhatsApp via n8n, so they can scan it on
+  // their own phone if they're not at the office. Send is fire-and-forget
+  // — we don't block the UI on it; the in-office QR shows immediately.
+  const proceed = () => {
+    if (method === "Cash") {
+      markPaid();
+      return;
+    }
+    setStage("qr");
+    if (method === "UPI") {
+      const balance = (selected.amount || 0) + (selected.overdue ? 200 : 0);
+      const amt = payAmount.trim() === "" ? balance : Math.floor(Number(payAmount) || 0);
+      // Don't await — the QR is on screen the moment setStage runs.
+      // The user sees a toast when WhatsApp confirms (or fails).
+      sendQrToWhatsApp(amt);
+    }
+  };
 
   const markPaid = async () => {
     if (!selected) return;
@@ -202,6 +292,22 @@ export default function ScreenFees({ E, refresh, role }) {
     });
 
   const eligibleForRemind = visible.filter((f) => f.status !== "paid").map((f) => f.id);
+
+  // After a Collect-fee → Mark paid, the freshly-paid id is still sitting in
+  // `picked` and the user can no longer tick/untick it (the row is disabled).
+  // Reconcile silently against the live data so the next Remind only targets
+  // ids that are still pending.
+  const eligibleSet = new Set(eligibleForRemind);
+  useEffect(() => {
+    if (picked.size === 0) return;
+    let drift = false;
+    const next = new Set();
+    picked.forEach((id) => {
+      if (eligibleSet.has(id)) next.add(id);
+      else drift = true;
+    });
+    if (drift) setPicked(next);
+  }, [eligibleForRemind.join("|")]);
   const allChecked = eligibleForRemind.length > 0 && eligibleForRemind.every((id) => picked.has(id));
   const togglePickAll = () => {
     if (allChecked) setPicked(new Set());
@@ -229,22 +335,59 @@ export default function ScreenFees({ E, refresh, role }) {
     }
   };
 
-  const exportCsv = () => {
-    const header = "ID,Name,Class,Amount,Status,Method,When";
-    const rows = all.map(
-      (f) => `${f.id},"${f.name}",${f.cls},${f.amount},${f.status},${f.method || ""},${f.time || ""}`
-    );
-    const csv = [header, ...rows].join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `fees-${new Date().toISOString().slice(0, 10)}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    flash(`Exported ${all.length} rows to CSV`);
+  // Branded PDF export — opens a printable, properly aligned report with the
+  // school logo, identity block, summary chips, and a clean data table.
+  const exportPdf = () => {
+    const totalCollected = all
+      .filter((f) => f.status === "paid")
+      .reduce((sum, f) => sum + (Number(f.amount) || 0), 0);
+    const totalPending = all
+      .filter((f) => f.status === "pending" || f.status === "overdue")
+      .reduce((sum, f) => sum + (Number(f.amount) || 0), 0);
+    const overdueCount = all.filter((f) => f.status === "overdue").length;
+
+    const opened = downloadPdf({
+      title: "Fees Register",
+      subtitle: `${all.length} fee record${all.length === 1 ? "" : "s"} · paid, pending and overdue`,
+      school,
+      actor,
+      dateRange: "Current snapshot",
+      orientation: "landscape",
+      summary: [
+        { label: "Total records", value: all.length },
+        { label: "Collected",     value: money(totalCollected) },
+        { label: "Pending",       value: money(totalPending) },
+        { label: "Overdue",       value: overdueCount },
+      ],
+      columns: [
+        { key: "i",      label: "#",        align: "right",  width: "32px" },
+        { key: "id",     label: "Receipt / ID", width: "150px" },
+        { key: "name",   label: "Student" },
+        { key: "cls",    label: "Class",    align: "center", width: "60px" },
+        { key: "feeType",label: "Fee type" },
+        { key: "amount", label: "Amount",   align: "right" },
+        { key: "status", label: "Status",   align: "center", width: "80px" },
+        { key: "method", label: "Method",   align: "center", width: "80px" },
+        { key: "time",   label: "When",     align: "right",  width: "90px" },
+      ],
+      rows: all.map((f, i) => ({
+        i: i + 1,
+        id: f.id,
+        name: f.name || "—",
+        cls: f.cls || "—",
+        feeType: feeTypeLabel(f.feeType) || "—",
+        amount: money(f.amount || 0),
+        status: (f.status || "—").replace(/^./, (c) => c.toUpperCase()),
+        method: f.method || "—",
+        time: f.time || "—",
+      })),
+      filename: `${school.name.replace(/\s+/g, "-").toLowerCase()}-fees-register-${new Date().toISOString().slice(0, 10)}`,
+    });
+    if (opened === false) {
+      flash("Pop-up blocked — please allow pop-ups for this site", "bad");
+    } else {
+      flash(`Opened PDF preview · ${all.length} rows`);
+    }
   };
 
   const importStructure = () => {
@@ -262,7 +405,7 @@ export default function ScreenFees({ E, refresh, role }) {
   // Receipt actions
   const phoneFor = () => DEMO_PARENT_PHONE.replace(/[^0-9]/g, "");
   const sendWhatsApp = () => {
-    const text = encodeURIComponent(`Receipt for ${selected.name} (${selected.id}) · ₹${selected.amount} paid via ${method}. Thank you — Stansford International HR.Sec.School.`);
+    const text = encodeURIComponent(`Receipt for ${selected.name} (${selected.id}) · ₹${selected.amount} paid via ${method}. Thank you — Sanfort International School.`);
     window.open(`https://wa.me/${phoneFor()}?text=${text}`, "_blank");
     flash("Opened WhatsApp");
   };
@@ -272,13 +415,155 @@ export default function ScreenFees({ E, refresh, role }) {
   };
   const sendEmail = () => {
     const subject = encodeURIComponent(`Fee receipt · ${selected.id} · ${selected.name}`);
-    const body = encodeURIComponent(`Dear Parent,\n\nThis is to confirm receipt of ₹${selected.amount} towards fees for ${selected.name} (Class ${selected.cls}, Reg ID ${selected.id}).\nMethod: ${method}\n\nThank you,\nStansford International HR.Sec.School`);
+    const body = encodeURIComponent(`Dear Parent,\n\nThis is to confirm receipt of ₹${selected.amount} towards fees for ${selected.name} (Class ${selected.cls}, Reg ID ${selected.id}).\nMethod: ${method}\n\nThank you,\nSanfort International School\nRun by Sanvi Educational and Charitable Trust`);
     window.open(`mailto:parent@example.com?subject=${subject}&body=${body}`, "_self");
     flash("Opened email draft");
   };
+  // Sends the UPI QR (with amount + student details baked in) to the
+  // parent's WhatsApp via the n8n webhook. Server-side resolves the
+  // parent's phone from the student record so the UI doesn't need it.
+  const sendQrToWhatsApp = async (amt) => {
+    if (!selected) return;
+    if (busy) return;
+    if (!finance.upi) {
+      flash("Set the school's UPI ID under Settings → Finance first", "bad");
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await fetch("/api/fees/send-qr", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: selected.id, amount: amt, method }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "Could not send QR");
+      flash(`QR sent on WhatsApp to ${j.sentTo}`);
+    } catch (e) {
+      flash(e.message, "bad");
+    } finally { setBusy(false); }
+  };
   const printReceipt = () => {
-    window.print();
-    flash("Sent receipt to printer / PDF");
+    if (!selected) return;
+    const paidAmt   = lastPayment?.amount ?? (selected.amount + (selected.overdue ? 200 : 0));
+    const partial   = lastPayment?.partial && lastPayment.remaining > 0;
+    const remaining = lastPayment?.remaining || 0;
+    const methodUsed = (selected.method && selected.method !== "—") ? selected.method : method;
+    const receiptNo  = selected.id.replace(/[^0-9]/g, "").slice(-3).padStart(3, "0");
+    const today = new Date();
+    const dateStr  = today.toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric" });
+    const monthStr = today.toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+    // Particulars come straight from the fee row's category. A late-fee line
+    // is added when the row is overdue. This way the printed receipt matches
+    // exactly what was paid (Application Fees / Kit / ECA / Term I etc.).
+    const lines = [
+      { label: feeTypeLabel(selected.feeType), amount: selected.amount },
+    ];
+    if (selected.overdue) lines.push({ label: "Late Fee", amount: 200 });
+    // Pad to a minimum of 5 rows so the printed receipt has consistent height
+    // (matches the physical-book look of the template).
+    const minRows = 5;
+    const padded = [
+      ...lines,
+      ...Array.from({ length: Math.max(0, minRows - lines.length) }, () => ({ label: "", amount: null })),
+    ];
+    const rowsHtml = padded.map((l, i) => `
+      <tr>
+        <td class="sno">${l.label ? `${i + 1}.` : ""}</td>
+        <td class="part">${l.label ? `${escapeHtml(l.label)}<span class="dots"></span>` : "&nbsp;"}</td>
+        <td class="amt">${l.amount !== null ? l.amount.toLocaleString("en-IN") : ""}</td>
+      </tr>`).join("");
+    const html = `<!doctype html>
+<html><head><meta charset="utf-8" />
+<title>Receipt · ${escapeHtml(selected.name)} · ${escapeHtml(selected.id)}</title>
+<style>
+  *{box-sizing:border-box;}
+  body{font-family:Arial,Helvetica,sans-serif;color:#000;margin:0;padding:18px;background:#fff;}
+  .wrap{width:360px;margin:0 auto;border:1px solid #1f3a8a;padding:14px 16px 18px;}
+  .school{color:#1f3a8a;font-weight:800;font-size:18px;text-align:center;letter-spacing:0.3px;line-height:1.15;}
+  .reg{color:#1f3a8a;font-weight:600;font-size:10.5px;text-align:center;margin-top:2px;}
+  .addr{color:#1f3a8a;font-weight:600;font-size:10.5px;text-align:center;margin-top:1px;}
+  .cell{color:#1f3a8a;font-weight:600;font-size:10.5px;text-align:center;margin-top:1px;}
+  .meta{margin-top:10px;font-size:11.5px;color:#1f3a8a;font-weight:600;}
+  .meta .row{display:flex;justify-content:space-between;gap:14px;padding:3px 0;}
+  .meta .cell-l{flex:1;}
+  .meta .cell-r{flex:1;text-align:left;}
+  .field{display:inline-flex;align-items:baseline;gap:4px;}
+  .val{display:inline-block;border-bottom:1px dotted #1f3a8a;min-width:90px;padding:0 4px;color:#000;font-weight:500;}
+  .slno{color:#c11d1d;font-weight:800;font-size:18px;letter-spacing:1px;border:0;padding-left:6px;}
+  table.part{width:100%;border-collapse:collapse;margin-top:10px;border:1px solid #1f3a8a;}
+  table.part th{background:#fff;color:#1f3a8a;font-weight:700;font-size:11.5px;border:1px solid #1f3a8a;padding:5px 6px;text-align:left;}
+  table.part th.amt-col{text-align:right;width:80px;}
+  table.part td{border:1px solid #1f3a8a;padding:6px 6px;font-size:12px;height:22px;}
+  table.part td.sno{width:36px;text-align:center;font-weight:600;color:#000;}
+  table.part td.amt{width:80px;text-align:right;font-weight:600;font-family:Arial,sans-serif;}
+  table.part td.part{position:relative;}
+  table.part td.part .dots{display:inline-block;border-bottom:1px dotted #888;flex:1;margin-left:6px;width:60%;}
+  table.part tr.total td{font-weight:700;color:#1f3a8a;font-size:13px;background:#fafbff;}
+  .footer{display:flex;justify-content:flex-end;margin-top:6px;font-size:11px;color:#000;font-style:italic;}
+  .balance{margin-top:6px;font-size:11px;color:#a06820;text-align:right;font-weight:600;}
+  .logo-row{display:flex;align-items:center;gap:10px;margin-bottom:4px;}
+  .logo-row img{width:54px;height:54px;object-fit:contain;}
+  .logo-row .school-block{flex:1;text-align:center;}
+  .trust{color:#1f3a8a;font-weight:700;font-size:11px;text-align:center;margin-top:2px;letter-spacing:0.3px;}
+  @media print { @page { size: auto; margin: 8mm; } body{padding:0;} }
+</style></head>
+<body>
+  <div class="wrap">
+    <div class="logo-row">
+      <img src="${window.location.origin}/logo.png" alt="logo" />
+      <div class="school-block">
+        <div class="school">SANFORT INTERNATIONAL SCHOOL</div>
+        <div class="trust">Sanvi Educational and Charitable Trust</div>
+      </div>
+    </div>
+    <div class="reg">Reg No: SIS/2026/${receiptNo}</div>
+    <div class="addr">No.45, MG Road, Chennai - 600 001.</div>
+    <div class="cell">Cell : 9876 543 210</div>
+
+    <div class="meta">
+      <div class="row">
+        <div class="cell-l"><span class="field">Adm. No : <span class="val">${escapeHtml(selected.id)}</span></span></div>
+        <div class="cell-r"><span class="field">SL. No. <span class="slno">${receiptNo}</span></span></div>
+      </div>
+      <div class="row">
+        <div class="cell-l"><span class="field">Name : <span class="val">${escapeHtml(selected.name)}</span></span></div>
+        <div class="cell-r"><span class="field">Class &amp; Sec. : <span class="val">${escapeHtml(selected.cls)}</span></span></div>
+      </div>
+      <div class="row">
+        <div class="cell-l"><span class="field">Month : <span class="val">${escapeHtml(monthStr)}</span></span></div>
+        <div class="cell-r"><span class="field">Date : <span class="val">${escapeHtml(dateStr)}</span></span></div>
+      </div>
+    </div>
+
+    <table class="part">
+      <thead>
+        <tr>
+          <th>S.No.</th>
+          <th>Particulars</th>
+          <th class="amt-col">Amount<br/>Rs.</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rowsHtml}
+        <tr class="total">
+          <td class="sno"></td>
+          <td class="part" style="text-align:right;padding-right:10px;">TOTAL</td>
+          <td class="amt">${paidAmt.toLocaleString("en-IN")}</td>
+        </tr>
+      </tbody>
+    </table>
+
+    ${partial ? `<div class="balance">Balance pending: Rs. ${remaining.toLocaleString("en-IN")}</div>` : ""}
+
+    <div class="footer">Paid via ${escapeHtml(methodUsed)} &nbsp;·&nbsp; Cashier</div>
+  </div>
+  <script>window.addEventListener("load",()=>{setTimeout(()=>{window.print();},80);});</script>
+</body></html>`;
+    const w = window.open("", "_blank", "width=560,height=820");
+    if (!w) { flash("Popup blocked — allow popups to download the receipt", "bad"); return; }
+    w.document.open(); w.document.write(html); w.document.close();
+    flash(`Receipt for ${selected.name} ready to print / save as PDF`);
   };
 
   // ---------- render ----------
@@ -334,7 +619,12 @@ export default function ScreenFees({ E, refresh, role }) {
                 <Icon name="megaphone" size={13} />Remind overdue
               </button>
               <button className="btn" onClick={importStructure}><Icon name="upload" size={13} />Import structure</button>
-              <button className="btn" onClick={exportCsv}><Icon name="download" size={13} />Export CSV</button>
+              <button className="btn" onClick={exportPdf} title="Open a printable, branded PDF report">
+                <Icon name="download" size={13} />Export PDF
+              </button>
+              <button className="btn" onClick={() => setAddFeeOpen(true)} title="Create a new pending fee item (Kit, ECA, Term I…)">
+                <Icon name="plus" size={13} />Add fee
+              </button>
               <div style={{ position: "relative" }}>
                 <button className="btn accent" onClick={headerCollect}>
                   <Icon name="plus" size={13} />Collect fee
@@ -421,6 +711,7 @@ export default function ScreenFees({ E, refresh, role }) {
                   </th>
                   <th>Student</th>
                   <th>Class</th>
+                  <th>Fee type</th>
                   <th className="num">Amount</th>
                   <th>Method</th>
                   <th>Status</th>
@@ -430,7 +721,7 @@ export default function ScreenFees({ E, refresh, role }) {
               </thead>
               <tbody>
                 {visible.length === 0 && (
-                  <tr><td colSpan={8} className="empty">No fees match this filter.</td></tr>
+                  <tr><td colSpan={9} className="empty">No fees match this filter.</td></tr>
                 )}
                 {visible.map((f, i) => (
                   <tr key={f.id + "-" + i} style={selected && selected.id === f.id ? { background: "var(--card-2)" } : undefined}>
@@ -452,6 +743,7 @@ export default function ScreenFees({ E, refresh, role }) {
                       </div>
                     </td>
                     <td><span className="chip">{f.cls}</span></td>
+                    <td><span className="chip" style={{ background: "var(--accent-soft)", color: "var(--accent-2)" }}>{feeTypeLabel(f.feeType)}</span></td>
                     <td className="num">{money(f.amount)}</td>
                     <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{f.method}</td>
                     <td><StatusChip status={f.status}>{f.status.charAt(0).toUpperCase() + f.status.slice(1)}</StatusChip></td>
@@ -462,7 +754,16 @@ export default function ScreenFees({ E, refresh, role }) {
                       ) : isParent ? (
                         <span style={{ fontSize: 11, color: "var(--ink-4)" }}>Pay at office</span>
                       ) : (
-                        <button className="btn sm accent" onClick={() => { setSelected(f); setStage("pick"); flash(`Loaded ${f.name}`); }}>Collect</button>
+                        <span style={{ display: "inline-flex", gap: 4 }}>
+                          <button
+                            className="btn sm ghost"
+                            title="Edit outstanding amount"
+                            onClick={() => setEditingFee(f)}
+                          >
+                            <Icon name="pencil" size={11} />Edit
+                          </button>
+                          <button className="btn sm accent" onClick={() => { setSelected(f); setStage("pick"); flash(`Loaded ${f.name}`); }}>Collect</button>
+                        </span>
                       )}
                     </td>
                   </tr>
@@ -482,6 +783,17 @@ export default function ScreenFees({ E, refresh, role }) {
             onRefresh={refresh}
           />
         ) : (
+        <>
+        {editingFee && (
+          <EditFeeAmountModal
+            fee={editingFee}
+            onClose={() => setEditingFee(null)}
+            onSave={async (amt) => {
+              const ok = await saveFeeAmount(editingFee.id, amt);
+              if (ok) setEditingFee(null);
+            }}
+          />
+        )}
         <div className="card col-4">
           <div className="card-head">
             <div>
@@ -526,9 +838,7 @@ export default function ScreenFees({ E, refresh, role }) {
                 </div>
                 <div className="hr" style={{ margin: "10px 0" }} />
                 <div style={{ display: "grid", gridTemplateColumns: "1fr auto", rowGap: 4, fontSize: 12 }}>
-                  <span style={{ color: "var(--ink-3)" }}>Term fee</span><span className="mono">{money(selected.amount - 500)}</span>
-                  <span style={{ color: "var(--ink-3)" }}>Activity fee</span><span className="mono">{money(500)}</span>
-                  <span style={{ color: "var(--ink-3)" }}>Discount</span><span className="mono">—</span>
+                  <span style={{ color: "var(--ink-3)" }}>{feeTypeLabel(selected.feeType)}</span><span className="mono">{money(selected.amount)}</span>
                   <span style={{ color: "var(--ink-3)" }}>Late fee</span>
                   <span className="mono" style={{ color: selected.overdue ? "var(--bad)" : "inherit" }}>{selected.overdue ? money(200) : "—"}</span>
                 </div>
@@ -598,8 +908,8 @@ export default function ScreenFees({ E, refresh, role }) {
                   })()}
                   <div>
                     <div style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Method</div>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
-                      {[{ k: "UPI", i: "qr" }, { k: "Cash", i: "money" }, { k: "Bank", i: "fees" }].map((m) => (
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                      {[{ k: "UPI", i: "qr" }, { k: "Cash", i: "money" }].map((m) => (
                         <button
                           key={m.k}
                           onClick={() => setMethod(m.k)}
@@ -621,62 +931,160 @@ export default function ScreenFees({ E, refresh, role }) {
                       View receipt <Icon name="arrowRight" size={13} />
                     </button>
                   ) : (
-                    <button className="btn accent" onClick={proceed} style={{ justifyContent: "center", padding: "10px 12px" }}>
-                      Proceed <Icon name="arrowRight" size={13} />
+                    <button
+                      className="btn accent"
+                      onClick={proceed}
+                      disabled={busy}
+                      style={{ justifyContent: "center", padding: "10px 12px" }}
+                    >
+                      {method === "Cash"
+                        ? <>{busy ? "Recording…" : "Record cash payment"} <Icon name="check" size={13} /></>
+                        : <>Show QR to scan <Icon name="arrowRight" size={13} /></>}
                     </button>
                   )}
                 </>
               )}
 
-              {stage === "qr" && (
-                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
-                  <div className="qrbox"><FakeQR size={156} /></div>
-                  <div className="mono" style={{ fontSize: 11.5, color: "var(--ink-3)" }}>stansford@hdfc · {method}</div>
-                  <div style={{ fontSize: 12, color: "var(--ink-3)", textAlign: "center", lineHeight: 1.5 }}>
-                    Parent scans this QR in any UPI app.
-                    <br />
-                    Payment auto-verified & receipt sent.
-                  </div>
-                  <div style={{ display: "flex", gap: 6, width: "100%" }}>
-                    <button className="btn" style={{ flex: 1, justifyContent: "center" }} onClick={reset} disabled={busy}>Back</button>
-                    <button className="btn accent" style={{ flex: 1, justifyContent: "center" }} onClick={markPaid} disabled={busy}>
-                      <Icon name="check" size={13} />{busy ? "Posting…" : "Mark paid"}
-                    </button>
-                  </div>
-                  <span className="live-pill"><span className="pulse-dot" />Listening for payment…</span>
-                </div>
-              )}
-
-              {stage === "paid" && (
-                <>
-                  <div className="receipt" id="fee-receipt">
-                    <div style={{ textAlign: "center", marginBottom: 8 }}>
-                      <div style={{ fontWeight: 600, fontFamily: "var(--font-sans)", fontSize: 13 }}>STANSFORD INTERNATIONAL HR.SEC.SCHOOL</div>
-                      <div style={{ fontSize: 10.5, color: "var(--ink-3)" }}>Fee Receipt · STN/RC/2026/{selected.id.replace(/[^0-9]/g, "").slice(-4)}</div>
-                    </div>
-                    <div style={{ borderTop: "1px dashed var(--rule)", borderBottom: "1px dashed var(--rule)", padding: "6px 0" }}>
-                      <div>Student  : {selected.name}</div>
-                      <div>Class    : {selected.cls}</div>
-                      <div>Reg ID   : {selected.id}</div>
-                      <div>Method   : {selected.method && selected.method !== "—" ? selected.method : method} · @hdfc</div>
-                      <div>Paid on  : 28-Apr-2026 08:14</div>
-                    </div>
-                    <div style={{ padding: "6px 0" }}>
-                      <div style={{ display: "flex", justifyContent: "space-between" }}><span>Term fee</span><span>{money(selected.amount - 500)}</span></div>
-                      <div style={{ display: "flex", justifyContent: "space-between" }}><span>Activity fee</span><span>{money(500)}</span></div>
-                      {selected.overdue && (
-                        <div style={{ display: "flex", justifyContent: "space-between" }}><span>Late fee</span><span>{money(200)}</span></div>
-                      )}
-                    </div>
-                    <div style={{ borderTop: "1px dashed var(--rule)", paddingTop: 6, display: "flex", justifyContent: "space-between", fontWeight: 600 }}>
-                      <span>PAID</span>
-                      <span>{money(lastPayment?.amount ?? (selected.amount + (selected.overdue ? 200 : 0)))}</span>
-                    </div>
-                    {lastPayment?.partial && lastPayment.remaining > 0 && (
-                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: "var(--warn)", marginTop: 4 }}>
-                        <span>BALANCE</span><span>{money(lastPayment.remaining)} pending</span>
+              {stage === "qr" && (() => {
+                // Build the actual UPI deep-link from the saved finance settings
+                // and the current selection. The amount on the QR matches what
+                // the parent typed in the previous step (full balance if blank).
+                const balance = (selected.amount || 0) + (selected.overdue ? 200 : 0);
+                const amt = payAmount.trim() === "" ? balance : Math.floor(Number(payAmount) || 0);
+                const upiUri = buildUpiUri({
+                  upiId: finance.upi,
+                  payeeName: finance.upiPayeeName || "Sanfort International School",
+                  amount: amt,
+                  note: `Fee ${selected.id}`,
+                  transactionRef: selected.id,
+                });
+                return (
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
+                    <div className="qrbox"><UpiQR size={180} uri={upiUri} /></div>
+                    {finance.upi ? (
+                      <div className="mono" style={{ fontSize: 11.5, color: "var(--ink-3)" }}>
+                        {finance.upi} · {method}
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 11.5, color: "var(--warn)", textAlign: "center", maxWidth: 240 }}>
+                        Set the school's UPI ID under <b>Settings → Finance</b> for parents to be able to scan & pay.
                       </div>
                     )}
+                    <div style={{ fontSize: 12, color: "var(--ink-3)", textAlign: "center", lineHeight: 1.5 }}>
+                      Parent scans this QR in any UPI app.
+                      <br />
+                      Payment auto-verified &amp; receipt sent.
+                    </div>
+                    {/* Send the same QR to the parent's WhatsApp so they can
+                        scan it on their own phone if they're not at the office. */}
+                    <button
+                      className="btn"
+                      style={{ width: "100%", justifyContent: "center" }}
+                      onClick={() => sendQrToWhatsApp(amt)}
+                      disabled={busy || !finance.upi}
+                      title={finance.upi ? "Send this QR to the parent's WhatsApp" : "Set a UPI ID under Settings → Finance first"}
+                    >
+                      <Icon name="whatsapp" size={13} />Send QR to WhatsApp
+                    </button>
+                    <div style={{ display: "flex", gap: 6, width: "100%" }}>
+                      <button className="btn" style={{ flex: 1, justifyContent: "center" }} onClick={reset} disabled={busy}>Back</button>
+                      <button className="btn accent" style={{ flex: 1, justifyContent: "center" }} onClick={markPaid} disabled={busy}>
+                        <Icon name="check" size={13} />{busy ? "Posting…" : "Mark paid"}
+                      </button>
+                    </div>
+                    <span className="live-pill"><span className="pulse-dot" />Listening for payment…</span>
+                  </div>
+                );
+              })()}
+
+              {stage === "paid" && (() => {
+                // Match the printed-receipt layout (school header + meta grid +
+                // particulars table) so the on-screen preview is faithful to
+                // what the user will get out of the printer.
+                const navy = "#1f3a8a";
+                // One particulars line per fee type. The legacy "Tuition +
+                // Activity" split is replaced by the actual feeType on the
+                // pending/receipt row.
+                const lines = [
+                  { label: feeTypeLabel(selected.feeType), amount: selected.amount },
+                ];
+                if (selected.overdue) lines.push({ label: "Late Fee", amount: 200 });
+                const totalAmt = lastPayment?.amount ?? (selected.amount + (selected.overdue ? 200 : 0));
+                const slNo = selected.id.replace(/[^0-9]/g, "").slice(-3).padStart(3, "0");
+                const today = new Date();
+                const dateStr  = today.toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric" });
+                const monthStr = today.toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+                const dotted = { display: "inline-block", borderBottom: `1px dotted ${navy}`, minWidth: 70, padding: "0 4px", color: "#000", fontWeight: 500 };
+                return (
+                <>
+                  <div className="receipt" id="fee-receipt" style={{ background: "#fff", border: `1px solid ${navy}`, padding: "12px 14px", color: "#000", fontFamily: "Arial, Helvetica, sans-serif" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                      <img src="/logo.png" alt="logo" style={{ width: 50, height: 50, objectFit: "contain", flexShrink: 0 }} />
+                      <div style={{ flex: 1, textAlign: "center", color: navy }}>
+                        <div style={{ fontWeight: 800, fontSize: 14, letterSpacing: 0.3, lineHeight: 1.15 }}>SANFORT INTERNATIONAL SCHOOL</div>
+                        <div style={{ fontWeight: 700, fontSize: 10.5, marginTop: 2, letterSpacing: 0.3 }}>Sanvi Educational and Charitable Trust</div>
+                      </div>
+                    </div>
+                    <div style={{ textAlign: "center", color: navy }}>
+                      <div style={{ fontWeight: 600, fontSize: 10 }}>Reg No: SIS/2026/{slNo}</div>
+                      <div style={{ fontWeight: 600, fontSize: 10 }}>No.45, MG Road, Chennai - 600 001.</div>
+                      <div style={{ fontWeight: 600, fontSize: 10 }}>Cell : 9876 543 210</div>
+                    </div>
+
+                    <div style={{ marginTop: 8, fontSize: 11, color: navy, fontWeight: 600 }}>
+                      <div style={{ display: "flex", gap: 10, padding: "2px 0" }}>
+                        <div style={{ flex: 1 }}>Adm. No : <span style={dotted}>{selected.id}</span></div>
+                        <div style={{ flex: 1 }}>SL. No. <span style={{ color: "#c11d1d", fontWeight: 800, fontSize: 14, letterSpacing: 1, marginLeft: 4 }}>{slNo}</span></div>
+                      </div>
+                      <div style={{ display: "flex", gap: 10, padding: "2px 0" }}>
+                        <div style={{ flex: 1 }}>Name : <span style={dotted}>{selected.name}</span></div>
+                        <div style={{ flex: 1 }}>Class &amp; Sec. : <span style={dotted}>{selected.cls}</span></div>
+                      </div>
+                      <div style={{ display: "flex", gap: 10, padding: "2px 0" }}>
+                        <div style={{ flex: 1 }}>Month : <span style={dotted}>{monthStr}</span></div>
+                        <div style={{ flex: 1 }}>Date : <span style={dotted}>{dateStr}</span></div>
+                      </div>
+                    </div>
+
+                    <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 8, border: `1px solid ${navy}`, fontSize: 11.5 }}>
+                      <thead>
+                        <tr>
+                          <th style={{ border: `1px solid ${navy}`, padding: "4px 6px", color: navy, textAlign: "left", fontSize: 10.5, fontWeight: 700, width: 40 }}>S.No.</th>
+                          <th style={{ border: `1px solid ${navy}`, padding: "4px 6px", color: navy, textAlign: "left", fontSize: 10.5, fontWeight: 700 }}>Particulars</th>
+                          <th style={{ border: `1px solid ${navy}`, padding: "4px 6px", color: navy, textAlign: "right", fontSize: 10.5, fontWeight: 700, width: 80 }}>Amount<br />Rs.</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {lines.map((l, i) => (
+                          <tr key={i}>
+                            <td style={{ border: `1px solid ${navy}`, padding: "5px 6px", textAlign: "center", fontWeight: 600 }}>{i + 1}.</td>
+                            <td style={{ border: `1px solid ${navy}`, padding: "5px 6px" }}>{l.label}<span style={{ borderBottom: "1px dotted #888", display: "inline-block", width: "40%", marginLeft: 6, verticalAlign: "middle", height: 1 }} /></td>
+                            <td style={{ border: `1px solid ${navy}`, padding: "5px 6px", textAlign: "right", fontWeight: 600 }}>{l.amount.toLocaleString("en-IN")}</td>
+                          </tr>
+                        ))}
+                        {Array.from({ length: Math.max(0, 5 - lines.length) }).map((_, i) => (
+                          <tr key={`pad-${i}`}>
+                            <td style={{ border: `1px solid ${navy}`, padding: "5px 6px", height: 22 }}>&nbsp;</td>
+                            <td style={{ border: `1px solid ${navy}`, padding: "5px 6px" }}>&nbsp;</td>
+                            <td style={{ border: `1px solid ${navy}`, padding: "5px 6px" }}>&nbsp;</td>
+                          </tr>
+                        ))}
+                        <tr style={{ background: "#fafbff" }}>
+                          <td style={{ border: `1px solid ${navy}`, padding: "5px 6px" }}></td>
+                          <td style={{ border: `1px solid ${navy}`, padding: "5px 10px", color: navy, fontWeight: 700, fontSize: 12, textAlign: "right" }}>TOTAL</td>
+                          <td style={{ border: `1px solid ${navy}`, padding: "5px 6px", textAlign: "right", color: navy, fontWeight: 700, fontSize: 12 }}>{totalAmt.toLocaleString("en-IN")}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+
+                    {lastPayment?.partial && lastPayment.remaining > 0 && (
+                      <div style={{ textAlign: "right", marginTop: 6, color: "#a06820", fontSize: 11, fontWeight: 600 }}>
+                        Balance pending: Rs. {lastPayment.remaining.toLocaleString("en-IN")}
+                      </div>
+                    )}
+                    <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 6, fontSize: 10.5, fontStyle: "italic", color: "#000" }}>
+                      Paid via {selected.method && selected.method !== "—" ? selected.method : method} &nbsp;·&nbsp; Cashier
+                    </div>
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
                     <button className="btn" onClick={sendWhatsApp}><Icon name="whatsapp" size={12} />WhatsApp</button>
@@ -688,12 +1096,25 @@ export default function ScreenFees({ E, refresh, role }) {
                     <Icon name="check" size={13} />Done · collect another
                   </button>
                 </>
-              )}
+                );
+              })()}
             </div>
           )}
         </div>
+        </>
         )}
       </div>
+
+      {addFeeOpen && !isParent && (
+        <AddFeeItemModal
+          students={E.ADDED_STUDENTS || []}
+          onClose={() => setAddFeeOpen(false)}
+          onSave={async (payload) => {
+            const ok = await handleAddFee(payload);
+            if (ok) setAddFeeOpen(false);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -872,6 +1293,268 @@ function PayOnlineModal({ order, busy, onClose, onConfirm }) {
   );
 }
 
+// Staff-only modal to edit the outstanding amount of a pending fee.
+// Set to 0 to drop the pending row entirely (e.g. full waiver/scholarship).
+function EditFeeAmountModal({ fee, onClose, onSave }) {
+  const initial = String(fee.amount ?? 0);
+  const [val, setVal] = useState(initial);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const num = val === "" ? null : Math.floor(Number(val));
+  const valid = num !== null && Number.isFinite(num) && num >= 0;
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!valid || busy) return;
+    setBusy(true);
+    try { await onSave(num); } finally { setBusy(false); }
+  };
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)",
+      display: "grid", placeItems: "center", zIndex: 250, padding: 16,
+    }}>
+      <form onSubmit={submit} onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 420 }}>
+        <div className="card-head">
+          <div>
+            <div className="card-title">Edit fee amount</div>
+            <div className="card-sub">{fee.name} · {fee.cls} · {fee.id}</div>
+          </div>
+          <button type="button" className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
+        <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ fontSize: 12, color: "var(--ink-3)", lineHeight: 1.5 }}>
+            Update the outstanding balance for this term. Use <b>0</b> to waive the fee entirely (the pending row will be removed).
+          </div>
+          <div style={{
+            display: "flex", alignItems: "center", height: 38,
+            border: "1px solid", borderColor: valid ? "var(--rule)" : "var(--bad)",
+            borderRadius: 9, background: "var(--card-2)", overflow: "hidden",
+          }}>
+            <span style={{
+              display: "inline-flex", alignItems: "center", padding: "0 12px",
+              background: "var(--bg-2)", borderRight: "1px solid var(--rule)",
+              fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--ink-3)",
+            }}>₹</span>
+            <input
+              type="text"
+              inputMode="numeric"
+              autoFocus
+              value={val}
+              onChange={(e) => setVal(e.target.value.replace(/\D/g, ""))}
+              style={{
+                flex: 1, height: "100%", border: 0, background: "transparent",
+                outline: "none", padding: "0 12px",
+                fontFamily: "var(--font-mono)", fontSize: 14, color: "var(--ink)",
+              }}
+            />
+          </div>
+          <div style={{ fontSize: 11, color: "var(--ink-4)" }}>
+            Was ₹{Number(fee.amount || 0).toLocaleString("en-IN")}
+            {valid && num !== Number(fee.amount || 0) && (
+              <> · new outstanding ₹{num.toLocaleString("en-IN")}</>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn accent" disabled={!valid || busy}>
+              <Icon name="check" size={13} />{busy ? "Saving…" : "Save"}
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// Staff modal for adding a brand-new pending-fee row of any FEE_TYPES bucket
+// (Application, Kit, ECA, Uniform, Term I/II/III, Van, STEM, Annual Day).
+// Lets the school collect more than one fee per student per term, each
+// printed on its own receipt.
+function AddFeeItemModal({ students, onClose, onSave }) {
+  const [studentId, setStudentId] = useState(students[0]?.id || "");
+  const [feeType, setFeeType]     = useState(FEE_TYPES[0].key);
+  const [amount, setAmount]       = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr]   = useState("");
+  // Quick filter so the picker stays usable when the school has hundreds of
+  // students. Matches name + reg id (case-insensitive substring).
+  const [q, setQ] = useState("");
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    if (!needle) return students;
+    return students.filter((s) =>
+      `${s.name} ${s.id} ${s.cls}`.toLowerCase().includes(needle)
+    );
+  }, [students, q]);
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const num = amount === "" ? 0 : Math.floor(Number(amount));
+  const valid = !!studentId && num > 0;
+
+  async function submit(e) {
+    e.preventDefault();
+    if (!valid || busy) return;
+    setBusy(true); setErr("");
+    try {
+      await onSave({ studentId, feeType, amount: num });
+    } catch (ex) { setErr(ex.message || String(ex)); setBusy(false); }
+  }
+
+  const selectedStudent = students.find((s) => s.id === studentId);
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)",
+      display: "grid", placeItems: "center", zIndex: 250, padding: 16, overflowY: "auto",
+    }}>
+      <form onSubmit={submit} onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 480, maxHeight: "calc(100vh - 32px)", overflowY: "auto" }}>
+        <div className="card-head">
+          <div>
+            <div className="card-title">Add fee</div>
+            <div className="card-sub">Create a new pending-fee item · pick the student, type, and amount</div>
+          </div>
+          <button type="button" className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
+        <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 500, color: "var(--ink-2)", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 5 }}>Student *</div>
+            <input
+              className="input"
+              autoFocus
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Search by name, reg ID, or class…"
+              style={{ marginBottom: 6 }}
+            />
+            <div style={{
+              border: "1px solid var(--rule)",
+              borderRadius: 9,
+              maxHeight: 200,
+              overflowY: "auto",
+              background: "var(--card-2)",
+            }}>
+              {filtered.length === 0 ? (
+                <div style={{ padding: "12px 14px", fontSize: 12, color: "var(--ink-4)", textAlign: "center" }}>
+                  No students match "{q}"
+                </div>
+              ) : filtered.map((s) => {
+                const active = s.id === studentId;
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => setStudentId(s.id)}
+                    style={{
+                      width: "100%",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      padding: "8px 12px",
+                      border: 0,
+                      borderBottom: "1px solid var(--rule-2)",
+                      background: active ? "var(--accent-soft)" : "transparent",
+                      cursor: "pointer",
+                      textAlign: "left",
+                    }}
+                  >
+                    <span style={{
+                      width: 26, height: 26, borderRadius: "50%",
+                      background: active ? "var(--accent)" : "var(--bg-2)",
+                      color: active ? "#fff" : "var(--ink-2)",
+                      display: "grid", placeItems: "center",
+                      fontWeight: 600, fontSize: 11, flexShrink: 0,
+                    }}>
+                      {s.name.split(" ").map((n) => n[0]).slice(0, 2).join("").toUpperCase()}
+                    </span>
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <span style={{ display: "block", fontSize: 12.5, fontWeight: 500, color: active ? "var(--accent-2)" : "var(--ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {s.name}
+                      </span>
+                      <span style={{ display: "block", fontSize: 10.5, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>
+                        {s.id} · Class {s.cls}
+                      </span>
+                    </span>
+                    {active && <Icon name="check" size={13} />}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 140px", gap: 10 }}>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 500, color: "var(--ink-2)", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 5 }}>Fee type *</div>
+              <select
+                className="select"
+                value={feeType}
+                onChange={(e) => setFeeType(e.target.value)}
+                style={{ width: "100%" }}
+              >
+                {FEE_TYPES.map((t) => (
+                  <option key={t.key} value={t.key}>{t.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 500, color: "var(--ink-2)", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 5 }}>Amount (₹) *</div>
+              <div style={{
+                display: "flex", alignItems: "center", height: 38,
+                border: `1px solid ${num > 0 ? "var(--rule)" : "var(--rule-2)"}`,
+                borderRadius: 9, background: "var(--card-2)", overflow: "hidden",
+              }}>
+                <span style={{
+                  display: "inline-flex", alignItems: "center", padding: "0 10px",
+                  background: "var(--bg-2)", borderRight: "1px solid var(--rule)",
+                  fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--ink-3)",
+                }}>₹</span>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value.replace(/\D/g, ""))}
+                  placeholder="0"
+                  style={{
+                    flex: 1, height: "100%", border: 0, background: "transparent",
+                    outline: "none", padding: "0 10px",
+                    fontFamily: "var(--font-mono)", fontSize: 14, color: "var(--ink)",
+                  }}
+                />
+              </div>
+            </div>
+          </div>
+
+          {selectedStudent && (
+            <div style={{ fontSize: 11.5, color: "var(--ink-3)", padding: "8px 10px", background: "var(--bg-2)", borderRadius: 7 }}>
+              Adding <b>{feeTypeLabel(feeType)}</b> of <span className="mono">₹{num.toLocaleString("en-IN")}</span> for <b>{selectedStudent.name}</b> ({selectedStudent.cls}).
+              {" "}If a {feeTypeLabel(feeType)} row already exists for this student, it will be replaced.
+            </div>
+          )}
+
+          {err && (
+            <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "9px 12px", borderRadius: 7, fontSize: 12 }}>{err}</div>
+          )}
+
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn accent" disabled={!valid || busy}>
+              <Icon name="check" size={13} />{busy ? "Saving…" : "Add fee"}
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 // ---------- helper components ----------
 function Toast({ toast }) {
   if (!toast) return null;
@@ -955,7 +1638,7 @@ function CollectMenu({ items, onPick, onClose }) {
           </span>
           <span style={{ flex: 1, minWidth: 0, textAlign: "left" }}>
             <span style={{ display: "block", fontSize: 13, fontWeight: 500, color: "var(--ink)" }}>{f.name}</span>
-            <span style={{ display: "block", fontSize: 11, color: "var(--ink-3)" }}>{f.cls} · {f.id} · due {f.due}</span>
+            <span style={{ display: "block", fontSize: 11, color: "var(--ink-3)" }}>{feeTypeLabel(f.feeType)} · {f.cls} · due {f.due}</span>
           </span>
           <span className="mono" style={{ fontSize: 12, fontWeight: 500, color: f.overdue ? "var(--bad)" : "var(--ink-2)" }}>
             ₹{f.amount.toLocaleString("en-IN")}

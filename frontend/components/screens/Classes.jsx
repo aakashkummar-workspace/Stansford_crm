@@ -177,10 +177,95 @@ export default function ScreenClasses({ E, refresh, role }) {
       </div>
 
       <div className="grid g-4" style={{ marginBottom: 18 }}>
-        <KPI label="Classes" value={classes.length} sub={classes.length ? "defined" : "none yet"} puck="mint" puckIcon="academic" />
-        <KPI label="Total sections" value={totalSections} sub="across all classes" puck="peach" puckIcon="users" />
-        <KPI label="Students enrolled" value={addedStudents.length} sub={addedStudents.length === 1 ? "on roll" : "across classes"} puck="cream" puckIcon="students" />
-        <KPI label="Empty classes" value={classes.filter((c) => !(c.sections || []).length).length} sub="need at least one section" puck="rose" puckIcon="warning" />
+        {(() => {
+          const empty = classes.filter((c) => !(c.sections || []).length);
+          const enrolledByCls = {};
+          for (const s of addedStudents) enrolledByCls[s.cls] = (enrolledByCls[s.cls] || 0) + 1;
+          return (
+            <>
+              <KPI
+                label="Classes" value={classes.length}
+                sub={classes.length ? "defined" : "none yet"}
+                puck="mint" puckIcon="academic"
+                details={{
+                  title: `Classes · ${classes.length} defined`,
+                  sub: "Sections + enrolment per class",
+                  items: classes.map((c) => ({
+                    label: c.label || `Class ${c.n}`,
+                    value: (c.sections || []).join(", ") || "—",
+                    sub: `${(c.sections || []).reduce((a, sec) => a + (enrolledByCls[`${c.n}-${sec}`] || 0), 0)} enrolled`,
+                  })),
+                }}
+              />
+              <KPI
+                label="Total sections" value={totalSections} sub="across all classes"
+                puck="peach" puckIcon="users"
+                details={{
+                  title: `Sections · ${totalSections} total`,
+                  sub: "Click a section to see the students",
+                  items: classes.flatMap((c) =>
+                    (c.sections || []).map((sec) => {
+                      const key = `${c.n}-${sec}`;
+                      const inSec = addedStudents
+                        .filter((s) => s.cls === key)
+                        .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+                      return {
+                        label: `${c.label || `Class ${c.n}`} · ${sec}`,
+                        value: inSec.length,
+                        sub: inSec.length
+                          ? `${inSec.length} student${inSec.length === 1 ? "" : "s"} · click to expand`
+                          : "no students yet",
+                        children: inSec.map((s) => ({
+                          label: s.name,
+                          value: s.id,
+                          sub: [s.parent, s.transport].filter(Boolean).join(" · ") || null,
+                        })),
+                      };
+                    })
+                  ),
+                }}
+              />
+              <KPI
+                label="Students enrolled" value={addedStudents.length}
+                sub={addedStudents.length === 1 ? "on roll" : "across classes"}
+                puck="cream" puckIcon="students"
+                details={{
+                  title: `Enrolled · ${addedStudents.length} students`,
+                  sub: "Click a class-section to see the students",
+                  items: Object.entries(enrolledByCls).sort((a, b) => a[0].localeCompare(b[0])).map(([cls, n]) => {
+                    const studentsInCls = addedStudents
+                      .filter((s) => s.cls === cls)
+                      .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+                    return {
+                      label: `Class ${cls}`,
+                      value: n,
+                      sub: `${n} student${n === 1 ? "" : "s"} · click to expand`,
+                      children: studentsInCls.map((s) => ({
+                        label: s.name,
+                        value: s.id,
+                        sub: [s.parent, s.transport].filter(Boolean).join(" · ") || null,
+                      })),
+                    };
+                  }),
+                }}
+              />
+              <KPI
+                label="Empty classes" value={empty.length} sub="need at least one section"
+                puck="rose" puckIcon="warning"
+                details={{
+                  title: `Empty classes · ${empty.length}`,
+                  sub: empty.length === 0 ? "Every class has at least one section" : "Add a section to start enrolling",
+                  items: empty.map((c) => ({
+                    label: c.label || `Class ${c.n}`,
+                    value: "—",
+                    sub: "no sections defined",
+                    tone: "bad",
+                  })),
+                }}
+              />
+            </>
+          );
+        })()}
       </div>
 
       {classes.length === 0 ? (
@@ -377,7 +462,7 @@ function SectionRow({ sectionKey, letter, count, teacher, teachers, canAssign, o
           })()
         ) : canAssign ? (
           <button className="btn sm" onClick={() => setPickerOpen((s) => !s)} style={{ height: 26 }}>
-            <Icon name="plus" size={11} />Assign teacher
+            <Icon name="plus" size={11} />Assign class teacher
           </button>
         ) : (
           <span style={{ fontSize: 11.5, color: "var(--ink-4)" }}>No class teacher assigned</span>

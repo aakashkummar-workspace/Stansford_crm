@@ -5,10 +5,61 @@ import Icon from "../Icon";
 import { KPI, BarChart, LineBarChart, Ring, AvatarChip } from "../ui";
 import { money, moneyK } from "@/lib/format";
 
-export default function ScreenDashboard({ E, role }) {
+export default function ScreenDashboard({ E, role, session }) {
   const { KPIS, CLASS_STRENGTH, RECENT_FEES, PENDING_FEES, ACTIVITIES, ROUTES, INCOME_SERIES } = E;
   const isParent = role === "parent";
   const child = isParent ? (E.ADDED_STUDENTS || [])[0] : null;
+
+  // Resolve the signed-in teacher's staff id. Prefer the authoritative
+  // session.staffId resolved server-side in app/page.jsx (teachers don't
+  // get the full STAFF list client-side, so client matching is unreliable).
+  const mySid = (() => {
+    if (isParent) return null;
+    if (session?.staffId) return session.staffId;
+    const lid = session?.linkedId || "";
+    if (typeof lid === "string" && lid.startsWith("STF-")) return lid;
+    if (session?.email) {
+      const match = (E.STAFF || []).find((s) => (s.email || "").toLowerCase() === session.email.toLowerCase());
+      if (match) return match.id;
+    }
+    return session?.id || null;
+  })();
+
+  // ----- "My library loans" surface -----
+  // Anyone non-parent on the staff side gets a small loans card on their
+  // dashboard if they currently have books out. Parents see their child's
+  // loans inside ParentDashboard further down.
+  const myLoans = mySid
+    ? (E.LOANS || []).filter((l) =>
+        !l.returnedAt && (l.borrowerType === "teacher" || l.borrowerType === "staff") && l.borrowerId === mySid)
+    : [];
+
+  // ----- "Today's schedule" surface -----
+  // Teachers see periods they're teaching today; parents see their child's
+  // class schedule for today. The day-name uses the same Mon/Tue/Wed
+  // abbreviations the Timetable screen writes, so the filter lines up.
+  const todayDayName = new Date().toLocaleDateString("en-US", { weekday: "short" });
+  const teacherToday = mySid
+    ? (E.TIMETABLE || [])
+        .filter((t) => t.teacherId === mySid && t.day === todayDayName)
+        .sort((a, b) => (a.period || 0) - (b.period || 0))
+    : [];
+
+  // ----- "My leave requests" surface -----
+  // Teachers (and any staff who file leave) see a card on their dashboard
+  // summarising the status of their recent requests so they don't have to
+  // navigate to the Leave screen to check whether admin acted on them.
+  // Match by session.sub OR session.staffId — leave requests created by a
+  // teacher store requesterId = session.sub (the user id), but the same
+  // person's staff record uses STF-…, so we accept both.
+  const myUserId = session?.sub || session?.id || null;
+  const myLeaveRequests = !isParent
+    ? (E.LEAVE_REQUESTS || [])
+        .filter((r) => r.requesterType === "teacher"
+          && (r.requesterId === myUserId || r.requesterId === mySid))
+        .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+        .slice(0, 5)
+    : [];
 
   // Greeting + date string both depend on the client clock — computed after
   // mount to avoid SSR/CSR hydration mismatch.
@@ -23,6 +74,17 @@ export default function ScreenDashboard({ E, role }) {
     setTodayIso(now.toISOString().slice(0, 10));
   }, []);
 
+  // First name from the signed-in user's profile, used in the greeting
+  // ("Good morning, Rashmi"). Updates everywhere when the user renames
+  // themselves on the My Account page (we re-issue the session JWT, so
+  // session.name is current). Falls back to the full name or "there" for
+  // edge cases (no name on the session, e.g. seeded demo accounts).
+  const firstName = (() => {
+    const raw = session?.name || "";
+    const first = raw.trim().split(/\s+/)[0];
+    return first || "there";
+  })();
+
   // Parent dashboard is a focused view for one child — daily log, attendance,
   // transport, and announcements. It replaces the operations-style layout
   // that staff/admin see.
@@ -31,9 +93,11 @@ export default function ScreenDashboard({ E, role }) {
       <ParentDashboard
         child={child}
         greet={greet}
+        firstName={firstName}
         dateLabel={dateLabel}
         todayIso={todayIso}
         E={E}
+        session={session}
       />
     );
   }
@@ -44,15 +108,7 @@ export default function ScreenDashboard({ E, role }) {
         <div>
           <div className="page-eyebrow">{dateLabel || "\u00A0"}</div>
           <div className="page-title">
-            {isParent ? (
-              child ? (
-                <>{greet}. <span className="amber">{child.name.split(" ")[0]}</span><br />is in Class {child.cls}.</>
-              ) : (
-                <>{greet}.<br />No child linked to this account yet.</>
-              )
-            ) : (
-              <>{greet}. <span className="amber">{(E.ADDED_STUDENTS || []).length || "No"} student{(E.ADDED_STUDENTS || []).length === 1 ? "" : "s"}</span><br />on roll today.</>
-            )}
+            {greet}, <span className="amber">{firstName}</span>.
           </div>
           <div className="page-sub">
             {isParent
@@ -183,6 +239,44 @@ export default function ScreenDashboard({ E, role }) {
       </div>
 
       {/* Live alerts strip — pulls from real data so the principal can act in one click */}
+      {/* Today's teaching periods — shown to teachers (and any other staff
+          who happen to be timetabled). Hidden when the schedule is empty. */}
+      {!isParent && teacherToday.length > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <TodayScheduleCard
+            title="Today's schedule"
+            sub={`${teacherToday.length} period${teacherToday.length === 1 ? "" : "s"} · ${todayDayName}`}
+            entries={teacherToday}
+            mode="teacher"
+          />
+        </div>
+      )}
+
+      {/* Library loans I currently have out — only shown when staff actually
+          has books on loan, so admin/principal dashboards stay uncluttered. */}
+      {!isParent && myLoans.length > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <LibraryLoansCard
+            title="My library loans"
+            sub={`${myLoans.length} book${myLoans.length === 1 ? "" : "s"} currently on loan`}
+            loans={myLoans}
+          />
+        </div>
+      )}
+
+      {/* My leave requests — visible to any non-parent who has filed leave.
+          Surfaces the latest approve/reject decision so the teacher doesn't
+          have to dig into the Leave screen to find out what happened. */}
+      {!isParent && myLeaveRequests.length > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <MyLeaveCard
+            title="My leave requests"
+            sub={`${myLeaveRequests.length} recent request${myLeaveRequests.length === 1 ? "" : "s"}`}
+            requests={myLeaveRequests}
+          />
+        </div>
+      )}
+
       {!isParent && (() => {
         const todayIso = new Date().toISOString().slice(0, 10);
         const todaysLogs = (E.DAILY_LOGS || []).filter((l) => l.date === todayIso);
@@ -470,14 +564,14 @@ export default function ScreenDashboard({ E, role }) {
 // ---------- Parent dashboard ----------
 // Focused on a single child: today's daily log (attendance / classwork /
 // homework / handwriting), bus status, recent announcements, fees summary.
-function ParentDashboard({ child, greet, dateLabel, todayIso, E }) {
+function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, session }) {
   if (!child) {
     return (
       <div className="page">
         <div className="page-head">
           <div>
             <div className="page-eyebrow">{dateLabel || " "}</div>
-            <div className="page-title">{greet}.<br />No child linked yet.</div>
+            <div className="page-title">{greet}, <span className="amber">{firstName}</span>.</div>
             <div className="page-sub">Ask the school office to link your account to your child's record.</div>
           </div>
         </div>
@@ -487,12 +581,24 @@ function ParentDashboard({ child, greet, dateLabel, todayIso, E }) {
 
   const logs = (E.DAILY_LOGS || []).filter((l) => l.studentId === child.id);
   const today = logs.find((l) => l.date === todayIso);
+  // Active library loans for this child — surfaced as a card in the right
+  // column so the parent can see "borrowed Matilda · due 12 May" at a glance.
+  const childLoans = (E.LOANS || []).filter((l) =>
+    !l.returnedAt && l.borrowerType === "student" && l.borrowerId === child.id
+  );
+  // Today's class periods for the child — read straight from the timetable.
+  const todayDayName = new Date().toLocaleDateString("en-US", { weekday: "short" });
+  const childToday = (E.TIMETABLE || [])
+    .filter((t) => t.cls === child.cls && t.day === todayDayName)
+    .sort((a, b) => (a.period || 0) - (b.period || 0));
   const route = (E.ROUTES || []).find((r) => r.code === child.transport);
   const myFees    = (E.PENDING_FEES || []).filter((f) => f.id === child.id);
   const myPaid    = (E.RECENT_FEES || []).filter((f) => (f.studentId || f.id) === child.id);
   const announcements = (E.BROADCASTS || []).filter((b) =>
-    b.audience === "all" || b.audience === `class_${child.cls}`
-  ).slice(0, 4);
+    b.audience === "all"
+    || b.audience === `class_${child.cls}`
+    || b.audience === `student_${child.id}`
+  ).slice(0, 6);
 
   // 7-day attendance summary from real logs
   const last7 = (() => {
@@ -533,7 +639,7 @@ function ParentDashboard({ child, greet, dateLabel, todayIso, E }) {
         <div>
           <div className="page-eyebrow">{dateLabel || " "}</div>
           <div className="page-title">
-            {greet}. <span className="amber">{child.name.split(" ")[0]}</span><br />is in Class {child.cls}.
+            {greet}, <span className="amber">{firstName || child.name.split(" ")[0]}</span>.
           </div>
           <div className="page-sub">Today's classroom report, attendance, transport, and any messages from the school.</div>
         </div>
@@ -670,6 +776,28 @@ function ParentDashboard({ child, greet, dateLabel, todayIso, E }) {
               </div>
             )}
           </div>
+
+          {/* Today's class schedule — straight from the timetable. Only
+              rendered when there's a published timetable for the child's
+              class (no point showing an empty grid otherwise). */}
+          {childToday.length > 0 && (
+            <TodayScheduleCard
+              title={`Today · Class ${child.cls}`}
+              sub={`${childToday.length} period${childToday.length === 1 ? "" : "s"} · ${todayDayName}`}
+              entries={childToday}
+              mode="parent"
+            />
+          )}
+
+          {/* Library loans for this child — only rendered when active */}
+          {childLoans.length > 0 && (
+            <LibraryLoansCard
+              title="Library · borrowed"
+              sub={`${childLoans.length} book${childLoans.length === 1 ? "" : "s"} on loan`}
+              loans={childLoans}
+              showBorrower={false}
+            />
+          )}
         </div>
       </div>
 
@@ -704,6 +832,236 @@ function ParentDashboard({ child, greet, dateLabel, todayIso, E }) {
             </tbody>
           </table>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------
+// Today's schedule card — list of period rows for whoever is signed in.
+// `mode="teacher"` shows class + room beside each period; `mode="parent"`
+// shows subject + teacher (since the class is already implied).
+// ----------------------------------------------------------------------
+const PERIOD_TIMES = {
+  1: "08:00 – 08:45",
+  2: "08:45 – 09:30",
+  3: "09:30 – 10:15",
+  4: "10:30 – 11:15",
+  5: "11:15 – 12:00",
+  6: "12:00 – 12:45",
+  7: "13:30 – 14:15",
+};
+
+function TodayScheduleCard({ title, sub, entries, mode }) {
+  if (!entries || entries.length === 0) return null;
+  // Highlight whichever period contains "now" (rough — uses the start hour
+  // from PERIOD_TIMES, ignoring weekends since the parent component already
+  // filters by today's day name).
+  const now = new Date();
+  const minutes = now.getHours() * 60 + now.getMinutes();
+  function isLive(periodNum) {
+    const t = PERIOD_TIMES[periodNum];
+    if (!t) return false;
+    const [start, end] = t.split("–").map((s) => s.trim());
+    const toMin = (hm) => {
+      const [h, m] = hm.split(":").map(Number);
+      return h * 60 + m;
+    };
+    return minutes >= toMin(start) && minutes <= toMin(end);
+  }
+  return (
+    <div className="card">
+      <div className="card-head">
+        <div>
+          <div className="card-title">{title}</div>
+          {sub && <div className="card-sub">{sub}</div>}
+        </div>
+        <div className="card-actions">
+          <span className="chip"><Icon name="clock" size={11} />{entries.length}</span>
+        </div>
+      </div>
+      <div style={{ padding: "8px 14px 14px", display: "flex", flexDirection: "column", gap: 6 }}>
+        {entries.map((e) => {
+          const live = isLive(e.period);
+          return (
+            <div key={e.id} style={{
+              display: "flex", gap: 10, padding: "8px 10px", borderRadius: 8,
+              border: live ? "1.5px solid var(--accent)" : "1px solid var(--rule-2)",
+              background: live ? "var(--accent-soft)" : "var(--bg-2)",
+            }}>
+              <div style={{ width: 70, flexShrink: 0 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: live ? "var(--accent-2)" : "var(--ink)" }}>P{e.period}</div>
+                <div style={{ fontSize: 10, color: "var(--ink-4)", whiteSpace: "nowrap" }}>{PERIOD_TIMES[e.period] || ""}</div>
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 500, color: live ? "var(--accent-2)" : "var(--ink)" }}>
+                  {e.subject}
+                </div>
+                <div style={{ fontSize: 10.5, color: "var(--ink-3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {mode === "teacher"
+                    ? <>Class {e.cls}{e.room ? ` · Room ${e.room}` : ""}</>
+                    : <>{e.teacherName || "Teacher TBA"}{e.room ? ` · Room ${e.room}` : ""}</>}
+                </div>
+              </div>
+              {live && (
+                <div style={{ alignSelf: "center", fontSize: 10, fontWeight: 600, color: "var(--accent-2)", textTransform: "uppercase", letterSpacing: 0.5 }}>
+                  Now
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------
+// Reusable Library loans card. Shared between the parent dashboard (where
+// it shows the child's loans) and the staff dashboard (where it shows the
+// signed-in teacher's own loans). Pass `showBorrower={false}` to hide the
+// borrower column when the surrounding context already implies who.
+// ----------------------------------------------------------------------
+function LibraryLoansCard({ title, sub, loans, showBorrower = true }) {
+  if (!loans || loans.length === 0) return null;
+  // Sort: overdue first, then earliest due date.
+  const now = Date.now();
+  const sorted = [...loans].sort((a, b) => {
+    const ao = new Date(a.dueAt).getTime() < now ? 0 : 1;
+    const bo = new Date(b.dueAt).getTime() < now ? 0 : 1;
+    if (ao !== bo) return ao - bo;
+    return new Date(a.dueAt) - new Date(b.dueAt);
+  });
+  const fmt = (iso) => new Date(iso).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+  return (
+    <div className="card">
+      <div className="card-head">
+        <div>
+          <div className="card-title">{title}</div>
+          {sub && <div className="card-sub">{sub}</div>}
+        </div>
+        <div className="card-actions">
+          <span className="chip"><Icon name="book" size={11} />{loans.length}</span>
+        </div>
+      </div>
+      <div style={{ padding: "8px 14px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
+        {sorted.map((l) => {
+          const due = new Date(l.dueAt).getTime();
+          const overdue = due < now;
+          const daysLeft = Math.ceil((due - now) / 86400000);
+          const since = Math.floor((now - new Date(l.borrowedAt).getTime()) / 86400000);
+          return (
+            <div key={l.id} style={{
+              padding: 10, borderRadius: 8,
+              background: overdue ? "var(--err-soft, #fbe1d8)" : "var(--bg-2)",
+              border: overdue ? "1px solid var(--err, #b13c1c)" : "1px solid transparent",
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {l.bookTitle}
+                  </div>
+                  <div style={{ fontSize: 10.5, color: "var(--ink-4)", marginTop: 2 }}>
+                    Borrowed {fmt(l.borrowedAt)} ({since} day{since === 1 ? "" : "s"} ago)
+                    {showBorrower && <> · <span style={{ textTransform: "capitalize" }}>{l.borrowerType}</span> {l.borrowerName}</>}
+                  </div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontSize: 11.5, fontWeight: 600, color: overdue ? "var(--err, #b13c1c)" : "var(--ink-2)" }}>
+                    {overdue
+                      ? `${Math.abs(daysLeft)} day${Math.abs(daysLeft) === 1 ? "" : "s"} overdue`
+                      : daysLeft === 0
+                        ? "due today"
+                        : `${daysLeft} day${daysLeft === 1 ? "" : "s"} left`}
+                  </div>
+                  <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>by {fmt(l.dueAt)}</div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// "My leave requests" card — shows the teacher's recent leave applications
+// with the latest approval status. Color-coded chip per row so the user can
+// see at a glance whether their request is still pending or was actioned.
+function MyLeaveCard({ title, sub, requests }) {
+  if (!requests || requests.length === 0) return null;
+  const TONE = {
+    approved:  { bg: "var(--ok-soft, #e7f3e8)", fg: "var(--ok)",            border: "var(--ok)",            label: "Approved" },
+    rejected:  { bg: "var(--err-soft, #fbe1d8)", fg: "var(--err, #b13c1c)", border: "var(--err, #b13c1c)",  label: "Rejected" },
+    pending:   { bg: "var(--bg-2)",              fg: "var(--ink-2)",        border: "var(--rule)",          label: "Pending review" },
+    cancelled: { bg: "var(--bg-2)",              fg: "var(--ink-3)",        border: "var(--rule)",          label: "Cancelled" },
+  };
+  const fmt = (iso) => {
+    if (!iso) return "—";
+    try { return new Date(iso).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }); }
+    catch { return iso; }
+  };
+  const fmtRange = (from, to) => {
+    if (!from || !to) return "—";
+    const days = Math.max(1, Math.round((new Date(to) - new Date(from)) / 86_400_000) + 1);
+    return `${fmt(from)} → ${fmt(to)} · ${days}d`;
+  };
+  const counts = requests.reduce((m, r) => { m[r.approvalStatus] = (m[r.approvalStatus] || 0) + 1; return m; }, {});
+  return (
+    <div className="card">
+      <div className="card-head">
+        <div>
+          <div className="card-title">{title}</div>
+          {sub && <div className="card-sub">{sub}</div>}
+        </div>
+        <div className="card-actions" style={{ display: "flex", gap: 6 }}>
+          {counts.pending  > 0 && <span className="chip warn"><span className="dot" />{counts.pending} pending</span>}
+          {counts.approved > 0 && <span className="chip ok"><span className="dot" />{counts.approved} approved</span>}
+          {counts.rejected > 0 && <span className="chip bad"><span className="dot" />{counts.rejected} rejected</span>}
+        </div>
+      </div>
+      <div style={{ padding: "8px 14px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
+        {requests.map((r) => {
+          const tone = TONE[r.approvalStatus] || TONE.pending;
+          return (
+            <div key={r.id} style={{
+              padding: 10, borderRadius: 8,
+              background: tone.bg,
+              border: `1px solid ${tone.border}`,
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 500, textTransform: "capitalize" }}>
+                    {r.leaveType || "leave"} leave
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 2 }}>
+                    {fmtRange(r.fromDate, r.toDate)}
+                  </div>
+                  {r.reason && (
+                    <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 4, lineHeight: 1.4, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {r.reason}
+                    </div>
+                  )}
+                </div>
+                <div style={{ textAlign: "right", minWidth: 120 }}>
+                  <span style={{
+                    display: "inline-flex", alignItems: "center", gap: 5,
+                    fontSize: 11, fontWeight: 600, color: tone.fg,
+                    padding: "3px 8px", borderRadius: 999,
+                    border: `1px solid ${tone.fg}`,
+                    background: "rgba(255,255,255,0.6)",
+                  }}>
+                    <span style={{ width: 6, height: 6, borderRadius: 3, background: tone.fg, display: "inline-block" }} />
+                    {tone.label}
+                  </span>
+                  <div style={{ fontSize: 10.5, color: "var(--ink-4)", marginTop: 4 }}>
+                    Filed {r.createdAt ? fmt(r.createdAt) : "—"}
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

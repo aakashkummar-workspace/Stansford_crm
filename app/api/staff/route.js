@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { addStaff, archiveStaff, logAudit } from "@/lib/db";
+import { addStaff, archiveStaff, updateStaffPerformance, logAudit } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 
 // 10-digit Indian mobile: must start with 6/7/8/9. Returns formatted "+91 XXXXX XXXXX" or null.
@@ -66,6 +66,42 @@ export async function POST(req) {
   } catch (e) {
     return NextResponse.json({ ok: false, error: e.message || "Failed to add staff" }, { status: 500 });
   }
+}
+
+// PATCH /api/staff { id, attendance?, tasks?, salary? }
+// Updates a staff member's performance metrics. Recomputes the composite
+// score + status server-side so the leaderboard never drifts out of sync
+// with the underlying numbers.
+export async function PATCH(req) {
+  const session = await getSession();
+  if (!session) return NextResponse.json({ ok: false, error: "Sign in required" }, { status: 401 });
+  if (!["principal", "admin"].includes(session.role)) {
+    return NextResponse.json({ ok: false, error: "Only principal or admin can update performance" }, { status: 403 });
+  }
+  const actor = session.name || "Principal";
+
+  let body; try { body = await req.json(); } catch { body = null; }
+  if (!body?.id) return NextResponse.json({ ok: false, error: "id required" }, { status: 400 });
+
+  const patch = {};
+  if ("attendance" in body) patch.attendance = body.attendance;
+  if ("tasks" in body)      patch.tasks      = body.tasks;
+  if ("salary" in body)     patch.salary     = body.salary;
+  if (Object.keys(patch).length === 0) {
+    return NextResponse.json({ ok: false, error: "Nothing to update" }, { status: 400 });
+  }
+
+  const updated = await updateStaffPerformance(body.id, patch);
+  if (!updated) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 });
+
+  try {
+    const trail = [];
+    if ("attendance" in patch) trail.push(`attendance=${patch.attendance}%`);
+    if ("tasks" in patch)      trail.push(`tasks=${patch.tasks}%`);
+    if ("salary" in patch)     trail.push(`salary=₹${patch.salary}`);
+    await logAudit(actor, "Updated staff performance", `${updated.id} ${updated.name} · ${trail.join(" · ")} · score ${updated.score}`);
+  } catch {}
+  return NextResponse.json({ ok: true, staff: updated });
 }
 
 export async function DELETE(req) {

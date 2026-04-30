@@ -1,19 +1,58 @@
 import { NextResponse } from "next/server";
 import { readPermissions, writePermissions, ALL_FEATURES, ROLES } from "@/lib/permissions";
 import { getSession } from "@/lib/auth";
-import { logAudit } from "@/lib/db";
+import { logAudit, listCustomRoles, listRoleFeatureAccess } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
 // GET /api/permissions  → { permissions, features, roles }
-// Anyone signed in can read this — the data is needed by the sidebar to know
-// what to render.
+// `permissions` is keyed by role and maps featureId → bool. We merge
+// custom-role feature toggles into the same shape so the sidebar's
+// existing `permissions[role][featureId] === false` gating works without
+// any special casing for custom roles.
 export async function GET() {
   const session = await getSession();
   if (!session) return NextResponse.json({ ok: false, error: "Not signed in" }, { status: 401 });
+  const permissions = { ...(await readPermissions()) };
+  // Fold every custom role's role_feature_access toggles into the matrix.
+  // Anything not granted (canView=false or missing) is recorded as `false`
+  // so the sidebar hides it. Granted features are recorded as `true`.
+  // We also build a parallel `access` map keyed by role → feature → {view,edit,delete}
+  // so screens can check write permission, not just view permission.
+  const access = {};
+  try {
+    const custom = await listCustomRoles();
+    for (const cr of custom) {
+      const feats = await listRoleFeatureAccess(cr.id);
+      const viewMap = {};
+      const detailMap = {};
+      // Default everything to false — custom roles are deny-by-default so
+      // a freshly-created role shows nothing until the admin grants a screen.
+      for (const f of ALL_FEATURES) {
+        viewMap[f.id] = false;
+        detailMap[f.id] = { canView: false, canEdit: false, canDelete: false };
+      }
+      // Flip on the ones the admin explicitly granted.
+      for (const f of feats) {
+        if (f.canView) viewMap[f.featureName] = true;
+        detailMap[f.featureName] = {
+          canView:   !!f.canView,
+          canEdit:   !!f.canEdit,
+          canDelete: !!f.canDelete,
+        };
+      }
+      // Always grant the personal "My account" screen so a user assigned
+      // to a brand-new custom role can at least sign out.
+      viewMap.account = true;
+      detailMap.account = { canView: true, canEdit: true, canDelete: false };
+      permissions[cr.id] = viewMap;
+      access[cr.id] = detailMap;
+    }
+  } catch {}
   return NextResponse.json({
     ok: true,
-    permissions: readPermissions(),
+    permissions,
+    access,
     features: ALL_FEATURES,
     roles: ROLES,
   });
@@ -35,7 +74,7 @@ export async function PUT(req) {
     return NextResponse.json({ ok: false, error: "permissions object required" }, { status: 400 });
   }
   try {
-    const merged = writePermissions({ [body.role]: body.permissions });
+    const merged = await writePermissions({ [body.role]: body.permissions });
     const flippedOff = Object.entries(body.permissions).filter(([_, v]) => v === false).map(([k]) => k);
     const flippedOn  = Object.entries(body.permissions).filter(([_, v]) => v === true).map(([k]) => k);
     try {

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI, AvatarChip, StatusChip } from "../ui";
+import { resolveSchool, downloadPdf } from "@/lib/export";
 
 function Toast({ msg, tone, onClose }) {
   if (!msg) return null;
@@ -17,12 +18,17 @@ function Toast({ msg, tone, onClose }) {
   );
 }
 
-export default function ScreenTransport({ E, refresh, role }) {
+export default function ScreenTransport({ E, refresh, role, session }) {
+  const school = resolveSchool(E?.SETTINGS);
+  const actor  = session?.name || null;
   const canEdit = role === "principal" || role === "admin";
+  const isParent = role === "parent";
+  const [view, setView] = useState("live"); // 'live' | 'history'
   const [routeIdx, setRouteIdx] = useState(0);
   const [showAdd, setShowAdd] = useState(false);
   const [editing, setEditing] = useState(null); // route object being edited, or null
   const [assigning, setAssigning] = useState(null); // route object being staff-assigned, or null
+  const [maintFor, setMaintFor]   = useState(null); // route whose maintenance log is open, or null
   const [showAbsent, setShowAbsent] = useState(false);
   const [showMap, setShowMap] = useState(false);
   const [toast, setToast] = useState(null);
@@ -55,26 +61,94 @@ export default function ScreenTransport({ E, refresh, role }) {
     return out;
   }, [route, E.ADDED_STUDENTS]);
 
-  // Per-student attendance state for today, derived from daily_logs entries
-  // posted via the transport flow (we use studentName as a marker through
-  // /api/transport/board, which already records the per-student count).
-  // For per-student status display we read from the route's stops where we
-  // store a parallel `studentAttendance` map. Backed by the existing
-  // `boarded`/`absent` counters which are aggregate; per-student state is
-  // tracked client-side until the schema gets a proper boarding_log table.
+  // Per-student attendance, persisted to /api/transport/attendance and
+  // surfaced via E.TRANSPORT_ATTENDANCE on every refresh. We keep an
+  // optimistic local overlay (`pendingMarks`) so the chip flips instantly
+  // even before the refresh round-trips back. Composite key is
+  // (date|direction|route|studentId).
   const todayKey = new Date().toISOString().slice(0, 10);
-  const [boardingMarks, setBoardingMarks] = useState({}); // { "routeCode-studentId-date": "boarded"|"absent" }
+  const [direction, setDirection] = useState("morning"); // 'morning' | 'evening'
+  const [pendingMarks, setPendingMarks] = useState({});  // optimistic overlay
+  const markKey = (routeCode, studentId, date, dir) => `${routeCode}|${studentId}|${date}|${dir}`;
+
+  // Build a fast lookup of persisted marks for the active route + today.
+  const persistedMarks = useMemo(() => {
+    const out = {};
+    for (const r of (E.TRANSPORT_ATTENDANCE || [])) {
+      out[markKey(r.routeCode, r.studentId, r.date, r.direction || "morning")] = r.status;
+    }
+    return out;
+  }, [E.TRANSPORT_ATTENDANCE]);
+
+  const studentMark = (student) => {
+    if (!route) return null;
+    const k = markKey(route.code, student.id, todayKey, direction);
+    return pendingMarks[k] ?? persistedMarks[k] ?? null;
+  };
+
   const markStudent = async (stop, student, action) => {
-    const key = `${route.code}-${student.id}-${todayKey}`;
-    setBoardingMarks((m) => ({ ...m, [key]: action === "board" ? "boarded" : "absent" }));
-    // Also bump the aggregate counter on the stop via the existing endpoint.
+    if (!route) return;
+    const status = action === "board" ? "boarded" : "absent";
+    const k = markKey(route.code, student.id, todayKey, direction);
+    // Optimistic flip first.
+    setPendingMarks((m) => ({ ...m, [k]: status }));
+    try {
+      const r = await fetch("/api/transport/attendance", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          studentId: student.id, date: todayKey, direction, status,
+          routeCode: route.code, stopName: stop.name,
+          studentName: student.name, cls: student.cls,
+        }),
+      });
+      const json = await r.json().catch(() => ({}));
+      if (!r.ok || !json.ok) throw new Error(json.error || "Could not save");
+    } catch (e) {
+      // Roll back the optimistic flip if the server rejected the write.
+      setPendingMarks((m) => { const n = { ...m }; delete n[k]; return n; });
+      showToast(e.message, "err");
+    }
+    // Also bump the aggregate stop counter (existing flow).
     await mark(stop.name, action);
   };
-  const studentMark = (student) => boardingMarks[`${route?.code}-${student.id}-${todayKey}`] || null;
 
   // Add / remove students from a stop. Updates student.transport +
   // student.pickupStop via PATCH /api/students.
   const [addStopOpen, setAddStopOpen] = useState(null); // stop object being filled, or null
+  const [rosterOpen, setRosterOpen] = useState(false);  // route-level "Assign students" modal
+  // Off-stop boarding flow: a student boards at a stop they're NOT
+  // assigned to (came from a friend's house, parent dropped them at a
+  // closer stop, etc). Records the actual stop on the attendance row;
+  // the student's `pickupStop` assignment stays unchanged.
+  const [offStopOpen, setOffStopOpen] = useState(null);
+  const markOffStop = async (stop, student) => {
+    if (!route) return;
+    const k = markKey(route.code, student.id, todayKey, direction);
+    setPendingMarks((m) => ({ ...m, [k]: "boarded" }));
+    try {
+      const r = await fetch("/api/transport/attendance", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          studentId: student.id, date: todayKey, direction, status: "boarded",
+          routeCode: route.code, stopName: stop.name,
+          studentName: student.name, cls: student.cls,
+        }),
+      });
+      const json = await r.json().catch(() => ({}));
+      if (!r.ok || !json.ok) throw new Error(json.error || "Could not save");
+      // Bump the aggregate stop counter so the live KPI reflects reality.
+      await mark(stop.name, "board");
+      const assigned = student.pickupStop && student.pickupStop !== stop.name
+        ? ` (assigned to ${student.pickupStop})` : "";
+      showToast(`${student.name} boarded at ${stop.name}${assigned}`, "ok");
+      setOffStopOpen(null);
+    } catch (e) {
+      setPendingMarks((m) => { const n = { ...m }; delete n[k]; return n; });
+      showToast(e.message, "err");
+    }
+  };
   const linkStudent = async (studentId, stopName) => {
     try {
       const r = await fetch("/api/students", {
@@ -106,7 +180,11 @@ export default function ScreenTransport({ E, refresh, role }) {
 
   const allStops = routes.flatMap((r) => r.stops || []);
   const totalBoarded = allStops.reduce((a, s) => a + (s.boarded || 0), 0);
-  const totalAbsent  = allStops.reduce((a, s) => a + (s.absent  || 0), 0);
+  // Use the per-student attendance log as the source of truth — the old
+  // sum-of-stop-counters lagged behind when the bus was at full cap.
+  const totalAbsent = ((E.TRANSPORT_ATTENDANCE || [])
+    .filter((r) => r.date === new Date().toISOString().slice(0, 10) && r.status === "absent")
+    .length);
   const totalCap     = allStops.reduce((a, s) => a + (s.cap     || 0), 0);
 
   const showToast = (msg, tone) => {
@@ -206,25 +284,29 @@ export default function ScreenTransport({ E, refresh, role }) {
     }
   }
 
-  // Absentees today across all routes — derived from stop.absent counts.
-  // Each route stop with absent>0 becomes one row.
+  // Absentees today — one row per absent student, sourced from the
+  // per-student transport_attendance table (the authoritative log).
+  // The earlier stop-counter approach lost detail and missed rows when
+  // the counter cap was already reached.
   const absentees = useMemo(() => {
-    const out = [];
-    for (const r of routes) {
-      for (const s of (r.stops || [])) {
-        if ((s.absent || 0) > 0) {
-          out.push({
-            route: r.code,
-            routeName: r.name,
-            stop: s.name,
-            time: s.t,
-            count: s.absent,
-          });
-        }
-      }
-    }
-    return out;
-  }, [routes]);
+    const rowsToday = (E.TRANSPORT_ATTENDANCE || []).filter(
+      (r) => r.date === todayKey && r.status === "absent"
+    );
+    return rowsToday.map((r) => {
+      const route = routes.find((x) => x.code === r.routeCode);
+      const stop  = route?.stops?.find((s) => s.name === r.stopName);
+      return {
+        route: r.routeCode || "—",
+        routeName: route?.name || "",
+        stop: r.stopName || "—",
+        time: stop?.t || "—",
+        direction: r.direction || "morning",
+        studentName: r.studentName || r.studentId,
+        studentId: r.studentId,
+        cls: r.cls || "—",
+      };
+    });
+  }, [E.TRANSPORT_ATTENDANCE, routes, todayKey]);
 
   function downloadAbsenteeList() {
     if (absentees.length === 0) {
@@ -232,21 +314,36 @@ export default function ScreenTransport({ E, refresh, role }) {
       return;
     }
     const today = new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
-    const header = ["Route", "Route name", "Stop", "Pickup time", "Absent count"];
-    const csv = [
-      `# Vidyalaya360 — Transport Absentee List — ${today}`,
-      `# Generated: ${new Date().toLocaleString("en-IN")}`,
-      header.join(","),
-      ...absentees.map((a) => [a.route, csvEscape(a.routeName), csvEscape(a.stop), csvEscape(a.time), a.count].join(",")),
-    ].join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `transport-absent-${today.replace(/\s+/g, "-").toLowerCase()}.csv`;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    showToast(`Downloaded list (${absentees.length} stops with absentees)`, "ok");
+    downloadPdf({
+      title: "Transport Absentee List",
+      subtitle: `${absentees.length} absent student${absentees.length === 1 ? "" : "s"} today`,
+      school, actor,
+      dateRange: today,
+      orientation: "landscape",
+      summary: [
+        { label: "Total absent", value: absentees.length },
+        { label: "Routes affected", value: new Set(absentees.map((a) => a.route)).size },
+        { label: "Morning trip", value: absentees.filter((a) => a.direction === "morning").length },
+        { label: "Evening trip", value: absentees.filter((a) => a.direction === "evening").length },
+      ],
+      columns: [
+        { key: "route",       label: "Route",        align: "center", width: "70px" },
+        { key: "routeName",   label: "Route name" },
+        { key: "stop",        label: "Stop" },
+        { key: "time",        label: "Pickup",       align: "right",  width: "80px" },
+        { key: "direction",   label: "Trip",         align: "center", width: "80px" },
+        { key: "studentName", label: "Student" },
+        { key: "studentId",   label: "ID",           width: "100px" },
+        { key: "cls",         label: "Class",        align: "center", width: "60px" },
+      ],
+      rows: absentees.map((a) => ({
+        route: a.route, routeName: a.routeName || "—", stop: a.stop || "—",
+        time: a.time || "—", direction: a.direction || "morning",
+        studentName: a.studentName || "—", studentId: a.studentId, cls: a.cls || "—",
+      })),
+      filename: `${school.name.replace(/\s+/g, "-").toLowerCase()}-transport-absent-${today.replace(/\s+/g, "-").toLowerCase()}`,
+    });
+    showToast(`Opened PDF preview (${absentees.length} absent)`, "ok");
   }
 
   return (
@@ -293,10 +390,10 @@ export default function ScreenTransport({ E, refresh, role }) {
           label="Absent today" value={totalAbsent} sub="across all routes"
           puck="rose" puckIcon="warning"
           details={{
-            title: `Absent today · ${totalAbsent} students`,
-            sub: "Stops with one or more absentees",
+            title: `Absent today · ${totalAbsent} student${totalAbsent === 1 ? "" : "s"}`,
+            sub: "Marked absent on the bus run today",
             items: absentees.map((a) => ({
-              label: `${a.route} · ${a.stop}`, value: a.count, sub: `Pickup ${a.time}`, tone: "bad",
+              label: a.studentName, value: a.cls, sub: `${a.route} · ${a.stop} · ${a.direction}`, tone: "bad",
             })),
           }}
         />
@@ -315,6 +412,39 @@ export default function ScreenTransport({ E, refresh, role }) {
         <KPI label="Avg on-time %" value={routes.length ? `${Math.round(((routes.length - routes.filter((r) => r.status === "delayed").length) / routes.length) * 100)}%` : "—"} sub={routes.length ? "based on status" : "needs run history"} puck="cream" puckIcon="trending" />
       </div>
 
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
+        <div className="segmented">
+          <button className={view === "live" ? "active" : ""} onClick={() => setView("live")}>
+            Live boarding
+          </button>
+          <button className={view === "history" ? "active" : ""} onClick={() => setView("history")}>
+            Attendance history
+          </button>
+        </div>
+        {view === "live" && !isParent && (
+          <div className="segmented" title="Which trip you're marking right now">
+            <button className={direction === "morning" ? "active" : ""} onClick={() => setDirection("morning")}>
+              <Icon name="sun" size={11} />Morning
+            </button>
+            <button className={direction === "evening" ? "active" : ""} onClick={() => setDirection("evening")}>
+              <Icon name="moon" size={11} />Evening
+            </button>
+          </div>
+        )}
+      </div>
+
+      {view === "history" && (
+        <TransportHistoryView
+          rows={E.TRANSPORT_ATTENDANCE || []}
+          students={E.ADDED_STUDENTS || []}
+          routes={routes}
+          isParent={isParent}
+          school={school}
+          actor={actor}
+        />
+      )}
+
+      {view === "live" && (
       <div className="grid g-12">
         <div className="card col-4">
           <div className="card-head">
@@ -328,6 +458,7 @@ export default function ScreenTransport({ E, refresh, role }) {
               const boarded = (r.stops || []).reduce((a, s) => a + (s.boarded || 0), 0);
               const cap = (r.stops || []).reduce((a, s) => a + (s.cap || 0), 0);
               const active = i === routeIdx;
+              const maintAlert = computeMaintAlert((E.MAINTENANCE_LOGS || []).filter((m) => m.busNumber === r.bus));
               return (
                 <div
                   key={r.code}
@@ -350,6 +481,13 @@ export default function ScreenTransport({ E, refresh, role }) {
                         {r.attendant && r.attendant !== "—" ? `Teacher: ${r.attendant}` : <em style={{ color: "var(--ink-4)" }}>No teacher assigned</em>}
                       </span>
                     </div>
+                    {maintAlert && (
+                      <div style={{ marginTop: 4 }}>
+                        <span className={`chip ${maintAlert.tone}`} style={{ fontSize: 10 }}>
+                          <span className="dot" />{maintAlert.label}
+                        </span>
+                      </div>
+                    )}
                     <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
                       <div className="bar" style={{ flex: 1 }}><span style={{ width: `${cap ? (boarded / cap) * 100 : 0}%` }} /></div>
                       <div className="mono" style={{ fontSize: 11, color: "var(--ink-3)", minWidth: 36, textAlign: "right" }}>{boarded}/{cap}</div>
@@ -363,6 +501,13 @@ export default function ScreenTransport({ E, refresh, role }) {
                         title="Assign teacher to this bus"
                       >
                         <Icon name="staff" size={13} />
+                      </button>
+                      <button
+                        className="icon-btn"
+                        onClick={(e) => { e.stopPropagation(); setMaintFor(r); }}
+                        title="Vehicle maintenance log"
+                      >
+                        <Icon name="wrench" size={13} />
                       </button>
                       <button
                         className="icon-btn"
@@ -409,7 +554,16 @@ export default function ScreenTransport({ E, refresh, role }) {
                   <span>{route.eta}</span>
                 </div>
               </div>
-              <div style={{ display: "flex", gap: 6 }}>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {canEdit && (
+                  <button
+                    className="btn sm"
+                    onClick={() => setRosterOpen(true)}
+                    title="Assign or remove students for any stop on this route"
+                  >
+                    <Icon name="users" size={12} />Assign students
+                  </button>
+                )}
                 <button className="btn sm" onClick={() => showToast(`Calling ${route.driver}…`, "ok")}><Icon name="phone" size={12} />Call</button>
                 <button className="btn sm" onClick={() => setShowMap(true)}><Icon name="mapPin" size={12} />Track</button>
                 <button className="btn sm accent" onClick={() => showToast(`Broadcast sent to ${route.code} parents`, "ok")}><Icon name="send" size={12} />Broadcast</button>
@@ -565,19 +719,23 @@ export default function ScreenTransport({ E, refresh, role }) {
                           </div>
                         ) : null}
 
-                        {/* + Add student button — visible to staff for any stop */}
-                        {canEdit && (
+                        {/* Off-stop boarding — runtime only, keeps the live
+                            view focused on the boarding flow. Roster management
+                            (assigning students to stops) lives in the
+                            "Assign students" modal at the route header. */}
+                        {canEdit && cur && (
                           <button
                             className="btn sm"
                             style={{ marginTop: 8, height: 26, padding: "0 10px", fontSize: 11 }}
-                            onClick={() => setAddStopOpen(s)}
+                            onClick={() => setOffStopOpen(s)}
+                            title="Mark a student boarded here who's assigned to a different stop"
                           >
-                            <Icon name="plus" size={11} />Add student to this stop
+                            <Icon name="check" size={11} />Off-stop boarding
                           </button>
                         )}
-                        {!canEdit && (studentsByStop[s.name] || []).length === 0 && (done || cur) && (
+                        {(studentsByStop[s.name] || []).length === 0 && (done || cur) && (
                           <div style={{ marginTop: 8, fontSize: 11, color: "var(--ink-4)" }}>
-                            No students linked to this stop yet.
+                            No students linked to this stop yet.{canEdit ? " Use Assign students at the route header to add some." : ""}
                           </div>
                         )}
 
@@ -600,24 +758,36 @@ export default function ScreenTransport({ E, refresh, role }) {
 
           <div className="card">
             <div className="card-head">
-              <div><div className="card-title">Absentees · today</div><div className="card-sub">{absentees.length === 0 ? "No absentees marked yet" : `${absentees.length} stop${absentees.length === 1 ? "" : "s"} affected`}</div></div>
+              <div><div className="card-title">Absentees · today</div><div className="card-sub">{absentees.length === 0 ? "No absentees marked yet" : `${absentees.length} student${absentees.length === 1 ? "" : "s"} absent today`}</div></div>
               <div className="card-actions">
-                <button className="btn sm" onClick={downloadAbsenteeList}><Icon name="download" size={12} />Export</button>
+                <button className="btn sm" onClick={downloadAbsenteeList} title="Open a printable, branded PDF report"><Icon name="download" size={12} />Export PDF</button>
               </div>
             </div>
             <div style={{ overflowX: "auto" }}>
               <table className="table">
-                <thead><tr><th>Route</th><th>Stop</th><th>Pickup</th><th>Absent count</th></tr></thead>
+                <thead><tr><th>Student</th><th>Class</th><th>Route · Stop</th><th>Trip</th><th>Pickup</th></tr></thead>
                 <tbody>
                   {absentees.length === 0 && (
-                    <tr><td colSpan={4} className="empty">No absentees logged today.</td></tr>
+                    <tr><td colSpan={5} className="empty">No absentees logged today.</td></tr>
                   )}
                   {absentees.map((a, i) => (
-                    <tr key={i}>
-                      <td><span className="chip">{a.route}</span> <span style={{ marginLeft: 6, color: "var(--ink-3)", fontSize: 12 }}>{a.routeName}</span></td>
-                      <td style={{ fontSize: 12 }}>{a.stop}</td>
+                    <tr key={`${a.studentId}-${a.direction}-${i}`}>
+                      <td>
+                        <div style={{ fontSize: 12.5, fontWeight: 500 }}>{a.studentName}</div>
+                        <div style={{ fontSize: 10.5, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>{a.studentId}</div>
+                      </td>
+                      <td><span className="chip">{a.cls}</span></td>
+                      <td style={{ fontSize: 12, color: "var(--ink-3)" }}>
+                        <span className="chip" style={{ marginRight: 6 }}>{a.route}</span>
+                        {a.stop}
+                      </td>
+                      <td>
+                        <span className="chip" style={{ fontSize: 10.5 }}>
+                          <Icon name={a.direction === "evening" ? "moon" : "sun"} size={10} />
+                          {a.direction}
+                        </span>
+                      </td>
                       <td style={{ fontSize: 12, fontFamily: "var(--font-mono)" }}>{a.time}</td>
-                      <td><span className="chip bad">{a.count}</span></td>
                     </tr>
                   ))}
                 </tbody>
@@ -627,6 +797,7 @@ export default function ScreenTransport({ E, refresh, role }) {
         </div>
         )}
       </div>
+      )}
 
       {showAdd && canEdit && (
         <AddRouteModal
@@ -636,6 +807,17 @@ export default function ScreenTransport({ E, refresh, role }) {
           staff={E.STAFF || []}
         />
       )}
+      {/* Render order matters: when both are open, the picker must render
+          AFTER the roster so it stacks on top (both share zIndex 250). */}
+      {rosterOpen && canEdit && route && (
+        <RouteRosterModal
+          route={route}
+          studentsByStop={studentsByStop}
+          onClose={() => setRosterOpen(false)}
+          onAdd={(stop) => setAddStopOpen(stop)}
+          onRemove={(student) => unlinkStudent(student)}
+        />
+      )}
       {addStopOpen && canEdit && route && (
         <AddStudentToStopModal
           route={route}
@@ -643,6 +825,15 @@ export default function ScreenTransport({ E, refresh, role }) {
           students={E.ADDED_STUDENTS || []}
           onClose={() => setAddStopOpen(null)}
           onPick={(studentId) => linkStudent(studentId, addStopOpen.name)}
+        />
+      )}
+      {offStopOpen && canEdit && route && (
+        <OffStopBoardingModal
+          route={route}
+          stop={offStopOpen}
+          students={E.ADDED_STUDENTS || []}
+          onClose={() => setOffStopOpen(null)}
+          onPick={(student) => markOffStop(offStopOpen, student)}
         />
       )}
       {editing && canEdit && (
@@ -661,6 +852,15 @@ export default function ScreenTransport({ E, refresh, role }) {
           onAssign={(driver) => handleAssignStaff(assigning.code, driver)}
         />
       )}
+      {maintFor && (
+        <MaintenanceModal
+          route={maintFor}
+          canEdit={canEdit}
+          allLogs={E.MAINTENANCE_LOGS || []}
+          onClose={() => setMaintFor(null)}
+          onChanged={refresh}
+        />
+      )}
       {showAbsent && (
         <AbsenteeModal absentees={absentees} onClose={() => setShowAbsent(false)} onDownload={downloadAbsenteeList} />
       )}
@@ -673,11 +873,6 @@ export default function ScreenTransport({ E, refresh, role }) {
   );
 }
 
-function csvEscape(v) {
-  const s = String(v ?? "");
-  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-  return s;
-}
 
 // Status chip for the route — covers idle/running/completed/delayed.
 function RunStatusChip({ status }) {
@@ -1261,22 +1456,218 @@ function AddStudentToStopModal({ route, stop, students, onClose, onPick }) {
   );
 }
 
+// Route-level roster manager. One screen to see/add/remove students for
+// every stop on a route, so the live boarding view stays focused on the
+// run itself. "+ Add student" delegates to the existing per-stop picker
+// (AddStudentToStopModal) so we don't duplicate the search/assignment logic.
+function RouteRosterModal({ route, studentsByStop, onClose, onAdd, onRemove }) {
+  const initials = (n) => (n || "?").trim().split(/\s+/).map((p) => p[0]).slice(0, 2).join("").toUpperCase();
+  const stops = route.stops || [];
+  const totalAssigned = stops.reduce((a, s) => a + ((studentsByStop[s.name] || []).length), 0);
+
+  return (
+    <ModalShell
+      title={`Assign students · ${route.code}`}
+      sub={`${route.name} · ${stops.length} stop${stops.length === 1 ? "" : "s"} · ${totalAssigned} student${totalAssigned === 1 ? "" : "s"} on roster`}
+      onClose={onClose}
+      width={600}
+    >
+      <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12, maxHeight: "70vh", overflowY: "auto" }}>
+        {stops.length === 0 && (
+          <div className="empty">This route has no stops yet — add some via Edit route first.</div>
+        )}
+        {stops.map((s) => {
+          const assigned = studentsByStop[s.name] || [];
+          const cap = Number(s.cap) || 0;
+          return (
+            <div key={s.name} style={{
+              background: "var(--card-2)", border: "1px solid var(--rule)",
+              borderRadius: 10, padding: 12,
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                <div style={{
+                  width: 28, height: 28, borderRadius: "50%",
+                  background: "var(--bg-2)", border: "1px solid var(--rule)",
+                  display: "grid", placeItems: "center",
+                  fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--ink-3)",
+                }}>{(stops.indexOf(s) + 1)}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 500 }}>{s.name}</div>
+                  <div style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>
+                    {s.t} · {assigned.length}{cap > 0 ? `/${cap}` : ""} assigned
+                  </div>
+                </div>
+                <button
+                  className="btn sm"
+                  style={{ height: 26, padding: "0 10px", fontSize: 11 }}
+                  onClick={() => onAdd(s)}
+                  disabled={cap > 0 && assigned.length >= cap}
+                  title={cap > 0 && assigned.length >= cap ? "Stop is at capacity" : "Add a student to this stop"}
+                >
+                  <Icon name="plus" size={11} />Add student
+                </button>
+              </div>
+              {assigned.length === 0 ? (
+                <div style={{ fontSize: 11.5, color: "var(--ink-4)", fontStyle: "italic" }}>
+                  No students assigned yet.
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  {assigned.map((stu) => (
+                    <div key={stu.id} style={{
+                      display: "flex", alignItems: "center", gap: 8,
+                      padding: "6px 8px",
+                      background: "var(--bg-2)", border: "1px solid var(--rule-2)",
+                      borderRadius: 7,
+                    }}>
+                      <span style={{
+                        width: 22, height: 22, borderRadius: "50%",
+                        background: "linear-gradient(135deg, var(--accent), var(--accent-2))",
+                        color: "#fff", display: "grid", placeItems: "center",
+                        fontSize: 9.5, fontWeight: 600, flexShrink: 0,
+                      }}>{initials(stu.name)}</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 12.5, fontWeight: 500 }}>{stu.name}</div>
+                        <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{stu.cls} · {stu.id}</div>
+                      </div>
+                      <button
+                        className="icon-btn"
+                        style={{ width: 24, height: 24 }}
+                        onClick={() => onRemove(stu)}
+                        title={`Remove ${stu.name} from ${s.name}`}
+                      >
+                        <Icon name="x" size={11} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        <div style={{ fontSize: 11, color: "var(--ink-4)" }}>
+          Removing a student here unlinks them from transport entirely. Their attendance history stays preserved.
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+// Off-stop boarding picker. Lists students assigned to THIS route but at a
+// DIFFERENT stop (so the conductor can mark them boarded at the current
+// stop). Picking does NOT change `student.pickupStop` — only writes a
+// transport_attendance row stamped with the current stop's name.
+function OffStopBoardingModal({ route, stop, students, onClose, onPick }) {
+  const [q, setQ] = useState("");
+  const [busyId, setBusyId] = useState(null);
+  const initials = (n) => (n || "?").trim().split(/\s+/).map((p) => p[0]).slice(0, 2).join("").toUpperCase();
+
+  // Candidates: students assigned to this route, but NOT to this stop.
+  // (Students already on this stop's roster are markable through the
+  // regular "Present" button — they don't need this off-stop flow.)
+  const candidates = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return students
+      .filter((s) => s.transport === route.code && s.pickupStop !== stop.name)
+      .filter((s) => !needle || `${s.name} ${s.cls} ${s.id} ${s.pickupStop || ""}`.toLowerCase().includes(needle))
+      .slice(0, 60);
+  }, [students, route.code, stop.name, q]);
+
+  return (
+    <ModalShell
+      title={`Off-stop boarding at ${stop.name}`}
+      sub={`${route.code} · pickup ${stop.t} · doesn't change the student's assigned stop`}
+      onClose={onClose}
+      width={520}
+    >
+      <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <input
+          className="input"
+          autoFocus
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search by name, class, ID, or assigned stop…"
+        />
+        {candidates.length === 0 ? (
+          <div className="empty">
+            No off-stop candidates. Either every student on {route.code} is already assigned to {stop.name},
+            or this route has no other students.
+          </div>
+        ) : (
+          <div style={{ maxHeight: 360, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
+            {candidates.map((s) => (
+              <button
+                key={s.id}
+                type="button"
+                disabled={busyId === s.id}
+                onClick={async () => {
+                  setBusyId(s.id);
+                  try { await onPick(s); } finally { setBusyId(null); }
+                }}
+                style={{
+                  display: "flex", alignItems: "center", gap: 10,
+                  padding: "8px 10px", textAlign: "left",
+                  background: "var(--card-2)", border: "1px solid var(--rule-2)",
+                  borderRadius: 8, cursor: busyId === s.id ? "wait" : "pointer",
+                  opacity: busyId === s.id ? 0.6 : 1,
+                }}
+                onMouseEnter={(e) => busyId !== s.id && (e.currentTarget.style.borderColor = "var(--accent)")}
+                onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--rule-2)")}
+              >
+                <span style={{
+                  width: 26, height: 26, borderRadius: "50%",
+                  background: "linear-gradient(135deg, var(--accent), var(--accent-2))",
+                  color: "#fff", display: "grid", placeItems: "center",
+                  fontSize: 10, fontWeight: 600, flexShrink: 0,
+                }}>{initials(s.name)}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 500, color: "var(--ink)" }}>{s.name}</div>
+                  <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>
+                    {s.cls} · {s.id} · assigned to <b>{s.pickupStop || "—"}</b>
+                  </div>
+                </div>
+                <span className="chip warn" style={{ fontSize: 10 }}>Off-stop</span>
+              </button>
+            ))}
+          </div>
+        )}
+        <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>
+          Records a boarding at <b>{stop.name}</b> for today's <b>{stop.t}</b> trip. The student's
+          assigned pickup stop stays unchanged — use <i>Add student to this stop</i> if you want to
+          permanently move them.
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
 function AbsenteeModal({ absentees, onClose, onDownload }) {
   return (
-    <ModalShell title="Absentees · today" sub={`${absentees.length} stop${absentees.length === 1 ? "" : "s"} with absentees · auto-SMS sent on detection`} onClose={onClose} width={620}>
+    <ModalShell title="Absentees · today" sub={`${absentees.length} student${absentees.length === 1 ? "" : "s"} absent · auto-SMS sent on detection`} onClose={onClose} width={680}>
       <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {absentees.length === 0 ? (
           <div className="empty">No absentees marked yet today. As drivers tap “Mark absent” on the stops page, they appear here.</div>
         ) : (
           <table className="table">
-            <thead><tr><th>Route</th><th>Stop</th><th>Pickup</th><th>Count</th></tr></thead>
+            <thead><tr><th>Student</th><th>Class</th><th>Route · Stop</th><th>Trip</th></tr></thead>
             <tbody>
               {absentees.map((a, i) => (
-                <tr key={i}>
-                  <td><span className="chip">{a.route}</span> <span style={{ marginLeft: 6, color: "var(--ink-3)", fontSize: 12 }}>{a.routeName}</span></td>
-                  <td style={{ fontSize: 12 }}>{a.stop}</td>
-                  <td style={{ fontSize: 12, fontFamily: "var(--font-mono)" }}>{a.time}</td>
-                  <td><span className="chip bad">{a.count}</span></td>
+                <tr key={`${a.studentId}-${a.direction}-${i}`}>
+                  <td>
+                    <div style={{ fontSize: 12.5, fontWeight: 500 }}>{a.studentName}</div>
+                    <div style={{ fontSize: 10.5, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>{a.studentId}</div>
+                  </td>
+                  <td><span className="chip">{a.cls}</span></td>
+                  <td style={{ fontSize: 12, color: "var(--ink-3)" }}>
+                    <span className="chip" style={{ marginRight: 6 }}>{a.route}</span>
+                    {a.stop}
+                  </td>
+                  <td>
+                    <span className="chip" style={{ fontSize: 10.5 }}>
+                      <Icon name={a.direction === "evening" ? "moon" : "sun"} size={10} />
+                      {a.direction}
+                    </span>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -1378,5 +1769,544 @@ function MapModal({ routes, onClose }) {
         )}
       </div>
     </ModalShell>
+  );
+}
+
+// ---- Maintenance helpers + modal ----
+const MAINTENANCE_TYPES = ["service", "fuel", "insurance", "FC", "PUC", "repair", "tyre", "battery"];
+
+// Returns { tone, label } describing the soonest renewal for the given logs,
+// or null if nothing's due in the next 30 days.
+function computeMaintAlert(busLogs) {
+  if (!busLogs || busLogs.length === 0) return null;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const upcoming = busLogs
+    .filter((l) => l.nextDueDate)
+    .map((l) => ({ ...l, due: new Date(l.nextDueDate) }))
+    .filter((l) => !isNaN(l.due));
+  if (upcoming.length === 0) return null;
+  upcoming.sort((a, b) => a.due - b.due);
+  const soonest = upcoming[0];
+  const days = Math.ceil((soonest.due - today) / 86400000);
+  if (days < 0)  return { tone: "bad",  label: `${labelFor(soonest.type)} overdue by ${-days}d` };
+  if (days === 0) return { tone: "bad", label: `${labelFor(soonest.type)} due today` };
+  if (days <= 30) return { tone: "warn", label: `${labelFor(soonest.type)} due in ${days}d` };
+  return null;
+}
+function labelFor(t) {
+  return ({ service: "Service", fuel: "Fuel", insurance: "Insurance", FC: "FC", PUC: "PUC", repair: "Repair", tyre: "Tyre", battery: "Battery" }[t] || t);
+}
+
+function MaintenanceModal({ route, canEdit, allLogs, onClose, onChanged }) {
+  const [adding, setAdding] = useState(false);
+  const [busy, setBusy] = useState(null); // log id being deleted
+  const [err, setErr] = useState("");
+
+  const logs = (allLogs || []).filter((l) => l.busNumber === route.bus);
+  const totalCost = logs.reduce((a, l) => a + (l.cost || 0), 0);
+  const upcoming = computeMaintAlert(logs);
+
+  async function add(payload) {
+    const r = await fetch("/api/maintenance", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...payload, busNumber: route.bus, routeCode: route.code }),
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
+    setAdding(false);
+    await onChanged?.();
+  }
+
+  async function remove(log) {
+    if (!confirm(`Remove ${labelFor(log.type)} log from ${log.date}?`)) return;
+    setBusy(log.id);
+    try {
+      const r = await fetch("/api/maintenance", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: log.id }),
+      });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
+      await onChanged?.();
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(null); }
+  }
+
+  return (
+    <ModalShell
+      title={`Maintenance · ${route.code}`}
+      sub={`${route.bus || "no bus number"} · ${route.name}`}
+      onClose={onClose}
+      width={680}
+    >
+      <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {/* Top-line summary */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+          <SummaryTile label="Logs on file" value={logs.length} />
+          <SummaryTile label="Total spend" value={`₹${totalCost.toLocaleString("en-IN")}`} />
+          <SummaryTile
+            label="Next renewal"
+            value={upcoming ? upcoming.label : "—"}
+            tone={upcoming?.tone}
+          />
+        </div>
+
+        {canEdit && !adding && (
+          <button className="btn accent" onClick={() => setAdding(true)} style={{ alignSelf: "flex-start" }}>
+            <Icon name="plus" size={13} />Log maintenance event
+          </button>
+        )}
+
+        {adding && (
+          <AddMaintenanceForm
+            onCancel={() => setAdding(false)}
+            onSubmit={add}
+          />
+        )}
+
+        {err && (
+          <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "8px 10px", borderRadius: 7, fontSize: 11.5 }}>{err}</div>
+        )}
+
+        <div style={{ overflowX: "auto", border: "1px solid var(--rule)", borderRadius: 8 }}>
+          <table className="table" style={{ width: "100%" }}>
+            <thead>
+              <tr><th>Date</th><th>Type</th><th>Vendor</th><th className="num">Odometer</th><th className="num">Cost</th><th>Next due</th><th></th></tr>
+            </thead>
+            <tbody>
+              {logs.length === 0 && (
+                <tr><td colSpan={7} className="empty">No maintenance logged for this bus yet.</td></tr>
+              )}
+              {logs.map((l) => {
+                const overdue = l.nextDueDate && new Date(l.nextDueDate) < new Date(new Date().toISOString().slice(0,10));
+                return (
+                  <tr key={l.id}>
+                    <td style={{ fontSize: 11.5, color: "var(--ink-3)", whiteSpace: "nowrap" }}>{l.date}</td>
+                    <td><span className="chip" style={{ fontSize: 10.5 }}>{labelFor(l.type)}</span></td>
+                    <td style={{ fontSize: 12 }}>{l.vendor || "—"}</td>
+                    <td className="num" style={{ fontSize: 11.5 }}>{l.odometer ? `${l.odometer.toLocaleString("en-IN")} km` : "—"}</td>
+                    <td className="num">{l.cost ? `₹${l.cost.toLocaleString("en-IN")}` : "—"}</td>
+                    <td style={{ fontSize: 11.5, color: overdue ? "var(--err, #b13c1c)" : "var(--ink-3)", whiteSpace: "nowrap" }}>
+                      {l.nextDueDate || "—"}{overdue ? " · overdue" : ""}
+                    </td>
+                    <td style={{ textAlign: "right" }}>
+                      {canEdit && (
+                        <button className="icon-btn" onClick={() => remove(l)} disabled={busy === l.id} title="Remove">
+                          <Icon name="x" size={12} />
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        {logs.some((l) => l.notes) && (
+          <details>
+            <summary style={{ fontSize: 11.5, color: "var(--ink-3)", cursor: "pointer" }}>Show notes</summary>
+            <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+              {logs.filter((l) => l.notes).map((l) => (
+                <div key={l.id} style={{ background: "var(--bg-2)", borderRadius: 7, padding: 8, fontSize: 11.5 }}>
+                  <b style={{ color: "var(--ink)" }}>{labelFor(l.type)} · {l.date}</b><br />{l.notes}
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
+
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <button className="btn ghost" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+function SummaryTile({ label, value, tone }) {
+  const color = tone === "bad" ? "var(--err, #b13c1c)" : tone === "warn" ? "var(--warn)" : "var(--ink)";
+  return (
+    <div style={{ background: "var(--bg-2)", padding: "10px 12px", borderRadius: 8 }}>
+      <div style={{ fontSize: 10, color: "var(--ink-4)", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 500 }}>{label}</div>
+      <div style={{ fontSize: 14, fontWeight: 600, color, marginTop: 3 }}>{value}</div>
+    </div>
+  );
+}
+
+function AddMaintenanceForm({ onCancel, onSubmit }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [form, setForm] = useState({
+    type: "service", date: today, odometer: "", vendor: "", cost: "", notes: "", nextDueDate: "",
+  });
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  async function submit(e) {
+    e.preventDefault();
+    if (busy) return;
+    setBusy(true); setErr("");
+    try {
+      await onSubmit({
+        type: form.type, date: form.date,
+        odometer: form.odometer || null,
+        vendor: form.vendor.trim() || null,
+        cost: form.cost || 0,
+        notes: form.notes.trim() || null,
+        nextDueDate: form.nextDueDate || null,
+      });
+    } catch (ex) { setErr(ex.message); setBusy(false); }
+  }
+
+  return (
+    <form onSubmit={submit} style={{ background: "var(--bg-2)", border: "1px dashed var(--rule)", padding: 12, borderRadius: 8, display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+        <Field label="Type *">
+          <select className="select" value={form.type} onChange={(e) => set("type", e.target.value)}>
+            {MAINTENANCE_TYPES.map((t) => <option key={t} value={t}>{labelFor(t)}</option>)}
+          </select>
+        </Field>
+        <Field label="Date">
+          <input className="input" type="date" value={form.date} onChange={(e) => set("date", e.target.value)} />
+        </Field>
+        <Field label="Next due (renewal)">
+          <input className="input" type="date" value={form.nextDueDate} onChange={(e) => set("nextDueDate", e.target.value)} />
+        </Field>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+        <Field label="Odometer (km)">
+          <input className="input" inputMode="numeric" value={form.odometer} onChange={(e) => set("odometer", e.target.value.replace(/\D/g, ""))} placeholder="48250" />
+        </Field>
+        <Field label="Vendor">
+          <input className="input" value={form.vendor} onChange={(e) => set("vendor", e.target.value)} placeholder="e.g. Sunrise Motors" />
+        </Field>
+        <Field label="Cost (₹)">
+          <input className="input" inputMode="numeric" value={form.cost} onChange={(e) => set("cost", e.target.value.replace(/\D/g, ""))} placeholder="3500" />
+        </Field>
+      </div>
+      <Field label="Notes">
+        <input className="input" value={form.notes} onChange={(e) => set("notes", e.target.value)} placeholder="Brake pads + oil change" />
+      </Field>
+      {err && <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "8px 10px", borderRadius: 7, fontSize: 11.5 }}>{err}</div>}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
+        <button type="button" className="btn ghost" onClick={onCancel} disabled={busy}>Cancel</button>
+        <button type="submit" className="btn accent" disabled={busy}><Icon name="check" size={13} />{busy ? "Saving…" : "Save log"}</button>
+      </div>
+    </form>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Transport attendance history
+// Shows persisted per-student bus boarding rows. Filters: date range,
+// route, student. Two layouts: a flat audit-style table (for staff) and a
+// per-student summary card. Parents always see only their child (the data
+// is already pre-scoped by AppShell).
+// ----------------------------------------------------------------------------
+function TransportHistoryView({ rows, students, routes, isParent, school, actor }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const sevenDaysAgo = new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10);
+  const [from, setFrom] = useState(sevenDaysAgo);
+  const [to, setTo] = useState(today);
+  const [routeCode, setRouteCode] = useState("All");
+  const [studentId, setStudentId] = useState("All");
+  const [statusFilter, setStatusFilter] = useState("All");
+  const [offStopOnly, setOffStopOnly] = useState(false);
+
+  // Restrict student dropdown to those who actually use transport.
+  const transportStudents = useMemo(
+    () => (students || []).filter((s) => s.transport && s.transport !== "—"),
+    [students]
+  );
+  // studentId -> currently-assigned pickup stop. Used by the table to flag
+  // attendance rows where the actual `stopName` differs from the student's
+  // assignment ("off-stop" boarding).
+  const assignedStopById = useMemo(() => {
+    const out = {};
+    for (const s of (students || [])) {
+      if (s.transport && s.transport !== "—") out[s.id] = s.pickupStop || null;
+    }
+    return out;
+  }, [students]);
+
+  const filtered = useMemo(() => {
+    return (rows || []).filter((r) => {
+      if (from && r.date < from) return false;
+      if (to && r.date > to) return false;
+      if (routeCode !== "All" && r.routeCode !== routeCode) return false;
+      if (studentId !== "All" && r.studentId !== studentId) return false;
+      if (statusFilter !== "All" && r.status !== statusFilter.toLowerCase()) return false;
+      if (offStopOnly) {
+        const assigned = assignedStopById[r.studentId];
+        if (r.status !== "boarded" || !assigned || !r.stopName || assigned === r.stopName) return false;
+      }
+      return true;
+    }).sort((a, b) => {
+      // newest date first; within a date, morning before evening
+      if (a.date !== b.date) return a.date < b.date ? 1 : -1;
+      return (a.direction || "morning") < (b.direction || "morning") ? -1 : 1;
+    });
+  }, [rows, from, to, routeCode, studentId, statusFilter, offStopOnly, assignedStopById]);
+
+  // Per-student rollup for the summary cards: counts of boarded/absent/skipped
+  // across the active filter window.
+  const perStudent = useMemo(() => {
+    const map = new Map();
+    for (const r of filtered) {
+      const key = r.studentId;
+      if (!map.has(key)) {
+        map.set(key, {
+          studentId: r.studentId,
+          name: r.studentName || (transportStudents.find((s) => s.id === r.studentId)?.name) || r.studentId,
+          cls: r.cls || "",
+          boarded: 0, absent: 0, skipped: 0, total: 0,
+          last: r,
+        });
+      }
+      const agg = map.get(key);
+      agg[r.status] = (agg[r.status] || 0) + 1;
+      agg.total += 1;
+      if (r.date > (agg.last?.date || "")) agg.last = r;
+    }
+    // Add students with NO rows in window so staff can spot "never marked".
+    if (!isParent) {
+      for (const s of transportStudents) {
+        if (studentId !== "All" && s.id !== studentId) continue;
+        if (routeCode !== "All" && s.transport !== routeCode) continue;
+        if (!map.has(s.id)) {
+          map.set(s.id, {
+            studentId: s.id, name: s.name, cls: s.cls,
+            boarded: 0, absent: 0, skipped: 0, total: 0, last: null,
+          });
+        }
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [filtered, transportStudents, isParent, studentId, routeCode]);
+
+  const totals = filtered.reduce(
+    (a, r) => {
+      a[r.status] = (a[r.status] || 0) + 1;
+      a.total += 1;
+      return a;
+    },
+    { boarded: 0, absent: 0, skipped: 0, total: 0 }
+  );
+
+  const exportPdf = () => {
+    downloadPdf({
+      title: "Transport Attendance History",
+      subtitle: `${filtered.length} record${filtered.length === 1 ? "" : "s"} from ${from} to ${to}`,
+      school, actor,
+      dateRange: `${from} → ${to}`,
+      orientation: "landscape",
+      summary: [
+        { label: "Records",  value: filtered.length },
+        { label: "Boarded",  value: counts.boarded || 0 },
+        { label: "Absent",   value: counts.absent || 0 },
+        { label: "Skipped",  value: counts.skipped || 0 },
+      ],
+      columns: [
+        { key: "date",        label: "Date",         align: "right",  width: "90px" },
+        { key: "direction",   label: "Trip",         align: "center", width: "70px" },
+        { key: "route",       label: "Route",        align: "center", width: "70px" },
+        { key: "stopName",    label: "Stop" },
+        { key: "assigned",    label: "Assigned stop" },
+        { key: "offStop",     label: "Off-stop",     align: "center", width: "70px" },
+        { key: "studentName", label: "Student" },
+        { key: "studentId",   label: "ID",           width: "100px" },
+        { key: "cls",         label: "Class",        align: "center", width: "60px" },
+        { key: "status",      label: "Status",       align: "center", width: "80px" },
+        { key: "markedBy",    label: "Marked by" },
+      ],
+      rows: filtered.map((r) => {
+        const assigned = assignedStopById[r.studentId] || "—";
+        const offStop = r.status === "boarded" && assigned !== "—" && r.stopName && assigned !== r.stopName ? "Yes" : "—";
+        return {
+          date: r.date, direction: r.direction || "morning",
+          route: r.routeCode || "—", stopName: r.stopName || "—",
+          assigned, offStop,
+          studentName: r.studentName || "—", studentId: r.studentId,
+          cls: r.cls || "—", status: r.status,
+          markedBy: r.markedBy || "—",
+        };
+      }),
+      filename: `${(school?.name || "school").replace(/\s+/g, "-").toLowerCase()}-transport-attendance-${from}-to-${to}`,
+    });
+  };
+
+  return (
+    <div className="grid g-12">
+      <div className="card col-12">
+        <div className="card-head" style={{ flexWrap: "wrap", gap: 12 }}>
+          <div>
+            <div className="card-title">Transport attendance history</div>
+            <div className="card-sub">
+              {totals.total} record{totals.total === 1 ? "" : "s"} ·
+              {" "}{totals.boarded} boarded · {totals.absent} absent
+              {totals.skipped ? ` · ${totals.skipped} skipped` : ""}
+            </div>
+          </div>
+          <div className="card-actions" style={{ flexWrap: "wrap", gap: 8 }}>
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--ink-3)" }}>
+              From
+              <input type="date" className="input" value={from} max={to}
+                onChange={(e) => setFrom(e.target.value)}
+                style={{ height: 28, padding: "0 8px" }} />
+            </label>
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--ink-3)" }}>
+              To
+              <input type="date" className="input" value={to} min={from}
+                onChange={(e) => setTo(e.target.value)}
+                style={{ height: 28, padding: "0 8px" }} />
+            </label>
+            {!isParent && (
+              <select className="select" value={routeCode}
+                onChange={(e) => setRouteCode(e.target.value)}
+                style={{ height: 28 }}>
+                <option value="All">All routes</option>
+                {routes.map((r) => <option key={r.code} value={r.code}>{r.code} · {r.name}</option>)}
+              </select>
+            )}
+            {!isParent && (
+              <select className="select" value={studentId}
+                onChange={(e) => setStudentId(e.target.value)}
+                style={{ height: 28 }}>
+                <option value="All">All students</option>
+                {transportStudents.map((s) => <option key={s.id} value={s.id}>{s.name} · {s.cls}</option>)}
+              </select>
+            )}
+            <div className="segmented">
+              {["All", "Boarded", "Absent", "Skipped"].map((s) => (
+                <button key={s} className={statusFilter === s ? "active" : ""} onClick={() => setStatusFilter(s)}>
+                  {s}
+                </button>
+              ))}
+            </div>
+            <button
+              className={`btn sm ${offStopOnly ? "accent" : ""}`}
+              onClick={() => setOffStopOnly((v) => !v)}
+              title="Show only boardings where the student rode the bus at a stop other than their assigned one"
+            >
+              <Icon name="warning" size={12} />Off-stop only
+            </button>
+            <button className="btn sm" onClick={exportPdf} disabled={filtered.length === 0} title="Open a printable, branded PDF report">
+              <Icon name="download" size={12} />Export PDF
+            </button>
+          </div>
+        </div>
+
+        {/* Per-student summary — quick read of who's been riding */}
+        {perStudent.length > 0 && (
+          <div style={{ padding: "12px 18px", borderBottom: "1px solid var(--rule-2)" }}>
+            <div style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>
+              Per student in this window
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 8 }}>
+              {perStudent.map((p) => {
+                const tone = p.total === 0 ? "ink-4"
+                           : p.absent > p.boarded ? "bad"
+                           : p.absent > 0 ? "warn"
+                           : "ok";
+                return (
+                  <div key={p.studentId} style={{
+                    background: "var(--card-2)", border: "1px solid var(--rule)",
+                    borderRadius: 9, padding: 10, display: "flex", flexDirection: "column", gap: 4,
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <AvatarChip initials={(p.name || "?").split(/\s+/).map((x) => x[0]).slice(0, 2).join("").toUpperCase()} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 12.5, fontWeight: 500 }}>{p.name}</div>
+                        <div style={{ fontSize: 10.5, color: "var(--ink-3)" }}>{p.cls} · {p.studentId}</div>
+                      </div>
+                      <span className={`chip ${tone === "ok" ? "ok" : tone === "warn" ? "warn" : tone === "bad" ? "bad" : ""}`} style={{ fontSize: 10 }}>
+                        {p.total === 0 ? "no records" : `${p.boarded}/${p.total} boarded`}
+                      </span>
+                    </div>
+                    {p.total > 0 && (
+                      <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>
+                        {p.absent > 0 && <>· {p.absent} absent </>}
+                        {p.skipped > 0 && <>· {p.skipped} skipped </>}
+                        {p.last && <>· last {p.last.date} {p.last.direction}</>}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        <div style={{ overflowX: "auto" }}>
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Trip</th>
+                <th>Student</th>
+                <th>Class</th>
+                <th>Route · Stop</th>
+                <th>Status</th>
+                {!isParent && <th>Marked by</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.length === 0 && (
+                <tr><td colSpan={isParent ? 6 : 7} className="empty">No transport attendance records in this window.</td></tr>
+              )}
+              {filtered.map((r, i) => (
+                <tr key={`${r.studentId}-${r.date}-${r.direction}-${i}`}>
+                  <td style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>{r.date}</td>
+                  <td>
+                    <span className="chip" style={{ fontSize: 10.5 }}>
+                      <Icon name={r.direction === "evening" ? "sunset" : "sunrise"} size={10} />
+                      {r.direction || "morning"}
+                    </span>
+                  </td>
+                  <td>
+                    <div style={{ fontSize: 12.5, fontWeight: 500 }}>{r.studentName || r.studentId}</div>
+                    <div style={{ fontSize: 10.5, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>{r.studentId}</div>
+                  </td>
+                  <td><span className="chip">{r.cls || "—"}</span></td>
+                  <td style={{ fontSize: 12, color: "var(--ink-3)" }}>
+                    {r.routeCode || "—"}{r.stopName ? ` · ${r.stopName}` : ""}
+                    {(() => {
+                      // Flag off-stop boardings: the student's currently
+                      // assigned pickup is X but they were marked at Y.
+                      // Only meaningful when both sides are known.
+                      const assigned = assignedStopById[r.studentId];
+                      if (r.status !== "boarded") return null;
+                      if (!assigned || !r.stopName) return null;
+                      if (assigned === r.stopName) return null;
+                      return (
+                        <span
+                          className="chip warn"
+                          title={`Assigned to ${assigned}`}
+                          style={{ marginLeft: 6, fontSize: 10 }}
+                        >
+                          off-stop
+                        </span>
+                      );
+                    })()}
+                  </td>
+                  <td>
+                    <span className={`chip ${r.status === "boarded" ? "ok" : r.status === "absent" ? "bad" : "warn"}`}>
+                      <span className="dot" />
+                      {r.status.charAt(0).toUpperCase() + r.status.slice(1)}
+                    </span>
+                  </td>
+                  {!isParent && (
+                    <td style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{r.markedBy || "—"}</td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   );
 }

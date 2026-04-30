@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI, AvatarChip } from "../ui";
 import { money, moneyK } from "@/lib/format";
+import { resolveSchool, downloadPdf } from "@/lib/export";
 
 const DONOR_TYPES = ["CSR", "Trust", "Individual", "Alumni"];
 const FILTERS = [
@@ -76,7 +77,9 @@ function Field({ label, children, hint }) {
   );
 }
 
-export default function ScreenDonors({ E, refresh, role }) {
+export default function ScreenDonors({ E, refresh, role, session }) {
+  const school = resolveSchool(E?.SETTINGS);
+  const actor  = session?.name || null;
   const canEdit = role === "principal" || role === "admin";
   const [filter, setFilter] = useState("all");
   const [showAdd, setShowAdd] = useState(false);
@@ -89,6 +92,28 @@ export default function ScreenDonors({ E, refresh, role }) {
   const donors    = E.DONORS || [];
   const campaigns = E.CAMPAIGNS || [];
   const receipts  = E.DONOR_RECEIPTS || [];
+  // Submissions from the public /donorform page that haven't been
+  // accepted / rejected yet. Admin / principal triage them inline.
+  // We also fetch directly from /api/donor-form on mount as a safety
+  // net — covers the case where /api/data hasn't been refreshed since
+  // a recent submission, or the v2 field isn't propagating cleanly.
+  const [directSubs, setDirectSubs] = useState(null);
+  useEffect(() => {
+    if (role !== "admin" && role !== "principal") return;
+    (async () => {
+      try {
+        const r = await fetch("/api/donor-form?status=pending", { cache: "no-store" });
+        const j = await r.json().catch(() => ({}));
+        if (j?.ok) setDirectSubs(j.submissions || []);
+      } catch {}
+    })();
+  }, [role]);
+  const pendingSubmissions = (() => {
+    // Prefer the live fetch when we have it; fall back to E.* otherwise.
+    if (Array.isArray(directSubs)) return directSubs.filter((s) => s.status === "pending");
+    return (E.DONOR_FORM_SUBMISSIONS || []).filter((s) => s.status === "pending");
+  })();
+  const [submissionBusy, setSubmissionBusy] = useState(null);
 
   const filtered = useMemo(() => {
     if (filter === "all") return donors;
@@ -103,6 +128,36 @@ export default function ScreenDonors({ E, refresh, role }) {
     setToast({ msg, tone });
     setTimeout(() => setToast(null), 3500);
   };
+
+  async function reviewSubmission(id, status) {
+    setSubmissionBusy(id);
+    try {
+      const r = await fetch("/api/donor-form", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id, status }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
+      showToast(
+        status === "accepted"
+          ? `Submission accepted · donor added to your list`
+          : `Submission rejected`,
+        "ok"
+      );
+      // Re-pull both the local pending list and the global data feed.
+      try {
+        const r2 = await fetch("/api/donor-form?status=pending", { cache: "no-store" });
+        const j2 = await r2.json().catch(() => ({}));
+        if (j2?.ok) setDirectSubs(j2.submissions || []);
+      } catch {}
+      await refresh?.();
+    } catch (e) {
+      showToast(e.message || "Failed", "err");
+    } finally {
+      setSubmissionBusy(null);
+    }
+  }
 
   async function handleAdd(payload) {
     const r = await fetch("/api/donors", {
@@ -144,8 +199,9 @@ export default function ScreenDonors({ E, refresh, role }) {
     await refresh?.();
   }
 
-  // CSV export — handy for accounting / annual reconciliation. Either dump all
-  // receipts or just one donor's (when called from the per-donor list modal).
+  // PDF export — branded, printable, for accounting / annual reconciliation.
+  // Either dump all receipts or just one donor's (when called from the
+  // per-donor list modal).
   function exportReceiptsCsv(scope) {
     const list = scope === "all" || !scope
       ? receipts
@@ -154,30 +210,45 @@ export default function ScreenDonors({ E, refresh, role }) {
       showToast("No receipts to export", "err");
       return;
     }
-    const header = ["Receipt #", "Issued", "Donor ID", "Donor", "Type", "Amount", "Method", "Memo", "Campaign"];
-    const esc = (v) => {
-      const s = String(v ?? "");
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-    const today = new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
     const titleScope = scope && scope !== "all" ? scope.name : "All donors";
-    const csv = [
-      `# Vidyalaya360 — Donation receipts — ${titleScope} — ${today}`,
-      `# Generated: ${new Date().toLocaleString("en-IN")}`,
-      header.join(","),
-      ...list.map((r) => [
-        r.id, r.issuedAtLabel || r.issuedAt, r.donorId, esc(r.donorName), r.donorType,
-        r.amount, esc(r.method), esc(r.memo), esc(r.campaignId || ""),
-      ].join(",")),
-    ].join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `donor-receipts-${(scope && scope !== "all") ? scope.id : "all"}-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    showToast(`Exported ${list.length} receipt${list.length === 1 ? "" : "s"}`, "ok");
+    const totalAmt = list.reduce((a, r) => a + (Number(r.amount) || 0), 0);
+    const opened = downloadPdf({
+      title: `Donation Receipts · ${titleScope}`,
+      subtitle: `${list.length} receipt${list.length === 1 ? "" : "s"} issued`,
+      school, actor,
+      dateRange: titleScope,
+      orientation: "landscape",
+      summary: [
+        { label: "Receipts",     value: list.length },
+        { label: "Total raised", value: `₹${totalAmt.toLocaleString("en-IN")}` },
+        { label: "Donors",       value: new Set(list.map((r) => r.donorId)).size },
+      ],
+      columns: [
+        { key: "i",        label: "#",         align: "right",  width: "32px" },
+        { key: "id",       label: "Receipt #", width: "100px" },
+        { key: "issued",   label: "Issued",    align: "right",  width: "100px" },
+        { key: "donorId",  label: "Donor ID",  width: "90px" },
+        { key: "donor",    label: "Donor" },
+        { key: "type",     label: "Type",      align: "center", width: "100px" },
+        { key: "amount",   label: "Amount",    align: "right" },
+        { key: "method",   label: "Method",    align: "center", width: "90px" },
+        { key: "memo",     label: "Memo" },
+      ],
+      rows: list.map((r, i) => ({
+        i: i + 1,
+        id: r.id,
+        issued: r.issuedAtLabel || r.issuedAt || "—",
+        donorId: r.donorId || "—",
+        donor: r.donorName || "—",
+        type: r.donorType || "—",
+        amount: `₹${(Number(r.amount) || 0).toLocaleString("en-IN")}`,
+        method: r.method || "—",
+        memo: r.memo || "—",
+      })),
+      filename: `${school.name.replace(/\s+/g, "-").toLowerCase()}-donor-receipts-${(scope && scope !== "all") ? scope.id : "all"}-${new Date().toISOString().slice(0, 10)}`,
+    });
+    if (opened === false) showToast("Pop-up blocked — please allow pop-ups", "err");
+    else showToast(`Opened PDF preview · ${list.length} receipt${list.length === 1 ? "" : "s"}`, "ok");
   }
 
   async function handleRemove(d) {
@@ -214,12 +285,162 @@ export default function ScreenDonors({ E, refresh, role }) {
         )}
       </div>
 
-      <div className="grid g-4" style={{ marginBottom: 14 }}>
-        <KPI label="Donors" value={donors.length} sub="on file" puck="mint" puckIcon="donors" />
-        <KPI label="Raised · YTD" value={ytdTotal ? moneyK(ytdTotal) : "₹0"} sub="across all donors" puck="cream" puckIcon="trending" />
-        <KPI label="CSR partners" value={csrCount} sub="organisations" puck="peach" puckIcon="shield" />
-        <KPI label="Recurring donors" value={recurring} sub={recurring ? "with next touchpoint" : "add to track"} puck="sky" puckIcon="refresh" />
-      </div>
+      {/* Public-form submissions waiting for review. Admin / principal
+          accepts → inserts a real donor row + flips status to accepted.
+          Reject → flips to rejected, no donor created. */}
+      {canEdit && pendingSubmissions.length > 0 && (
+        <div className="card" style={{ marginBottom: 14, borderLeft: "3px solid var(--accent)" }}>
+          <div className="card-head">
+            <div>
+              <div className="card-title">
+                <Icon name="bell" size={14} style={{ marginRight: 6 }} />
+                Public donor enquiries
+              </div>
+              <div className="card-sub">
+                {pendingSubmissions.length} new submission{pendingSubmissions.length === 1 ? "" : "s"} from the public donor form (<a href="/donorform" target="_blank" rel="noopener noreferrer" style={{ color: "var(--brand, #1f3f8b)", fontWeight: 700 }}>/donorform</a>)
+              </div>
+            </div>
+            <span className="chip warn"><span className="dot" />{pendingSubmissions.length} pending</span>
+          </div>
+          <div>
+            {pendingSubmissions.map((s) => {
+              const typeLabel = ({
+                one_time: "One-time gift",
+                monthly: "Monthly recurring",
+                annual: "Annual pledge",
+              })[s.donationType] || s.donationType;
+              return (
+                <div key={s.id} className="lrow" style={{ alignItems: "flex-start", gap: 12, paddingTop: 12, paddingBottom: 12 }}>
+                  <div style={{
+                    width: 40, height: 40, borderRadius: 10,
+                    background: "var(--accent-soft)", color: "var(--accent)",
+                    display: "grid", placeItems: "center", flexShrink: 0,
+                  }}>
+                    <Icon name="donors" size={16} />
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 13, fontWeight: 700 }}>{s.donorName}</span>
+                      {s.donationAmount > 0 && (
+                        <span className="chip ok">₹{Number(s.donationAmount).toLocaleString("en-IN")}</span>
+                      )}
+                      <span className="chip">{typeLabel}</span>
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 4, display: "flex", gap: 12, flexWrap: "wrap" }}>
+                      {s.phone && <span>📞 {s.phone}</span>}
+                      {s.email && <span>✉ {s.email}</span>}
+                    </div>
+                    {s.message && (
+                      <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginTop: 6, lineHeight: 1.5, padding: "8px 10px", background: "var(--bg-2)", borderRadius: 7 }}>
+                        “{s.message}”
+                      </div>
+                    )}
+                    <div style={{ fontSize: 10.5, color: "var(--ink-4)", marginTop: 4 }}>
+                      {s.id} · submitted {s.submittedAt ? new Date(s.submittedAt).toLocaleString("en-IN") : "—"}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                    <button
+                      className="btn sm"
+                      onClick={() => reviewSubmission(s.id, "rejected")}
+                      disabled={submissionBusy === s.id}
+                    >Reject</button>
+                    <button
+                      className="btn sm accent"
+                      onClick={() => reviewSubmission(s.id, "accepted")}
+                      disabled={submissionBusy === s.id}
+                    ><Icon name="check" size={11} />Accept &amp; add donor</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {(() => {
+        // Pre-compute popover breakdowns so each KPI is self-contained.
+        // Donor list grouped by type (CSR / Trust / Individual / Alumni)
+        // gives the most actionable rollup for the principal/admin.
+        const byType = (() => {
+          const m = new Map();
+          for (const d of donors) {
+            const k = d.type || "Other";
+            if (!m.has(k)) m.set(k, { type: k, count: 0, ytd: 0 });
+            const e = m.get(k);
+            e.count += 1;
+            e.ytd   += d.ytd || 0;
+          }
+          return [...m.values()].sort((a, b) => b.ytd - a.ytd);
+        })();
+        const topYtd = donors.slice().sort((a, b) => (b.ytd || 0) - (a.ytd || 0));
+        const csrDonors = donors.filter((d) => d.type === "CSR");
+        const recurringDonors = donors.filter((d) => d.next);
+
+        return (
+          <div className="grid g-4" style={{ marginBottom: 14 }}>
+            <KPI
+              label="Donors" value={donors.length} sub="on file"
+              puck="mint" puckIcon="donors"
+              details={{
+                title: `Donors · ${donors.length} on file`,
+                sub: "Breakdown by donor type",
+                items: byType.length === 0 ? [] : byType.map((t) => ({
+                  label: t.type,
+                  value: t.count,
+                  sub: `${money(t.ytd)} YTD`,
+                  tone: t.type === "CSR" ? "ok" : "",
+                })),
+              }}
+            />
+            <KPI
+              label="Raised · YTD" value={ytdTotal ? moneyK(ytdTotal) : "₹0"}
+              sub={`across ${donors.length} donor${donors.length === 1 ? "" : "s"}`}
+              puck="cream" puckIcon="trending"
+              details={{
+                title: `Raised · ${money(ytdTotal)}`,
+                sub: `Top contributors · ${receipts.length} receipt${receipts.length === 1 ? "" : "s"} issued`,
+                items: topYtd.slice(0, 10).map((d, i) => ({
+                  label: `${i + 1}. ${d.name}`,
+                  value: money(d.ytd || 0),
+                  sub: `${d.type}${d.last ? ` · last ${d.last}` : ""}`,
+                  tone: "ok",
+                })),
+              }}
+            />
+            <KPI
+              label="CSR partners" value={csrCount} sub="organisations"
+              puck="peach" puckIcon="shield"
+              details={{
+                title: `CSR partners · ${csrCount}`,
+                sub: csrCount === 0 ? "No CSR donors yet" : "Corporate CSR contributors",
+                items: csrDonors.map((d) => ({
+                  label: d.name,
+                  value: money(d.ytd || 0),
+                  sub: d.email || d.phone || "—",
+                  tone: "ok",
+                })),
+              }}
+            />
+            <KPI
+              label="Recurring donors" value={recurring}
+              sub={recurring ? "with next touchpoint" : "add to track"}
+              puck="sky" puckIcon="refresh"
+              details={{
+                title: `Recurring donors · ${recurring}`,
+                sub: recurring === 0
+                  ? "Set a Next touchpoint on any donor to track them here"
+                  : "Donors with a scheduled next touchpoint",
+                items: recurringDonors.map((d) => ({
+                  label: d.name,
+                  value: d.next || "—",
+                  sub: `${d.type} · ${money(d.ytd || 0)} YTD`,
+                })),
+              }}
+            />
+          </div>
+        );
+      })()}
 
       <div className="grid g-12">
         <div className="card col-8">
@@ -725,7 +946,13 @@ function ReceiptModal({ receipt, onClose }) {
     `;
     doc.head.appendChild(style);
     doc.body.innerHTML = `
-      <div class="head"><div class="title">Donation receipt</div><div class="sub">Stansford International HR.Sec.School &middot; Vidyalaya360</div></div>
+      <div class="head" style="display:flex;align-items:center;gap:12px;">
+        <img src="${window.location.origin}/logo.png" alt="logo" style="width:56px;height:56px;object-fit:contain;flex-shrink:0;" />
+        <div style="flex:1;text-align:left;">
+          <div class="title">Donation receipt</div>
+          <div class="sub">Sanfort International School &middot; Sanvi Educational and Charitable Trust</div>
+        </div>
+      </div>
       <div class="row"><span class="lbl">Receipt #</span><span><b>${receipt.id}</b></span></div>
       <div class="row"><span class="lbl">Issued</span><span>${receipt.issuedAtLabel}</span></div>
       <div class="row"><span class="lbl">Donor</span><span>${receipt.donorName} (${receipt.donorId})</span></div>
@@ -826,8 +1053,8 @@ function ReceiptsListModal({ scope, receipts = [], onClose, onPreview, onExport 
         )}
 
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-          <button type="button" className="btn" onClick={onExport} disabled={receipts.length === 0}>
-            <Icon name="download" size={13} />Export CSV
+          <button type="button" className="btn" onClick={onExport} disabled={receipts.length === 0} title="Open a printable, branded PDF report">
+            <Icon name="download" size={13} />Export PDF
           </button>
           <button type="button" className="btn ghost" onClick={onClose}>Close</button>
         </div>

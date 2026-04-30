@@ -60,6 +60,9 @@ function Field({ label, children, hint }) {
 
 export default function ScreenCommunication({ E, refresh, role, session }) {
   const canSend = role === "principal" || role === "admin" || role === "academic_director" || role === "teacher";
+  // Parents only see the read-only "Recent broadcasts" log — no compose, no
+  // templates, no audience picker. They consume messages, they don't send them.
+  const isParent = role === "parent";
   const [showBroadcast, setShowBroadcast] = useState(false);
   const [broadcastPrefill, setBroadcastPrefill] = useState(null);
   const [showImport, setShowImport] = useState(false);
@@ -201,9 +204,9 @@ export default function ScreenCommunication({ E, refresh, role, session }) {
       </div>
 
       <div className="grid g-12">
-        <div className="card col-7">
+        <div className={`card ${isParent ? "col-12" : "col-7"}`}>
           <div className="card-head">
-            <div><div className="card-title">Recent broadcasts</div><div className="card-sub">Automations + manual</div></div>
+            <div><div className="card-title">Recent broadcasts</div><div className="card-sub">{isParent ? "Messages from your school" : "Manual + system-generated"}</div></div>
           </div>
           <div style={{ overflowX: "auto" }}>
             <table className="table">
@@ -237,6 +240,7 @@ export default function ScreenCommunication({ E, refresh, role, session }) {
           </div>
         </div>
 
+        {!isParent && (
         <div className="col-5" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <div className="card">
             <div className="card-head">
@@ -276,6 +280,7 @@ export default function ScreenCommunication({ E, refresh, role, session }) {
             templates={templates}
           />
         </div>
+        )}
       </div>
 
       {showBroadcast && canSend && (

@@ -60,12 +60,17 @@ export default function ScreenChat({ E, refresh, role, session }) {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const j = await r.json();
-      if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || `Send failed (${r.status})`);
       setShowStart(false);
       await load();
       setActive(j.thread.id);
-    } catch (e) { setErr(e.message); }
+    } catch (e) {
+      setErr(e.message);
+      // Re-throw so the modal can release its busy state and show the
+      // error inside the modal instead of leaving "Sending…" stuck.
+      throw e;
+    }
     finally { setBusy(false); }
   }
 
@@ -88,9 +93,10 @@ export default function ScreenChat({ E, refresh, role, session }) {
 
       <div className="card" style={{ height: 600, display: "flex", overflow: "hidden" }}>
         {/* Threads list */}
-        <div style={{ width: 280, borderRight: "1px solid var(--rule)", display: "flex", flexDirection: "column" }}>
-          <div style={{ padding: "10px 14px", borderBottom: "1px solid var(--rule)", fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 500 }}>
-            Conversations
+        <div style={{ width: 320, borderRight: "1px solid var(--rule)", display: "flex", flexDirection: "column" }}>
+          <div style={{ padding: "10px 14px", borderBottom: "1px solid var(--rule)", fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 500, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <span>{role === "teacher" ? "Parent inbox" : "Conversations"}</span>
+            {threads.length > 0 && <span style={{ color: "var(--ink-4)" }}>{threads.length}</span>}
           </div>
           <div style={{ flex: 1, overflowY: "auto" }}>
             {threads.length === 0 && (
@@ -101,25 +107,65 @@ export default function ScreenChat({ E, refresh, role, session }) {
             {threads.map((t) => {
               const last = t.messages?.[t.messages.length - 1];
               const counterpart = role === "parent" ? t.teacherName : t.parentName;
-              const sub = role === "parent" ? `Re: ${t.studentName} (${t.cls})` : `Parent of ${t.studentName} (${t.cls})`;
+              const sub = role === "parent"
+                ? `Re: ${t.studentName} (${t.cls})`
+                : `${t.studentName} · ${t.cls}`;
+              const initials = (counterpart || "?").split(/\s+/).map((p) => p[0]).slice(0, 2).join("").toUpperCase();
+              // "Unread" = last message is from the other side. Reset
+              // when we open the thread (active === t.id).
+              const lastFromOther = last && last.fromRole && last.fromRole !== role;
+              const isUnread = lastFromOther && active !== t.id;
+              const lastTime = last?.sentAt
+                ? new Date(last.sentAt).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+                : null;
               return (
                 <button
                   key={t.id}
                   onClick={() => setActive(t.id)}
                   style={{
-                    display: "block", width: "100%", textAlign: "left",
-                    padding: "10px 14px", border: 0,
+                    display: "flex", width: "100%", textAlign: "left",
+                    gap: 10, alignItems: "flex-start",
+                    padding: "12px 14px", border: 0,
                     background: active === t.id ? "var(--accent-soft)" : "transparent",
+                    borderLeft: active === t.id ? "3px solid var(--accent)" : "3px solid transparent",
                     borderBottom: "1px solid var(--rule)",
                     cursor: "pointer",
                   }}
                 >
-                  <div style={{ fontSize: 12.5, fontWeight: 500, color: "var(--ink)" }}>{counterpart}</div>
-                  <div style={{ fontSize: 10.5, color: "var(--ink-4)", marginTop: 2 }}>{sub}</div>
-                  {last && (
-                    <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {last.fromRole === role ? "You: " : ""}{last.body.slice(0, 60)}
+                  <span style={{
+                    width: 36, height: 36, borderRadius: "50%", flexShrink: 0,
+                    background: "linear-gradient(135deg, var(--accent), var(--accent-2))",
+                    color: "#fff", display: "grid", placeItems: "center",
+                    fontSize: 12, fontWeight: 600,
+                  }}>{initials}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ fontSize: 13, fontWeight: isUnread ? 600 : 500, color: "var(--ink)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {counterpart}
+                      </span>
+                      {lastTime && (
+                        <span style={{ fontSize: 10, color: "var(--ink-4)", fontFamily: "var(--font-mono)", flexShrink: 0 }}>
+                          {lastTime}
+                        </span>
+                      )}
                     </div>
+                    <div style={{ fontSize: 10.5, color: "var(--ink-4)", marginTop: 2 }}>{sub}</div>
+                    {last && (
+                      <div style={{
+                        fontSize: 11, marginTop: 4,
+                        color: isUnread ? "var(--ink)" : "var(--ink-3)",
+                        fontWeight: isUnread ? 500 : 400,
+                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                      }}>
+                        {last.fromRole === role ? "You: " : ""}{last.body.slice(0, 60)}
+                      </div>
+                    )}
+                  </div>
+                  {isUnread && (
+                    <span style={{
+                      width: 8, height: 8, borderRadius: "50%",
+                      background: "var(--accent)", flexShrink: 0, marginTop: 6,
+                    }} title="Unread message" />
                   )}
                 </button>
               );
@@ -208,7 +254,8 @@ function NewThreadModal({ students, onClose, onSubmit }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
-  // Pull all teachers — pick one assigned to the chosen student's class.
+  // Pull all teachers, then narrow to the class teacher(s) of the picked
+  // child's class. Parents must NOT be able to message a random teacher.
   useEffect(() => {
     fetch("/api/users?role=teacher").then((r) => r.json()).then((j) => {
       if (j.ok) setTeachers(j.teachers || []);
@@ -216,68 +263,124 @@ function NewThreadModal({ students, onClose, onSubmit }) {
   }, []);
 
   const stu = students.find((s) => s.id === studentId);
-  const matchingTeachers = useMemo(() => {
-    if (!stu) return teachers;
-    return teachers.filter((t) => Array.isArray(t.linkedClasses) && t.linkedClasses.includes(stu.cls));
+  const assignedTeachers = useMemo(() => {
+    if (!stu) return [];
+    const cls = String(stu.cls || "").toUpperCase();
+    return teachers.filter(
+      (t) => Array.isArray(t.linkedClasses) &&
+             t.linkedClasses.some((c) => String(c).toUpperCase() === cls)
+    );
   }, [teachers, stu]);
-  const fallbackTeachers = teachers; // if no match, show all teachers
 
+  // Auto-select the only assigned teacher (or first if multiple).
   useEffect(() => {
-    const list = matchingTeachers.length > 0 ? matchingTeachers : fallbackTeachers;
-    if (list.length > 0 && !list.find((t) => t.email === teacherEmail)) setTeacherEmail(list[0].email);
-  }, [matchingTeachers, fallbackTeachers]); // eslint-disable-line
+    if (assignedTeachers.length === 0) {
+      setTeacherEmail("");
+      return;
+    }
+    if (!assignedTeachers.find((t) => t.email === teacherEmail)) {
+      setTeacherEmail(assignedTeachers[0].email);
+    }
+  }, [assignedTeachers]); // eslint-disable-line
+
+  const noAssignedTeacher = stu && teachers.length > 0 && assignedTeachers.length === 0;
+  const canSend = !!stu && !!teacherEmail && body.trim() && assignedTeachers.length > 0;
 
   async function submit(e) {
     e.preventDefault();
-    if (busy) return;
+    if (busy || !canSend) return;
     setBusy(true); setErr("");
     try {
-      if (!stu) throw new Error("Pick your child");
-      if (!teacherEmail) throw new Error("Pick a teacher");
-      if (!body.trim()) throw new Error("Type a message");
       await onSubmit({ studentId: stu.id, studentName: stu.name, cls: stu.cls, teacherEmail, body: body.trim() });
     } catch (ex) { setErr(ex.message); setBusy(false); }
   }
+
+  const selectedTeacher = assignedTeachers.find((t) => t.email === teacherEmail);
 
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)", display: "grid", placeItems: "center", zIndex: 250, padding: 16 }}>
       <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 520 }}>
         <div className="card-head">
-          <div><div className="card-title">Start a conversation</div><div className="card-sub">With your child's class teacher</div></div>
+          <div><div className="card-title">Talk to teacher</div><div className="card-sub">Sends to your child's assigned class teacher</div></div>
           <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
         </div>
         <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <label style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-            <span style={{ fontSize: 11, fontWeight: 500, color: "var(--ink-2)", textTransform: "uppercase", letterSpacing: 0.4 }}>About child</span>
-            <select className="select" value={studentId} onChange={(e) => setStudentId(e.target.value)}>
-              {students.map((s) => <option key={s.id} value={s.id}>{s.name} · {s.cls}</option>)}
-            </select>
-          </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-            <span style={{ fontSize: 11, fontWeight: 500, color: "var(--ink-2)", textTransform: "uppercase", letterSpacing: 0.4 }}>Teacher</span>
-            <select className="select" value={teacherEmail} onChange={(e) => setTeacherEmail(e.target.value)}>
-              {(matchingTeachers.length > 0 ? matchingTeachers : fallbackTeachers).map((t) => (
-                <option key={t.email} value={t.email}>
-                  {t.name}{Array.isArray(t.linkedClasses) && t.linkedClasses.length ? ` · ${t.linkedClasses.join(", ")}` : ""}
-                </option>
-              ))}
-            </select>
-            <span style={{ fontSize: 10.5, color: "var(--ink-4)" }}>
-              {matchingTeachers.length > 0 ? "Suggested teachers are class-assigned" : "Showing all teachers (no class-assigned match)"}
-            </span>
-          </label>
+          {students.length > 1 ? (
+            <label style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+              <span style={{ fontSize: 11, fontWeight: 500, color: "var(--ink-2)", textTransform: "uppercase", letterSpacing: 0.4 }}>About child</span>
+              <select className="select" value={studentId} onChange={(e) => setStudentId(e.target.value)}>
+                {students.map((s) => <option key={s.id} value={s.id}>{s.name} · {s.cls}</option>)}
+              </select>
+            </label>
+          ) : stu && (
+            <div style={{
+              padding: "10px 12px", background: "var(--card-2)",
+              border: "1px solid var(--rule)", borderRadius: 9,
+              display: "flex", alignItems: "center", gap: 10,
+            }}>
+              <div style={{
+                width: 32, height: 32, borderRadius: "50%",
+                background: "linear-gradient(135deg, var(--accent), var(--accent-2))",
+                color: "#fff", display: "grid", placeItems: "center",
+                fontSize: 12, fontWeight: 600,
+              }}>{(stu.name || "?").split(/\s+/).map((p) => p[0]).slice(0, 2).join("").toUpperCase()}</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 500 }}>{stu.name}</div>
+                <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>Class {stu.cls} · {stu.id}</div>
+              </div>
+            </div>
+          )}
+
+          {noAssignedTeacher ? (
+            <div style={{
+              padding: 12, background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)",
+              borderRadius: 7, fontSize: 12.5, lineHeight: 1.5,
+            }}>
+              No class teacher is assigned to <b>{stu?.cls}</b> yet. Please contact the school office —
+              once a class teacher is assigned, you'll be able to message them here.
+            </div>
+          ) : assignedTeachers.length === 1 && selectedTeacher ? (
+            <div style={{
+              padding: "10px 12px", background: "var(--accent-soft, #fff4dc)",
+              border: "1px solid var(--accent, #c8510a)", borderRadius: 9,
+            }}>
+              <div style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
+                Class teacher
+              </div>
+              <div style={{ fontSize: 13, fontWeight: 500 }}>{selectedTeacher.name}</div>
+              <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>
+                {selectedTeacher.email} · assigned to {selectedTeacher.linkedClasses.join(", ")}
+              </div>
+            </div>
+          ) : (
+            <label style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+              <span style={{ fontSize: 11, fontWeight: 500, color: "var(--ink-2)", textTransform: "uppercase", letterSpacing: 0.4 }}>Class teacher</span>
+              <select className="select" value={teacherEmail} onChange={(e) => setTeacherEmail(e.target.value)}>
+                {assignedTeachers.map((t) => (
+                  <option key={t.email} value={t.email}>
+                    {t.name} · {t.linkedClasses.join(", ")}
+                  </option>
+                ))}
+              </select>
+              <span style={{ fontSize: 10.5, color: "var(--ink-4)" }}>
+                {assignedTeachers.length} class teachers assigned to {stu?.cls}. Pick one.
+              </span>
+            </label>
+          )}
+
           <label style={{ display: "flex", flexDirection: "column", gap: 5 }}>
             <span style={{ fontSize: 11, fontWeight: 500, color: "var(--ink-2)", textTransform: "uppercase", letterSpacing: 0.4 }}>First message</span>
             <textarea
               className="input" style={{ height: 100, padding: "8px 10px", lineHeight: 1.5, resize: "vertical" }}
               value={body} onChange={(e) => setBody(e.target.value)}
               placeholder="Hi, I wanted to ask about…"
+              disabled={noAssignedTeacher}
             />
           </label>
           {err && <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "9px 12px", borderRadius: 7, fontSize: 12 }}>{err}</div>}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
             <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
-            <button type="submit" className="btn accent" disabled={busy}>
+            <button type="submit" className="btn accent" disabled={busy || !canSend}>
               <Icon name="send" size={13} />{busy ? "Sending…" : "Send"}
             </button>
           </div>

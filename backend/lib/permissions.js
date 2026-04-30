@@ -1,12 +1,20 @@
 // Role permissions — what each role is allowed to see in the sidebar.
 // Mirrors NAV_BY_ROLE on the client; this is the server-side default. Admin
-// can flip any of these off via the Access control screen, persisted in
-// data/db.json under `rolePermissions`.
+// can flip any of these off via the Access control screen. Persisted to the
+// `role_permissions` Supabase table when available, with a JSON-file fallback
+// for the local dev backend.
 //
 // Convention: a missing entry == allowed (defensive default for new screens
 // that haven't been recorded in the matrix yet).
 
 import { fileRead, fileWrite } from "./db";
+import { supabase, supabaseEnabled } from "./supabase";
+
+function isSchemaMissError(err) {
+  if (!err) return false;
+  const msg = String(err.message || err.code || "").toLowerCase();
+  return /relation .* does not exist|could not find the table|schema cache|column .* does not exist|undefined column/.test(msg);
+}
 
 // Every screen that COULD be in any role's nav. Used by the Access control
 // screen to render toggles, and as the canonical id list. Keep this in sync
@@ -25,13 +33,14 @@ export const ALL_FEATURES = [
   { id: "staff",         label: "Staff",                      group: "People" },
   { id: "transport",     label: "Transport",                  group: "Operations" },
   { id: "inventory",     label: "Inventory",                  group: "Operations" },
-  { id: "communication", label: "Communication / Messages",   group: "Operations" },
+  { id: "library",       label: "Library",                    group: "Operations" },
+  { id: "timetable",     label: "Timetable",                  group: "People" },
+  { id: "communication", label: "Communication / Broadcasts", group: "Operations" },
   { id: "enquiries",     label: "Admissions",                 group: "CRM" },
   { id: "complaints",    label: "Complaints / Raise ticket",  group: "CRM" },
   { id: "donors",        label: "Donors",                     group: "CRM" },
   { id: "users",         label: "Users & Roles",              group: "Governance" },
   { id: "audit",         label: "Audit log",                  group: "Governance" },
-  { id: "automation",    label: "Automation",                 group: "Governance" },
   { id: "settings",      label: "Settings",                   group: "Governance" },
   { id: "access",        label: "Access control",             group: "Governance" },
   { id: "tasks",         label: "Tasks / My tasks",           group: "Governance" },
@@ -40,51 +49,91 @@ export const ALL_FEATURES = [
   { id: "meetings",      label: "Meetings / PTAs",            group: "Operations" },
   { id: "volunteers",    label: "Volunteers",                 group: "CRM" },
   { id: "reports",       label: "Reports & Financials",       group: "Governance" },
+  { id: "exams",         label: "Exams & Marks",              group: "People" },
+  { id: "my_attendance", label: "My attendance (self mark)",  group: "People" },
+  // v2 additions
+  { id: "leave",                label: "Leave requests",            group: "Workflow" },
+  { id: "remarks_rewards",      label: "Remarks & rewards",         group: "Workflow" },
+  { id: "student_activities",   label: "Student activities",        group: "Workflow" },
+  { id: "messages",             label: "Parent ↔ Admin messages",   group: "Workflow" },
+  { id: "government_documents", label: "Government documents",      group: "Governance" },
+  { id: "custom_roles",         label: "Custom roles",              group: "Governance" },
+  { id: "account",              label: "My account",                group: "Account" },
 ];
 
-export const ROLES = ["admin", "academic_director", "principal", "teacher", "parent"];
+// Seven canonical roles. School / Trust Accountant added in v2.
+export const ROLES = [
+  "admin", "academic_director", "principal", "teacher", "parent",
+  "school_accountant", "trust_accountant",
+];
 
 // "Permanent" features — admin can never lock themselves out of these.
 const ADMIN_LOCKED_ON = new Set(["access", "dashboard", "trust", "settings"]);
 
-// Read the matrix from the file store, fill missing entries with `true`.
-export function readPermissions() {
+// Read the matrix from Supabase (preferred) with file-store fallback. Fills
+// missing entries with `true` so brand-new features default to allowed.
+export async function readPermissions() {
   let raw = {};
+  if (supabaseEnabled) {
+    const sel = await supabase.from("role_permissions").select("role, feature_id, allowed");
+    if (!sel.error) {
+      for (const row of sel.data || []) {
+        if (!raw[row.role]) raw[row.role] = {};
+        raw[row.role][row.feature_id] = row.allowed !== false;
+      }
+    } else if (!isSchemaMissError(sel.error)) {
+      console.warn(`[permissions] read fell back: ${sel.error.message}`);
+    }
+  }
+  // Layer the file copy on top so older flips persisted to the JSON file
+  // still apply when Supabase is empty.
   try {
     const db = fileRead();
-    raw = db.rolePermissions && typeof db.rolePermissions === "object" ? db.rolePermissions : {};
+    const fileRaw = db.rolePermissions && typeof db.rolePermissions === "object" ? db.rolePermissions : {};
+    for (const role of Object.keys(fileRaw)) {
+      if (!raw[role]) raw[role] = {};
+      for (const fid of Object.keys(fileRaw[role] || {})) {
+        if (raw[role][fid] === undefined) raw[role][fid] = !!fileRaw[role][fid];
+      }
+    }
   } catch {}
   const out = {};
   for (const role of ROLES) {
     const roleMap = (raw[role] && typeof raw[role] === "object") ? raw[role] : {};
     out[role] = {};
     for (const f of ALL_FEATURES) {
-      // Default true (= allowed). Admin's locked features are forced true.
-      if (role === "admin" && ADMIN_LOCKED_ON.has(f.id)) {
-        out[role][f.id] = true;
-      } else {
-        out[role][f.id] = roleMap[f.id] === false ? false : true;
-      }
+      if (role === "admin" && ADMIN_LOCKED_ON.has(f.id)) out[role][f.id] = true;
+      else out[role][f.id] = roleMap[f.id] === false ? false : true;
     }
   }
   return out;
 }
 
-// Write a partial patch — `{ role: { featureId: bool, ... } }`. Returns the
-// merged matrix.
-export function writePermissions(patch) {
+// Write a partial patch — `{ role: { featureId: bool, ... } }`. Persists to
+// Supabase and the file store, returns the fully merged matrix.
+export async function writePermissions(patch) {
   if (!patch || typeof patch !== "object") throw new Error("patch must be an object");
-  const db = fileRead();
-  if (!db.rolePermissions || typeof db.rolePermissions !== "object") db.rolePermissions = {};
+  const rows = [];
   for (const role of Object.keys(patch)) {
     if (!ROLES.includes(role)) continue;
-    if (!db.rolePermissions[role]) db.rolePermissions[role] = {};
     const roleMap = patch[role] || {};
     for (const fid of Object.keys(roleMap)) {
-      // Block accidental admin lock-out.
       if (role === "admin" && ADMIN_LOCKED_ON.has(fid)) continue;
-      db.rolePermissions[role][fid] = !!roleMap[fid];
+      rows.push({ role, feature_id: fid, allowed: !!roleMap[fid], updated_at: new Date().toISOString() });
     }
+  }
+  if (supabaseEnabled && rows.length) {
+    const up = await supabase.from("role_permissions").upsert(rows, { onConflict: "role,feature_id" });
+    if (up.error && !isSchemaMissError(up.error)) {
+      console.warn(`[permissions] upsert failed: ${up.error.message}`);
+    }
+  }
+  // Mirror to the file store regardless so the dev fallback stays consistent.
+  const db = fileRead();
+  if (!db.rolePermissions || typeof db.rolePermissions !== "object") db.rolePermissions = {};
+  for (const row of rows) {
+    if (!db.rolePermissions[row.role]) db.rolePermissions[row.role] = {};
+    db.rolePermissions[row.role][row.feature_id] = row.allowed;
   }
   fileWrite(db);
   return readPermissions();

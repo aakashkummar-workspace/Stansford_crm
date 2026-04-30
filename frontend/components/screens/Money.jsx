@@ -60,7 +60,17 @@ function Field({ label, children, hint }) {
 }
 
 export default function ScreenMoney({ E, refresh, role }) {
-  const canEdit = role === "admin" || role === "principal";
+  // Who can add / edit / remove expenses on this screen:
+  //   - admin, principal                          — always allowed (top of the org)
+  //   - school_accountant, trust_accountant       — finance is literally their role
+  //   - custom roles                              — allowed when the admin ticked
+  //     Edit on the "money" feature in the Custom Roles screen
+  const canEdit = (() => {
+    if (role === "admin" || role === "principal") return true;
+    if (role === "school_accountant" || role === "trust_accountant") return true;
+    const a = E?.ACCESS?.[role]?.money;
+    return !!(a && a.canEdit);
+  })();
 
   // Build live ledger entries from real fee receipts + expenses.
   const incomeRows = useMemo(() => (E.RECENT_FEES || []).map((f) => ({
@@ -92,13 +102,16 @@ export default function ScreenMoney({ E, refresh, role }) {
     method: e.paymentMethod || "—",
     amount: e.amount,
     in: false,
+    inventoryId: e.inventoryId || null,
+    isInventoryPurchase: !!e.inventoryId || e.category === "Inventory purchase",
   })), [E.EXPENSES]);
 
   const TXNS = useMemo(() => [...incomeRows, ...donationRows, ...expenseRows], [incomeRows, donationRows, expenseRows]);
 
   const [accountScope, setAccountScope] = useState("Combined");   // Combined | School only | Trust only
-  const [ledgerType, setLedgerType] = useState("All");            // All | Income | Expense
+  const [ledgerType, setLedgerType] = useState("All");            // All | Collected | Spent
   const [methodFilter, setMethodFilter] = useState("All");
+  const [spentFilter, setSpentFilter] = useState("All");          // All | Manual | Inventory
   const [showAddExpense, setShowAddExpense] = useState(false);
   const [toast, setToast] = useState(null);
 
@@ -117,18 +130,21 @@ export default function ScreenMoney({ E, refresh, role }) {
   const filteredTxns = useMemo(() => {
     return TXNS.filter((t) => {
       if (scopeFilter && t.scope !== scopeFilter) return false;
-      if (ledgerType === "Income" && !t.in) return false;
-      if (ledgerType === "Expense" && t.in) return false;
+      if (ledgerType === "Collected" && !t.in) return false;
+      if (ledgerType === "Spent"    &&  t.in) return false;
       if (methodFilter !== "All" && t.method !== methodFilter) return false;
+      // Spent-side sub-filter: only applies when we're showing Spent rows.
+      if (!t.in) {
+        if (spentFilter === "Inventory" && !t.isInventoryPurchase) return false;
+        if (spentFilter === "Manual"    &&  t.isInventoryPurchase) return false;
+      }
       return true;
     });
-  }, [TXNS, scopeFilter, ledgerType, methodFilter]);
+  }, [TXNS, scopeFilter, ledgerType, methodFilter, spentFilter]);
 
   // KPIs respect the active scope filter.
   const incomeYtd  = filteredTxns.filter((t) => t.in).reduce((a, t) => a + (t.amount || 0), 0);
   const expenseYtd = filteredTxns.filter((t) => !t.in).reduce((a, t) => a + (t.amount || 0), 0);
-  const surplus    = incomeYtd - expenseYtd;
-  const margin     = incomeYtd > 0 ? Math.round((surplus / incomeYtd) * 100) : 0;
   const pendingTotal = (E.PENDING_FEES || []).reduce((a, f) => a + (f.amount || 0), 0);
 
   async function submitExpense(payload) {
@@ -140,7 +156,7 @@ export default function ScreenMoney({ E, refresh, role }) {
     const j = await r.json();
     if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
     setShowAddExpense(false);
-    showToast(`Expense ${j.expense.id} logged`, "ok");
+    showToast(`Money spent · ${j.expense.id} added`, "ok");
     await refresh?.();
   }
 
@@ -166,7 +182,9 @@ export default function ScreenMoney({ E, refresh, role }) {
       <div className="page-head">
         <div>
           <div className="page-title">Money <span className="amber">Control</span></div>
-          <div className="page-sub">Income, expenses & ledgers — School and Trust kept separate.</div>
+          <div className="page-sub">
+            Two streams kept separate: <strong>Spent</strong> (manual expenses + inventory purchases) and <strong>Collected</strong> (student fees, donations, trust receipts).
+          </div>
         </div>
         <div className="page-actions">
           <div className="segmented">
@@ -176,56 +194,201 @@ export default function ScreenMoney({ E, refresh, role }) {
           </div>
           {canEdit && (
             <button className="btn accent" onClick={() => setShowAddExpense(true)}>
-              <Icon name="plus" size={13} />Log expense
+              <Icon name="plus" size={13} />Add money spent
             </button>
           )}
         </div>
       </div>
 
-      <div className="grid g-4" style={{ marginBottom: 14 }}>
-        <KPI label={`Income · ${accountScope === "Combined" ? "all" : accountScope.replace(" only", "")}`} value={moneyK(incomeYtd)} sub={`${filteredTxns.filter((t) => t.in).length} entries`} puck="mint" puckIcon="trending" />
-        <KPI label="Expense · YTD" value={moneyK(expenseYtd)} sub={`${filteredTxns.filter((t) => !t.in).length} entries`} puck="peach" puckIcon="money" />
-        <KPI label="Net surplus" value={moneyK(surplus)} sub={incomeYtd > 0 ? `${margin}% margin` : "no income yet"} puck="cream" puckIcon="trending" />
-        <KPI label="Pending receivables" value={moneyK(pendingTotal)} sub={`${(E.PENDING_FEES || []).length} student${(E.PENDING_FEES || []).length === 1 ? "" : "s"}`} puck="sky" puckIcon="fees" />
-      </div>
+      {(() => {
+        // Pre-compute popover breakdowns once so each KPI's `details` is
+        // self-contained. Income / expense rollups are by category so the
+        // popover answers "where does this money come from / go to?".
+        const incomeRows  = filteredTxns.filter((t) =>  t.in);
+        const expenseRows = filteredTxns.filter((t) => !t.in);
+
+        const groupByCategory = (rows) => {
+          const m = new Map();
+          for (const t of rows) {
+            const k = t.category || "Uncategorised";
+            if (!m.has(k)) m.set(k, { category: k, total: 0, count: 0, rows: [] });
+            const e = m.get(k);
+            e.total += t.amount || 0;
+            e.count += 1;
+            e.rows.push(t);
+          }
+          // Newest entry first inside each category, biggest category first overall.
+          for (const e of m.values()) {
+            e.rows.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+          }
+          return [...m.values()].sort((a, b) => b.total - a.total);
+        };
+        const incomeByCat  = groupByCategory(incomeRows);
+        const expenseByCat = groupByCategory(expenseRows);
+
+        const pendingRows = (E.PENDING_FEES || []).slice().sort((a, b) => (b.amount || 0) - (a.amount || 0));
+
+        return (
+          <div className="grid g-4" style={{ marginBottom: 14 }}>
+            <KPI
+              label="Money in · Collected"
+              value={moneyK(incomeYtd)}
+              sub={`${incomeRows.length} entr${incomeRows.length === 1 ? "y" : "ies"} · ${accountScope === "Combined" ? "all accounts" : accountScope}`}
+              puck="mint" puckIcon="trending"
+              details={{
+                title: `Collected · ${money(incomeYtd)}`,
+                sub: `Student fees + donations + trust receipts · grouped by source`,
+                items: incomeByCat.length === 0
+                  ? []
+                  : incomeByCat.map((c) => ({
+                      label: c.category,
+                      value: money(c.total),
+                      sub: `${c.count} entr${c.count === 1 ? "y" : "ies"} · click to expand`,
+                      tone: "ok",
+                      children: c.rows.map((r) => ({
+                        label: r.desc || "—",
+                        value: money(r.amount || 0),
+                        sub: [r.date, r.method].filter(Boolean).join(" · "),
+                      })),
+                    })),
+              }}
+            />
+            <KPI
+              label="Money out · Spent"
+              value={moneyK(expenseYtd)}
+              sub={`${expenseRows.length} entr${expenseRows.length === 1 ? "y" : "ies"} · expenses + inventory purchases`}
+              puck="peach" puckIcon="money"
+              details={{
+                title: `Spent · ${money(expenseYtd)}`,
+                sub: `Manually-logged expenses + auto-cascaded inventory buys · grouped by category`,
+                items: expenseByCat.length === 0
+                  ? []
+                  : expenseByCat.map((c) => ({
+                      label: c.category,
+                      value: money(c.total),
+                      sub: `${c.count} entr${c.count === 1 ? "y" : "ies"} · click to expand`,
+                      tone: "bad",
+                      children: c.rows.map((r) => ({
+                        label: r.desc || "—",
+                        value: money(r.amount || 0),
+                        sub: [r.date, r.method, r.isInventoryPurchase ? "from inventory" : ""].filter(Boolean).join(" · "),
+                      })),
+                    })),
+              }}
+            />
+            <KPI
+              label="Net flow"
+              value={moneyK(incomeYtd - expenseYtd)}
+              sub={incomeYtd >= expenseYtd ? "in surplus" : "in deficit"}
+              puck={incomeYtd >= expenseYtd ? "mint" : "peach"}
+              puckIcon={incomeYtd >= expenseYtd ? "trending" : "warning"}
+              details={{
+                title: `Net flow · ${money(incomeYtd - expenseYtd)}`,
+                sub: `Collected ${money(incomeYtd)} − Spent ${money(expenseYtd)}`,
+                items: [
+                  {
+                    label: "Collected",
+                    value: money(incomeYtd),
+                    sub: `${incomeRows.length} entr${incomeRows.length === 1 ? "y" : "ies"} · click to expand`,
+                    tone: "ok",
+                    // Each source category becomes a child row, and each
+                    // category expands one level further to its individual
+                    // transactions — same drill-down pattern as the
+                    // dedicated Collected KPI.
+                    children: incomeByCat.map((c) => ({
+                      label: c.category,
+                      value: money(c.total),
+                      sub: `${c.count} entr${c.count === 1 ? "y" : "ies"}`,
+                      tone: "ok",
+                      children: c.rows.map((r) => ({
+                        label: r.desc || "—",
+                        value: money(r.amount || 0),
+                        sub: [r.date, r.method].filter(Boolean).join(" · "),
+                      })),
+                    })),
+                  },
+                  {
+                    label: "Spent",
+                    value: money(expenseYtd),
+                    sub: `${expenseRows.length} entr${expenseRows.length === 1 ? "y" : "ies"} · click to expand`,
+                    tone: "bad",
+                    children: expenseByCat.map((c) => ({
+                      label: c.category,
+                      value: money(c.total),
+                      sub: `${c.count} entr${c.count === 1 ? "y" : "ies"}`,
+                      tone: "bad",
+                      children: c.rows.map((r) => ({
+                        label: r.desc || "—",
+                        value: money(r.amount || 0),
+                        sub: [r.date, r.method, r.isInventoryPurchase ? "from inventory" : ""].filter(Boolean).join(" · "),
+                      })),
+                    })),
+                  },
+                ],
+              }}
+            />
+            <KPI
+              label="Pending receivables"
+              value={moneyK(pendingTotal)}
+              sub={`${pendingRows.length} student${pendingRows.length === 1 ? "" : "s"}`}
+              puck="sky" puckIcon="fees"
+              details={{
+                title: `Pending receivables · ${money(pendingTotal)}`,
+                sub: `${pendingRows.length} student${pendingRows.length === 1 ? "" : "s"} · highest-balance first`,
+                items: pendingRows.slice(0, 12).map((f) => ({
+                  label: `${f.name || "—"} · ${f.cls || "—"}`,
+                  value: money(f.amount || 0),
+                  sub: f.overdue ? "overdue" : `due ${f.due || "—"}`,
+                  tone: f.overdue ? "bad" : "warn",
+                })),
+              }}
+            />
+          </div>
+        );
+      })()}
 
       <div className="grid g-12">
-        <div className="card col-8">
+        <div className="card col-12">
           <div className="card-head">
-            <div><div className="card-title">Income vs Expense</div><div className="card-sub">Weekly · 12 weeks · ₹ lakhs</div></div>
+            <div><div className="card-title">Money flow</div><div className="card-sub">Weekly · 12 weeks · ₹ lakhs · collected (line) vs spent (bars)</div></div>
           </div>
           <div className="card-body" style={{ padding: "8px 8px 0" }}>
-            <LineBarChart data={E.INCOME_SERIES} w={760} h={260} lineKeys={["inc"]} barKey="exp" palette={["var(--accent-2)"]} />
+            <LineBarChart data={E.INCOME_SERIES} w={1100} h={240} lineKeys={["inc"]} barKey="exp" palette={["var(--accent-2)"]} />
           </div>
         </div>
-        <div className="card col-4">
-          <div className="card-head">
-            <div><div className="card-title">Income breakup</div><div className="card-sub">{accountScope}</div></div>
-          </div>
-          <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {(() => {
-              const byCat = new Map();
-              for (const t of filteredTxns) {
-                if (!t.in) continue;
-                byCat.set(t.category, (byCat.get(t.category) || 0) + t.amount);
-              }
-              const total = [...byCat.values()].reduce((a, b) => a + b, 0);
-              if (total === 0) return <div className="empty" style={{ padding: 16 }}>No income posted yet.</div>;
-              return [...byCat.entries()].sort((a, b) => b[1] - a[1]).map(([cat, val], i) => {
-                const pct = (val / total) * 100;
-                return (
-                  <div key={i}>
-                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
-                      <span>{cat}</span>
-                      <span className="mono">{moneyK(val)} · {pct.toFixed(1)}%</span>
-                    </div>
-                    <div className="bar thick"><span style={{ width: `${pct}%`, background: "var(--accent)" }} /></div>
-                  </div>
-                );
-              });
-            })()}
-          </div>
-        </div>
+
+        {/* Two parallel breakdown cards — Spent on the left, Collected on
+            the right. Inventory purchases are auto-cascaded so their
+            category shows alongside manual expense categories. */}
+        <BreakdownCard
+          title="Money out · Spent"
+          sub={`${accountScope} · by category`}
+          accent="bad"
+          rows={(() => {
+            const byCat = new Map();
+            for (const t of filteredTxns) {
+              if (t.in) continue;
+              const cat = t.isInventoryPurchase ? "Inventory purchase" : t.category;
+              byCat.set(cat, (byCat.get(cat) || 0) + t.amount);
+            }
+            return [...byCat.entries()].sort((a, b) => b[1] - a[1]);
+          })()}
+          emptyMessage="No spending recorded yet."
+        />
+        <BreakdownCard
+          title="Money in · Collected"
+          sub={`${accountScope} · by source`}
+          accent="ok"
+          rows={(() => {
+            const byCat = new Map();
+            for (const t of filteredTxns) {
+              if (!t.in) continue;
+              byCat.set(t.category, (byCat.get(t.category) || 0) + t.amount);
+            }
+            return [...byCat.entries()].sort((a, b) => b[1] - a[1]);
+          })()}
+          emptyMessage="No income posted yet."
+        />
 
         <div className="card col-12">
           <div className="card-head">
@@ -235,10 +398,17 @@ export default function ScreenMoney({ E, refresh, role }) {
             </div>
             <div className="card-actions">
               <div className="segmented">
-                {["All", "Income", "Expense"].map((t) => (
+                {["All", "Collected", "Spent"].map((t) => (
                   <button key={t} className={ledgerType === t ? "active" : ""} onClick={() => setLedgerType(t)}>{t}</button>
                 ))}
               </div>
+              {ledgerType !== "Collected" && (
+                <div className="segmented">
+                  {["All", "Manual", "Inventory"].map((t) => (
+                    <button key={t} className={spentFilter === t ? "active" : ""} onClick={() => setSpentFilter(t)}>{t}</button>
+                  ))}
+                </div>
+              )}
               <select className="select" style={{ height: 32, fontSize: 12 }} value={methodFilter} onChange={(e) => setMethodFilter(e.target.value)}>
                 {methods.map((m) => <option key={m}>{m}</option>)}
               </select>
@@ -251,7 +421,7 @@ export default function ScreenMoney({ E, refresh, role }) {
                 {filteredTxns.length === 0 && (
                   <tr><td colSpan={canEdit ? 8 : 7} className="empty">
                     {TXNS.length === 0
-                      ? "No transactions yet. Fee receipts and logged expenses will appear here."
+                      ? "No transactions yet. Fee receipts, donations and logged expenses will appear here."
                       : "No transactions match the current filters."}
                   </td></tr>
                 )}
@@ -259,7 +429,14 @@ export default function ScreenMoney({ E, refresh, role }) {
                   <tr key={t.id}>
                     <td style={{ fontFamily: "var(--font-mono)", fontSize: 11.5, color: "var(--ink-3)" }}>{t.id}</td>
                     <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{t.date}</td>
-                    <td style={{ fontSize: 13 }}>{t.desc}</td>
+                    <td style={{ fontSize: 13 }}>
+                      {t.desc}
+                      {t.isInventoryPurchase && (
+                        <span className="chip warn" style={{ marginLeft: 6, fontSize: 10 }} title={t.inventoryId ? `Linked to inventory item ${t.inventoryId}` : "From inventory"}>
+                          <Icon name="inventory" size={10} />Inventory
+                        </span>
+                      )}
+                    </td>
                     <td><span className={`chip ${t.scope === "trust" ? "accent" : "info"}`}><span className="dot" />{t.scope === "trust" ? "Trust" : "School"}</span></td>
                     <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{t.category}</td>
                     <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{t.method}</td>
@@ -268,8 +445,11 @@ export default function ScreenMoney({ E, refresh, role }) {
                     </td>
                     {canEdit && (
                       <td style={{ textAlign: "right" }}>
-                        {!t.in && t.id?.startsWith("EXP-") && (
+                        {!t.in && t.id?.startsWith("EXP-") && !t.isInventoryPurchase && (
                           <button className="icon-btn" onClick={() => removeExpense(t)} title="Remove expense"><Icon name="x" size={12} /></button>
+                        )}
+                        {t.isInventoryPurchase && (
+                          <span style={{ fontSize: 10, color: "var(--ink-4)" }} title="Remove from Inventory screen">locked</span>
                         )}
                       </td>
                     )}
@@ -282,13 +462,19 @@ export default function ScreenMoney({ E, refresh, role }) {
       </div>
 
       {showAddExpense && canEdit && (
-        <AddExpenseModal onClose={() => setShowAddExpense(false)} onSubmit={submitExpense} defaultScope={accountScope === "Trust only" ? "trust" : "school"} />
+        <AddExpenseModal
+          onClose={() => setShowAddExpense(false)}
+          onSubmit={submitExpense}
+          defaultScope={accountScope === "Trust only" ? "trust" : "school"}
+          customCategories={E.EXPENSE_CATEGORIES || []}
+          onCategoryAdded={refresh}
+        />
       )}
     </div>
   );
 }
 
-function AddExpenseModal({ onClose, onSubmit, defaultScope }) {
+function AddExpenseModal({ onClose, onSubmit, defaultScope, customCategories = [], onCategoryAdded }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const today = new Date().toISOString().slice(0, 10);
@@ -301,9 +487,56 @@ function AddExpenseModal({ onClose, onSubmit, defaultScope }) {
     date: today,
     paymentMethod: "Bank transfer",
   });
+  // Inline-add category state. The "+ Add" button next to the dropdown
+  // toggles the inline input; submitting POSTs to the categories API
+  // and selects the new category automatically.
+  const [showAddCat, setShowAddCat] = useState(false);
+  const [newCat, setNewCat] = useState("");
+  const [catBusy, setCatBusy] = useState(false);
+  const [catErr, setCatErr] = useState("");
   const amtRef = useRef(null);
   useEffect(() => { amtRef.current?.focus(); }, []);
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  // Merge built-in categories with the custom ones for the active scope.
+  // De-dupe by name so an admin can't accidentally hide a built-in by
+  // adding the same name as a custom row.
+  const mergedCategories = (() => {
+    const out = [...EXPENSE_CATEGORIES];
+    const seen = new Set(out.map((c) => c.toLowerCase()));
+    for (const c of customCategories) {
+      if (c.type !== form.scope) continue;
+      const name = String(c.name || "").trim();
+      if (name && !seen.has(name.toLowerCase())) {
+        out.push(name);
+        seen.add(name.toLowerCase());
+      }
+    }
+    return out;
+  })();
+
+  async function addCategory() {
+    const name = newCat.trim();
+    if (!name) return;
+    setCatBusy(true); setCatErr("");
+    try {
+      const r = await fetch("/api/expenses/categories", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, type: form.scope }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
+      setForm((f) => ({ ...f, category: j.category.name }));
+      setNewCat("");
+      setShowAddCat(false);
+      await onCategoryAdded?.();
+    } catch (ex) {
+      setCatErr(ex.message);
+    } finally {
+      setCatBusy(false);
+    }
+  }
 
   async function submit(e) {
     e.preventDefault();
@@ -321,7 +554,7 @@ function AddExpenseModal({ onClose, onSubmit, defaultScope }) {
   }
 
   return (
-    <ModalShell title="Log expense" sub="Goes straight into the ledger and the relevant account" onClose={onClose}>
+    <ModalShell title="Add money spent" sub="Records the spend in the ledger under the chosen account." onClose={onClose}>
       <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           <Field label="Account *">
@@ -336,9 +569,47 @@ function AddExpenseModal({ onClose, onSubmit, defaultScope }) {
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           <Field label="Category">
-            <select className="select" value={form.category} onChange={(e) => set("category", e.target.value)}>
-              {EXPENSE_CATEGORIES.map((c) => <option key={c}>{c}</option>)}
-            </select>
+            <div style={{ display: "flex", gap: 6, alignItems: "stretch" }}>
+              <select
+                className="select"
+                value={form.category}
+                onChange={(e) => set("category", e.target.value)}
+                style={{ flex: 1, minWidth: 0 }}
+              >
+                {mergedCategories.map((c) => <option key={c}>{c}</option>)}
+              </select>
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={() => setShowAddCat((v) => !v)}
+                title="Add a new category"
+                style={{ flexShrink: 0, padding: "0 10px" }}
+              >
+                <Icon name="plus" size={12} />
+              </button>
+            </div>
+            {showAddCat && (
+              <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                <input
+                  className="input"
+                  value={newCat}
+                  onChange={(e) => setNewCat(e.target.value)}
+                  placeholder={`New ${form.scope} category`}
+                  maxLength={60}
+                  style={{ flex: 1 }}
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  className="btn accent"
+                  onClick={addCategory}
+                  disabled={catBusy || !newCat.trim()}
+                >{catBusy ? "Adding…" : "Add"}</button>
+              </div>
+            )}
+            {catErr && (
+              <div style={{ marginTop: 6, fontSize: 11, color: "var(--err, #b13c1c)" }}>{catErr}</div>
+            )}
           </Field>
           <Field label="Amount (₹) *">
             <input ref={amtRef} className="input" inputMode="numeric" value={form.amount} onChange={(e) => set("amount", e.target.value.replace(/\D/g, ""))} placeholder="50000" />
@@ -361,10 +632,46 @@ function AddExpenseModal({ onClose, onSubmit, defaultScope }) {
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
           <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
           <button type="submit" className="btn accent" disabled={busy || !form.amount}>
-            {busy ? "Logging…" : <><Icon name="check" size={13} />Log expense</>}
+            {busy ? "Saving…" : <><Icon name="check" size={13} />Add money spent</>}
           </button>
         </div>
       </form>
     </ModalShell>
+  );
+}
+
+// Side-by-side breakdown card. `accent="ok"` (green bars) for Collected,
+// `accent="bad"` (red/peach bars) for Spent. `rows` is [[label, total]].
+function BreakdownCard({ title, sub, rows, accent = "ok", emptyMessage }) {
+  const total = rows.reduce((a, [, v]) => a + v, 0);
+  const barColor = accent === "bad" ? "var(--bad, #b13c1c)" : "var(--ok, #1f7a3a)";
+  return (
+    <div className="card col-6">
+      <div className="card-head">
+        <div>
+          <div className="card-title">{title}</div>
+          <div className="card-sub">{sub}</div>
+        </div>
+        <span className="mono" style={{ fontSize: 13, fontWeight: 700, color: barColor }}>
+          {moneyK(total)}
+        </span>
+      </div>
+      <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {rows.length === 0 || total === 0 ? (
+          <div className="empty" style={{ padding: 16 }}>{emptyMessage}</div>
+        ) : rows.map(([cat, val], i) => {
+          const pct = (val / total) * 100;
+          return (
+            <div key={i}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
+                <span style={{ fontWeight: 700 }}>{cat}</span>
+                <span className="mono">{moneyK(val)} · {pct.toFixed(1)}%</span>
+              </div>
+              <div className="bar thick"><span style={{ width: `${pct}%`, background: barColor }} /></div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { getUserByEmail, logAudit } from "@/lib/db";
+import { getUserByEmail, logAudit, readAllData, updateUser, listCustomRoles } from "@/lib/db";
 import { DEMO_ACCOUNTS } from "@/lib/seed-users";
 import {
   verifyPassword, signSession, ROLE_KEYS,
@@ -43,8 +43,37 @@ export async function POST(req) {
     user = { id: demo.id, email: demo.email, name: demo.name, role: demo.role, linkedId: demo.linkedId || null };
   }
 
+  // Accept any of the seven canonical roles OR a real custom-role id.
+  // Custom roles created on the Custom Roles screen have ids like
+  // "role-office-zgp5" — we look them up in the custom_roles table here so
+  // a freshly-provisioned custom-role user can actually sign in.
   if (!ROLE_KEYS.includes(user.role)) {
-    return NextResponse.json({ ok: false, error: "Account has no valid role" }, { status: 403 });
+    let customOk = false;
+    try {
+      const custom = await listCustomRoles();
+      customOk = !!custom.find((r) => r.id === user.role);
+    } catch {}
+    if (!customOk) {
+      return NextResponse.json({ ok: false, error: "Account has no valid role" }, { status: 403 });
+    }
+  }
+
+  // Parent auto-link: if a parent account signs in with no linkedId
+  // set, link them to the first active student so the child-scoped
+  // screens (Academic, Fees, Leave) all have a target. Production
+  // installs should set linkedId explicitly during enquiry conversion;
+  // this fallback covers the demo seed + any pre-conversion accounts.
+  if (user.role === "parent" && !user.linkedId) {
+    try {
+      const data = await readAllData();
+      const firstActive = (data.addedStudents || []).find(
+        (s) => (s.status ?? "active") !== "archived"
+      );
+      if (firstActive) {
+        await updateUser(user.id, { linkedId: firstActive.id }).catch(() => {});
+        user = { ...user, linkedId: firstActive.id };
+      }
+    } catch {}
   }
 
   const token = await signSession({

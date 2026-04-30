@@ -22,7 +22,6 @@ import ScreenCommunication from "./screens/Communication";
 import ScreenEnquiries from "./screens/Enquiries";
 import ScreenComplaints from "./screens/Complaints";
 import ScreenDonors from "./screens/Donors";
-import ScreenAutomation from "./screens/Automation";
 import ScreenUsers from "./screens/Users";
 import ScreenAudit from "./screens/Audit";
 import ScreenSettings from "./screens/Settings";
@@ -31,10 +30,26 @@ import ScreenAttendance from "./screens/Attendance";
 import ScreenAccessControl from "./screens/AccessControl";
 import ScreenTasks from "./screens/Tasks";
 import ScreenReports from "./screens/Reports";
+import ScreenExams from "./screens/Exams";
+import ScreenMyAttendance from "./screens/MyAttendance";
 import ScreenTc from "./screens/Tc";
 import ScreenChat from "./screens/Chat";
 import ScreenMeetings from "./screens/Meetings";
 import ScreenVolunteers from "./screens/Volunteers";
+import ScreenLibrary from "./screens/Library";
+import ScreenTimetable from "./screens/Timetable";
+import ScreenAccount from "./screens/Account";
+import ScreenLeave from "./screens/Leave";
+import ScreenRemarksRewards from "./screens/RemarksRewards";
+import ScreenGovernmentDocuments from "./screens/GovernmentDocuments";
+import ScreenStudentActivities from "./screens/StudentActivities";
+import ScreenCustomRoles from "./screens/CustomRoles";
+import ScreenMessages from "./screens/Messages";
+import ScreenScale from "./screens/Scale";
+import ScreenScaleReport from "./screens/ScaleReport";
+import ScreenScaleAdmin from "./screens/ScaleAdmin";
+import ScreenScaleAdvisory from "./screens/ScaleAdvisory";
+import ScreenScaleRitual from "./screens/ScaleRitual";
 
 const SCREENS = {
   dashboard: ScreenDashboard,
@@ -51,7 +66,6 @@ const SCREENS = {
   enquiries: ScreenEnquiries,
   complaints: ScreenComplaints,
   donors: ScreenDonors,
-  automation: ScreenAutomation,
   users: ScreenUsers,
   audit: ScreenAudit,
   settings: ScreenSettings,
@@ -60,10 +74,26 @@ const SCREENS = {
   access: ScreenAccessControl,
   tasks: ScreenTasks,
   reports: ScreenReports,
+  exams: ScreenExams,
+  my_attendance: ScreenMyAttendance,
   tc: ScreenTc,
   chat: ScreenChat,
   meetings: ScreenMeetings,
   volunteers: ScreenVolunteers,
+  library: ScreenLibrary,
+  timetable: ScreenTimetable,
+  account: ScreenAccount,
+  leave: ScreenLeave,
+  remarks_rewards: ScreenRemarksRewards,
+  government_documents: ScreenGovernmentDocuments,
+  student_activities: ScreenStudentActivities,
+  custom_roles: ScreenCustomRoles,
+  messages: ScreenMessages,
+  scale: ScreenScale,
+  scale_report: ScreenScaleReport,
+  scale_admin: ScreenScaleAdmin,
+  scale_advisory: ScreenScaleAdvisory,
+  scale_ritual: ScreenScaleRitual,
 };
 
 const DEFAULT_SCREEN_BY_ROLE = {
@@ -72,6 +102,8 @@ const DEFAULT_SCREEN_BY_ROLE = {
   principal: "dashboard",
   teacher: "academic",
   parent: "dashboard",
+  school_accountant: "dashboard",
+  trust_accountant: "trust",
 };
 
 const ROLE_LABEL = {
@@ -80,6 +112,8 @@ const ROLE_LABEL = {
   principal: "Principal",
   teacher: "Teacher",
   parent: "Parent",
+  school_accountant: "School Accountant",
+  trust_accountant: "Trust Accountant",
 };
 
 const DEFAULT_SETTINGS = {
@@ -97,7 +131,12 @@ export default function AppShell({ initialData, session }) {
   const [showTweaks, setShowTweaks] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [hydrated, setHydrated] = useState(false);
+  // Mobile-only: when true, the sidebar slides in as an overlay drawer.
+  // The hamburger toggles it on screens ≤ 820px; tapping a nav item or
+  // the backdrop closes it.
+  const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [permissions, setPermissions] = useState(null); // { role: { fid: bool } }
+  const [access, setAccess] = useState({});              // { role: { fid: { canView, canEdit, canDelete } } }
   const userMenuRef = useRef(null);
 
   // Role comes from the server-issued session — never from localStorage.
@@ -122,14 +161,18 @@ export default function AppShell({ initialData, session }) {
   }, [role]);
 
   // Fetch the role-permissions matrix once on mount and on every refresh().
-  // Cheap call — used by Sidebar to filter NAV_BY_ROLE.
+  // Cheap call — used by Sidebar to filter NAV_BY_ROLE and by individual
+  // screens (Money etc.) to gate Add / Edit buttons via the `access` map.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const r = await fetch("/api/permissions", { cache: "no-store" });
         const json = await r.json();
-        if (!cancelled && json?.ok) setPermissions(json.permissions || {});
+        if (!cancelled && json?.ok) {
+          setPermissions(json.permissions || {});
+          setAccess(json.access || {});
+        }
       } catch {}
     })();
     return () => { cancelled = true; };
@@ -147,11 +190,24 @@ export default function AppShell({ initialData, session }) {
 
   // Snap to a sensible default whenever:
   //   1. the current screen isn't part of this role's NAV_BY_ROLE (legacy reasons), or
-  //   2. the admin just disabled it via Access control (permissions.role[id] === false).
+  //   2. the admin just disabled it via Access control (permissions.role[id] === false), or
+  //   3. the role is a custom one — its allowed screens come purely from
+  //      the permissions matrix (built server-side from role_feature_access).
   useEffect(() => {
-    const navIds = (NAV_BY_ROLE[role] || []).filter((n) => !n.section).map((n) => n.id);
     const rolePerms = (permissions && permissions[role]) || null;
-    const allowedNow = navIds.filter((id) => !rolePerms || rolePerms[id] !== false);
+    const isCustom = !NAV_BY_ROLE[role];
+    let allowedNow;
+    if (isCustom) {
+      // Custom role: allowed list is "every featureId where permissions === true".
+      // Filter to ones we have a screen component for.
+      if (!rolePerms) return; // permissions still loading
+      allowedNow = Object.entries(rolePerms)
+        .filter(([id, on]) => on && SCREENS[id])
+        .map(([id]) => id);
+    } else {
+      const navIds = (NAV_BY_ROLE[role] || []).filter((n) => !n.section).map((n) => n.id);
+      allowedNow = navIds.filter((id) => !rolePerms || rolePerms[id] !== false);
+    }
     if (allowedNow.length === 0) return; // edge: nothing allowed → leave alone
     if (!allowedNow.includes(current)) {
       const fallback = allowedNow.includes(DEFAULT_SCREEN_BY_ROLE[role]) ? DEFAULT_SCREEN_BY_ROLE[role] : allowedNow[0];
@@ -194,7 +250,10 @@ export default function AppShell({ initialData, session }) {
       try {
         const pr = await fetch("/api/permissions", { cache: "no-store" });
         const pj = await pr.json();
-        if (pj?.ok) setPermissions(pj.permissions || {});
+        if (pj?.ok) {
+          setPermissions(pj.permissions || {});
+          setAccess(pj.access || {});
+        }
       } catch {}
       setData({
         KPIS: json.kpis,
@@ -207,6 +266,10 @@ export default function AppShell({ initialData, session }) {
         COMPLAINTS: json.complaints,
         ENQUIRIES: json.enquiries,
         INVENTORY: json.inventory,
+        INVENTORY_CATEGORIES: json.inventoryCategories || [],
+        LIBRARY: json.library || [],
+        LOANS: json.libraryLoans || [],
+        TIMETABLE: json.timetable || [],
         MOVEMENTS: json.movements || [],
         BROADCASTS: json.broadcasts || [],
         TEMPLATES: json.templates || [],
@@ -217,13 +280,20 @@ export default function AppShell({ initialData, session }) {
         DONOR_RECEIPTS: json.donorReceipts || [],
         EXPENSES: json.expenses || [],
         TASKS: json.tasks || [],
+        MAINTENANCE_LOGS: json.maintenanceLogs || [],
+        TEACHER_ATTENDANCE: json.teacherAttendance || [],
+        TRANSPORT_ATTENDANCE: json.transportAttendance || [],
+        STAFF_AWARDS: json.staffAwards || [],
+        SUBJECTS: json.subjects || [],
+        SETTINGS: json.appSettings || {},
+        EXAMS: json.exams || [],
+        MARKS: json.marks || [],
         TC_REQUESTS: json.tcRequests || [],
         MEETINGS: json.meetings || [],
         VOLUNTEERS: json.volunteers || [],
         CHAT_THREADS: json.chatThreads || [],
         FEE_REMINDERS: json.feeReminders || [],
         INCOME_SERIES: json.incomeSeries,
-        AUTOMATIONS: json.automations,
         SCHOOLS: json.schools,
         TRUST_KPIS: json.trustKpis,
         ANOMALIES: json.anomalies,
@@ -236,6 +306,17 @@ export default function AppShell({ initialData, session }) {
         ADDED_STUDENTS: json.addedStudents || [],
         ARCHIVED_STUDENTS: json.archivedStudents || [],
         DAILY_LOGS: json.dailyLogs || [],
+        EXPENSE_CATEGORIES:    json.expenseCategories || [],
+        DONOR_FORM_SUBMISSIONS: json.donorFormSubmissions || [],
+        LEAVE_REQUESTS:        json.leaveRequests || [],
+        REMARKS_REWARDS:       json.remarksRewards || [],
+        GOVERNMENT_DOCUMENTS:  json.governmentDocuments || [],
+        STUDENT_ACTIVITIES:    json.studentActivities || [],
+        CUSTOM_ROLES:          json.customRoles || [],
+        SCALE_SESSIONS:        json.scaleSessions || [],
+        SCALE_ENTRIES:         json.scaleEntries || [],
+        SCALE_SUPPORT_PLANS:   json.scaleSupportPlans || [],
+        SCALE_DAILY_RITUALS:   json.scaleDailyRituals || [],
       });
     } catch {}
   };
@@ -262,6 +343,7 @@ export default function AppShell({ initialData, session }) {
         PENDING_FEES:      (data.PENDING_FEES || []).filter((f) => f.id === myChild.id),
         RECENT_FEES:       (data.RECENT_FEES  || []).filter((f) => (f.studentId || f.id) === myChild.id),
         DAILY_LOGS:        (data.DAILY_LOGS   || []).filter((l) => l.studentId === myChild.id),
+        TRANSPORT_ATTENDANCE: (data.TRANSPORT_ATTENDANCE || []).filter((t) => t.studentId === myChild.id),
         ROUTES:            (data.ROUTES || []).filter((r) => r.code === myChild.transport),
         COMPLAINTS:        (data.COMPLAINTS || []).filter((c) => c.studentId === myChild.id || c.student === myChild.name),
         STAFF: [], AUDIT: [], INVENTORY: [], DONORS: [],
@@ -306,13 +388,24 @@ export default function AppShell({ initialData, session }) {
           ? (data.COMPLAINTS || []).filter((c) => myClasses.has(c.cls) || scopedStudentIds.has(c.studentId))
           : (data.COMPLAINTS || []),
         PENDING_FEES: [], RECENT_FEES: [],
-        STAFF: [], INVENTORY: [], DONORS: [],
+        // Teachers see only their *own* staff record — used by
+        // RemarksRewards to resolve "this entry is about me" when the
+        // record was stamped with a staff row id rather than a user id.
+        // Browsing other staff is still blocked.
+        STAFF: (data.STAFF || []).filter(
+          (s) => s.email && session?.email && s.email.toLowerCase() === session.email.toLowerCase()
+        ),
+        INVENTORY: [], DONORS: [],
         DONATION_PIPELINE: [], COMPLIANCE: [], AI_BRIEF: [],
         SCHOOLS: [], ANOMALIES: [], ENQUIRIES: [],
       };
     }
     return data;
   })();
+  // Inject the role→feature→{view,edit,delete} access map so every screen
+  // can gate Add / Edit / Delete buttons via E.ACCESS without each one
+  // having to fetch /api/permissions itself.
+  const E = { ...scopedData, ACCESS: access };
 
   const userMenu = (
     <div className="user-menu-wrap" ref={userMenuRef} style={{ position: "relative" }}>
@@ -368,6 +461,21 @@ export default function AppShell({ initialData, session }) {
             </div>
           </div>
           <button
+            onClick={() => { setShowUserMenu(false); setCurrent("account"); }}
+            style={{
+              width: "100%", textAlign: "left",
+              padding: "8px 10px", marginTop: 4,
+              background: "transparent", border: 0, borderRadius: 6,
+              cursor: "pointer", color: "var(--ink-2)", fontSize: 12.5,
+              display: "flex", alignItems: "center", gap: 8,
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-2)")}
+            onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+          >
+            <Icon name="user" size={13} />
+            My account
+          </button>
+          <button
             onClick={async () => {
               try { await fetch("/api/auth/logout", { method: "POST" }); } catch {}
               try {
@@ -377,7 +485,7 @@ export default function AppShell({ initialData, session }) {
             }}
             style={{
               width: "100%", textAlign: "left",
-              padding: "8px 10px", marginTop: 4,
+              padding: "8px 10px",
               background: "transparent", border: 0, borderRadius: 6,
               cursor: "pointer", color: "var(--ink-2)", fontSize: 12.5,
               display: "flex", alignItems: "center", gap: 8,
@@ -402,7 +510,7 @@ export default function AppShell({ initialData, session }) {
         style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: "32px 16px", background: "var(--bg-2)" }}
       >
         <MobileShell current={current} setCurrent={setCurrent} role={role}>
-          <Comp E={scopedData} refresh={refresh} role={role} session={session} />
+          <Comp E={E} refresh={refresh} role={role} session={session} />
         </MobileShell>
         <ViewToggle view={view} setView={(v) => setSetting("view", v)} />
         <Tweaks show={showTweaks} settings={settings} setSetting={setSetting} />
@@ -411,13 +519,38 @@ export default function AppShell({ initialData, session }) {
   }
 
   return (
-    <div className="app" data-theme={settings.theme} data-density={settings.density} data-sidebar={settings.sidebar}>
-      <Sidebar current={current} setCurrent={setCurrent} role={role} user={session} permissions={permissions} />
+    <div
+      className="app"
+      data-theme={settings.theme}
+      data-density={settings.density}
+      data-sidebar={settings.sidebar}
+      data-mobile-drawer={mobileDrawerOpen ? "open" : "closed"}
+    >
+      <Sidebar
+        current={current}
+        setCurrent={(id) => { setCurrent(id); setMobileDrawerOpen(false); }}
+        role={role} user={session} permissions={permissions}
+      />
+      {/* Backdrop is hidden on desktop via the same CSS that hides the
+          drawer there. On mobile, tapping it closes the drawer. */}
+      <div
+        className="mobile-drawer-backdrop"
+        onClick={() => setMobileDrawerOpen(false)}
+        aria-hidden={!mobileDrawerOpen}
+      />
       <div className="main">
         <div className="topbar">
           <button
             className="icon-btn"
-            onClick={() => setSetting("sidebar", settings.sidebar === "collapsed" ? "expanded" : "collapsed")}
+            onClick={() => {
+              // On mobile, the hamburger toggles the drawer overlay;
+              // on desktop it toggles the collapsed/expanded sidebar.
+              if (typeof window !== "undefined" && window.innerWidth <= 820) {
+                setMobileDrawerOpen((v) => !v);
+              } else {
+                setSetting("sidebar", settings.sidebar === "collapsed" ? "expanded" : "collapsed");
+              }
+            }}
             title="Toggle sidebar"
           >
             <Icon name="menu" size={15} />
@@ -429,23 +562,111 @@ export default function AppShell({ initialData, session }) {
             placeholder={role === "parent" ? "Search fees, messages, transport…" : "Search students, fees, staff, routes…"}
           />
           <div className="topbar-right">
-            <button
-              className="icon-btn"
-              onClick={() => setSetting("theme", settings.theme === "dark" ? "light" : "dark")}
-              title="Theme"
-            >
-              <Icon name={settings.theme === "dark" ? "sun" : "moon"} size={15} />
-            </button>
             <NotificationsPanel E={scopedData} role={role} setCurrent={setCurrent} />
             {userMenu}
           </div>
         </div>
 
-        <Comp E={scopedData} refresh={refresh} role={role} session={session} />
+        <Comp E={E} refresh={refresh} role={role} session={session} />
+
+        <BrandFooter />
       </div>
 
-      <ViewToggle view={view} setView={(v) => setSetting("view", v)} />
       <Tweaks show={showTweaks} settings={settings} setSetting={setSetting} />
+    </div>
+  );
+}
+
+function BrandFooter() {
+  return (
+    <div className="brand-footer">
+      <a
+        href="https://sirahdigital.in/"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="brand-footer-card"
+        aria-label="Developed by Sirah Digital — open website in new tab"
+      >
+        <span className="brand-footer-mark" aria-hidden="true">
+          <Icon name="sparkles" size={14} />
+        </span>
+        <span className="brand-footer-text">
+          <span className="brand-footer-eyebrow">Designed &amp; developed by</span>
+          <span className="brand-footer-name">
+            Sirah Digital
+            <svg className="brand-footer-arrow" viewBox="0 0 14 14" width="11" height="11" aria-hidden="true">
+              <path d="M4 10l6-6M5 4h5v5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+            </svg>
+          </span>
+        </span>
+      </a>
+      <style jsx>{`
+        .brand-footer {
+          /* margin-top: auto pushes the footer to the bottom of the
+             flex column .main wrapper. So on short pages it sits at the
+             viewport bottom, and on long pages it follows the content. */
+          margin-top: auto;
+          padding: 32px 24px 28px;
+          display: flex;
+          justify-content: center;
+        }
+        .brand-footer-card {
+          display: inline-flex;
+          align-items: center;
+          gap: 12px;
+          padding: 10px 16px 10px 12px;
+          border-radius: 999px;
+          background: linear-gradient(135deg, var(--card, #ffffff) 0%, var(--bg-2, #f7f5ee) 100%);
+          border: 1px solid var(--rule, #e9e3d2);
+          box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 6px 18px -10px rgba(31, 63, 139, 0.18);
+          text-decoration: none;
+          color: var(--ink-2, #1d2433);
+          transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+        }
+        .brand-footer-card:hover {
+          transform: translateY(-1px);
+          border-color: var(--brand, #1f3f8b);
+          box-shadow: 0 2px 4px rgba(15, 23, 42, 0.05), 0 12px 28px -12px rgba(31, 63, 139, 0.32);
+        }
+        .brand-footer-card:hover .brand-footer-arrow {
+          transform: translate(2px, -2px);
+        }
+        .brand-footer-mark {
+          width: 30px;
+          height: 30px;
+          border-radius: 50%;
+          display: grid;
+          place-items: center;
+          color: #ffffff;
+          background: linear-gradient(135deg, var(--brand, #1f3f8b) 0%, var(--accent, #e8530e) 100%);
+          flex-shrink: 0;
+        }
+        .brand-footer-text {
+          display: flex;
+          flex-direction: column;
+          line-height: 1.15;
+        }
+        .brand-footer-eyebrow {
+          font-size: 9.5px;
+          font-weight: 600;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+          color: var(--ink-3, #6b6e74);
+        }
+        .brand-footer-name {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          font-size: 13.5px;
+          font-weight: 700;
+          color: var(--brand, #1f3f8b);
+          margin-top: 2px;
+        }
+        .brand-footer-arrow {
+          color: var(--brand, #1f3f8b);
+          transition: transform 0.18s ease;
+        }
+      `}</style>
     </div>
   );
 }

@@ -5,6 +5,10 @@ import AppShell from "@/components/AppShell";
 
 export const dynamic = "force-dynamic";
 
+// Keep this in sync with the shape AppShell.refresh() builds — every key the
+// client-side refresh sets must be seeded here, otherwise screens render
+// blank on first paint and only pop in after the first user-triggered
+// refresh. (That's exactly the bug that hid the seeded library catalog.)
 function shapeForScreens(db) {
   return {
     KPIS: db.kpis,
@@ -17,6 +21,10 @@ function shapeForScreens(db) {
     COMPLAINTS: db.complaints,
     ENQUIRIES: db.enquiries,
     INVENTORY: db.inventory,
+    INVENTORY_CATEGORIES: db.inventoryCategories || [],
+    LIBRARY: db.library || [],
+    LOANS: db.libraryLoans || [],
+    TIMETABLE: db.timetable || [],
     MOVEMENTS: db.movements || [],
     BROADCASTS: db.broadcasts || [],
     TEMPLATES: db.templates || [],
@@ -24,8 +32,20 @@ function shapeForScreens(db) {
     STAFF: db.staff,
     DONORS: db.donors || [],
     CAMPAIGNS: db.campaigns || [],
+    DONOR_RECEIPTS: db.donorReceipts || [],
+    EXPENSES: db.expenses || [],
+    TASKS: db.tasks || [],
+    MAINTENANCE_LOGS: db.maintenanceLogs || [],
+    TEACHER_ATTENDANCE: db.teacherAttendance || [],
+    TRANSPORT_ATTENDANCE: db.transportAttendance || [],
+    EXAMS: db.exams || [],
+    MARKS: db.marks || [],
+    TC_REQUESTS: db.tcRequests || [],
+    MEETINGS: db.meetings || [],
+    VOLUNTEERS: db.volunteers || [],
+    CHAT_THREADS: db.chatThreads || [],
+    FEE_REMINDERS: db.feeReminders || [],
     INCOME_SERIES: db.incomeSeries,
-    AUTOMATIONS: db.automations,
     SCHOOLS: db.schools,
     TRUST_KPIS: db.trustKpis,
     ANOMALIES: db.anomalies,
@@ -38,6 +58,7 @@ function shapeForScreens(db) {
     ADDED_STUDENTS: db.addedStudents || [],
     ARCHIVED_STUDENTS: db.archivedStudents || [],
     DAILY_LOGS: db.dailyLogs || [],
+    CUSTOM_ROLES: db.customRoles || [],
   };
 }
 
@@ -50,6 +71,26 @@ export default async function Page() {
 
   const db = await readAllData();
   const E = shapeForScreens(db);
+
+  // For staff-side roles (teacher, principal, admin, etc.) try to resolve the
+  // user's own staff id by matching their session email against the staff
+  // roster. Done server-side so the client doesn't need the full STAFF list
+  // (which is HR-private and stripped from `E.STAFF` for teachers/parents in
+  // AppShell). Used by Timetable / Library / Dashboard cards to filter
+  // "my schedule" / "my loans" without leaking other staff records.
+  let resolvedStaffId = null;
+  if (session.email && session.role !== "parent") {
+    const lid = session.linkedId || "";
+    if (typeof lid === "string" && lid.startsWith("STF-")) {
+      resolvedStaffId = lid;
+    } else {
+      const match = (db.staff || []).find(
+        (s) => (s.email || "").toLowerCase() === session.email.toLowerCase()
+      );
+      if (match) resolvedStaffId = match.id;
+    }
+  }
+
   return (
     <AppShell
       initialData={E}
@@ -60,6 +101,10 @@ export default async function Page() {
         role: session.role,
         linkedId: session.linkedId || null,
         linkedClasses: Array.isArray(session.linkedClasses) ? session.linkedClasses : [],
+        // Authoritative staff id for the signed-in user (null for parents and
+        // for staff who don't have a matching roster entry). Always trust
+        // this over linkedId when filtering by teacher.
+        staffId: resolvedStaffId,
       }}
     />
   );

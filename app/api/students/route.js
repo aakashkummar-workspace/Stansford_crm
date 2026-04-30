@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { addStudent, archiveStudent, addPendingFee, logAudit, updateStudent } from "@/lib/db";
+import { addStudent, archiveStudent, addPendingFee, logAudit, updateStudent, provisionParentLogin } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 
 const monthYear = () =>
@@ -53,18 +53,44 @@ export async function POST(req) {
     joined: monthYear(),
   };
 
-  const student = await addStudent(row);
-  await addPendingFee({
-    id: row.id,
-    name: row.name,
-    cls: row.cls,
-    amount: termFeeFor(row.cls),
-    due: "in 7 days",
-    overdue: false,
-  });
-  await logAudit("Rashmi Iyer", "New admission", `${row.id} ${row.name}`);
+  // Fee amount: caller may override the auto-derived term fee at admission
+  // time (custom scholarship, sibling discount, sponsored seat, etc).
+  // Floor to integer rupees; reject negatives.
+  let feeAmount = termFeeFor(row.cls);
+  if (body.feeAmount != null && body.feeAmount !== "") {
+    const n = Math.floor(Number(body.feeAmount));
+    if (!Number.isFinite(n) || n < 0) {
+      return NextResponse.json({ ok: false, error: "Fee amount must be 0 or more" }, { status: 400 });
+    }
+    feeAmount = n;
+  }
 
-  return NextResponse.json({ ok: true, student });
+  const student = await addStudent(row);
+  if (feeAmount > 0) {
+    await addPendingFee({
+      id: row.id,
+      name: row.name,
+      cls: row.cls,
+      amount: feeAmount,
+      due: "in 7 days",
+      overdue: false,
+    });
+  }
+  await logAudit("Rashmi Iyer", "New admission", `${row.id} ${row.name} · fee ₹${feeAmount.toLocaleString("en-IN")}`);
+
+  // Auto-provision a parent login scoped to this child so the parent can sign
+  // in immediately. Email may be supplied at admission time; otherwise we
+  // derive a school.local one from the student id. Common password.
+  const createdLogin = await provisionParentLogin({
+    studentId: row.id,
+    studentName: row.name,
+    parentEmail: body.parentEmail || null,
+  });
+  if (createdLogin) {
+    try { await logAudit("Rashmi Iyer", "Provisioned parent login", `${row.id} ${row.name} · ${createdLogin.email}`); } catch {}
+  }
+
+  return NextResponse.json({ ok: true, student, createdLogin });
 }
 
 // PATCH /api/students { id, name?, cls?, section?, parent?, transport?, pickupStop? }

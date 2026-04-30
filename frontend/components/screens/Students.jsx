@@ -4,8 +4,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI, AvatarChip, StatusChip } from "../ui";
 import DocumentsPanel from "../DocumentsPanel";
+import { resolveSchool, downloadPdf } from "@/lib/export";
 
-export default function ScreenStudents({ E, refresh, role }) {
+export default function ScreenStudents({ E, refresh, role, session }) {
+  const school = resolveSchool(E?.SETTINGS);
+  const actor  = session?.name || null;
   // Teachers, principals and admin can edit student details. Parents cannot —
   // they can't even see this screen on the current nav, but the gate is
   // defensive.
@@ -18,11 +21,15 @@ export default function ScreenStudents({ E, refresh, role }) {
   const [showImport, setShowImport] = useState(false);
   const [profileOf, setProfileOf] = useState(null);
   const [editingOf, setEditingOf] = useState(null); // student being edited, or null
+  const [phoneEditingOf, setPhoneEditingOf] = useState(null); // student whose phone is being edited inline
   const [picked, setPicked] = useState(new Set());
   const [openMenuFor, setOpenMenuFor] = useState(null);
   const [menuAnchor, setMenuAnchor] = useState(null);
   const [view, setView] = useState("active"); // 'active' | 'archived'
   const [confirmArchive, setConfirmArchive] = useState(null); // student awaiting confirmation
+  const [issuedLogin, setIssuedLogin] = useState(null); // parent login just provisioned
+  const [messageStudent, setMessageStudent] = useState(null); // student whose parent we're messaging
+  const [tcReasonFor, setTcReasonFor] = useState(null); // student we're raising a TC for
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
   const flash = (msg, tone = "ok") => {
@@ -36,6 +43,21 @@ export default function ScreenStudents({ E, refresh, role }) {
   const activeRoster   = (E.ADDED_STUDENTS    || []).map((s) => ({ ...s, __added: true, __status: "active" }));
   const archivedRoster = (E.ARCHIVED_STUDENTS || []).map((s) => ({ ...s, __added: true, __status: "archived" }));
   const roster = view === "archived" ? archivedRoster : activeRoster;
+
+  // Map of studentId → TC status, so we can stamp a "TC" chip next to
+  // any student whose transfer certificate has been approved or issued.
+  // 'rejected' and 'requested' don't qualify — those are not yet "given".
+  const tcByStudent = useMemo(() => {
+    const m = {};
+    for (const r of (E.TC_REQUESTS || [])) {
+      if (!r?.studentId) continue;
+      if (r.status === "issued" || r.status === "approved") {
+        // Issued beats approved if both exist for the same student.
+        if (m[r.studentId] !== "issued") m[r.studentId] = r.status;
+      }
+    }
+    return m;
+  }, [E.TC_REQUESTS]);
 
   const visible = roster.filter((s) => {
     if (classFilter === "All") return true;
@@ -68,22 +90,43 @@ export default function ScreenStudents({ E, refresh, role }) {
     else setPicked(new Set(eligibleIds));
   };
 
-  const exportCsv = () => {
-    const header = "ID,Name,Class,Parent,Attendance,Fee,Transport,Joined";
-    const rows = visible.map(
-      (s) => `${s.id},"${s.name}",${s.cls},${s.parent.replace(/,/g, "")},${s.attendance}%,${s.fee},${s.transport},${s.joined}`
-    );
-    const csv = [header, ...rows].join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `students-${classFilter.replace(/\s+/g, "-").toLowerCase()}-${new Date().toISOString().slice(0, 10)}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    flash(`Exported ${visible.length} rows to CSV`);
+  const exportPdf = () => {
+    const opened = downloadPdf({
+      title: "Students Roster",
+      subtitle: `${visible.length} student${visible.length === 1 ? "" : "s"}${classFilter !== "All" ? ` · ${classFilter}` : ""}`,
+      school, actor,
+      dateRange: classFilter !== "All" ? classFilter : "All classes",
+      orientation: "landscape",
+      summary: [
+        { label: "Students",     value: visible.length },
+        { label: "Classes",      value: new Set(visible.map((s) => s.cls).filter(Boolean)).size },
+        { label: "On transport", value: visible.filter((s) => s.transport && s.transport !== "—").length },
+        { label: "Avg attendance", value: visible.length
+            ? `${Math.round(visible.reduce((a, s) => a + (Number(s.attendance) || 0), 0) / visible.length)}%`
+            : "—" },
+      ],
+      columns: [
+        { key: "i",          label: "#",          align: "right",  width: "32px" },
+        { key: "id",         label: "Admission",  width: "100px" },
+        { key: "name",       label: "Name" },
+        { key: "cls",        label: "Class",      align: "center", width: "60px" },
+        { key: "parent",     label: "Parent contact" },
+        { key: "transport",  label: "Transport",  align: "center", width: "80px" },
+        { key: "fee",        label: "Fee",        align: "center", width: "70px" },
+        { key: "attendance", label: "Attendance", align: "right",  width: "80px" },
+        { key: "joined",     label: "Joined",     align: "right",  width: "80px" },
+      ],
+      rows: visible.map((s, i) => ({
+        i: i + 1, id: s.id, name: s.name || "—", cls: s.cls || "—",
+        parent: s.parent || "—", transport: s.transport || "—",
+        fee: s.fee || "—",
+        attendance: s.attendance != null ? `${s.attendance}%` : "—",
+        joined: s.joined || "—",
+      })),
+      filename: `${school.name.replace(/\s+/g, "-").toLowerCase()}-students-${classFilter.replace(/\s+/g, "-").toLowerCase()}-${new Date().toISOString().slice(0, 10)}`,
+    });
+    if (opened === false) flash("Pop-up blocked — please allow pop-ups for this site", "bad");
+    else flash(`Opened PDF preview · ${visible.length} students`);
   };
 
   // Wrap fetch so a network failure (server restart, dev hot-reload mid-click,
@@ -130,6 +173,11 @@ export default function ScreenStudents({ E, refresh, role }) {
       flash(`Admitted ${json.student.name} · ${json.student.id}`);
       await refresh?.();
       setShowAdmission(false);
+      // If a fresh parent account was minted, surface the credentials so the
+      // staff can hand them to the parent. Skipped on duplicate / error.
+      if (json.createdLogin) {
+        setIssuedLogin({ ...json.createdLogin, studentName: json.student.name, studentId: json.student.id });
+      }
     } else {
       flash(json.error || "Admission failed", "bad");
     }
@@ -189,7 +237,7 @@ export default function ScreenStudents({ E, refresh, role }) {
         </div>
         <div className="page-actions">
           <button className="btn" onClick={() => setShowImport(true)}><Icon name="upload" size={13} />Import</button>
-          <button className="btn" onClick={exportCsv}><Icon name="download" size={13} />Export</button>
+          <button className="btn" onClick={exportPdf} title="Open a printable, branded PDF report"><Icon name="download" size={13} />Export PDF</button>
           <button className="btn accent" onClick={() => setShowAdmission(true)}><Icon name="plus" size={13} />New admission</button>
         </div>
       </div>
@@ -221,8 +269,52 @@ export default function ScreenStudents({ E, refresh, role }) {
             })),
           }}
         />
-        <KPI label="Average attendance" value={roster.length ? `${Math.round(roster.reduce((a, s) => a + (s.attendance || 0), 0) / roster.length)}%` : "—"} sub="across all students" puck="cream" puckIcon="check" />
-        <KPI label="Transfer certificates" value={0} sub="processed this month" puck="rose" puckIcon="reports" />
+        {(() => {
+          const avgAtt = roster.length ? Math.round(roster.reduce((a, s) => a + (s.attendance || 0), 0) / roster.length) : 0;
+          const sortedAtt = roster.slice().sort((a, b) => (a.attendance || 0) - (b.attendance || 0));
+          const tcs = E.TC_REQUESTS || [];
+          const issuedThisMonth = tcs.filter((t) => {
+            const d = String(t.issuedAt || "").slice(0, 7);
+            const m = new Date().toISOString().slice(0, 7);
+            return d === m;
+          });
+          return (
+            <>
+              <KPI
+                label="Average attendance"
+                value={roster.length ? `${avgAtt}%` : "—"}
+                sub="across all students"
+                puck="cream" puckIcon="check"
+                details={{
+                  title: `Attendance · ${avgAtt}% average`,
+                  sub: "Lowest first — flag for follow-up",
+                  items: sortedAtt.slice(0, 12).map((s) => ({
+                    label: s.name,
+                    value: `${s.attendance || 0}%`,
+                    sub: `${s.cls} · ${s.id}`,
+                    tone: (s.attendance || 0) < 75 ? "bad" : (s.attendance || 0) < 85 ? "warn" : "ok",
+                  })),
+                }}
+              />
+              <KPI
+                label="Transfer certificates"
+                value={issuedThisMonth.length}
+                sub={`${tcs.length} total · ${issuedThisMonth.length} this month`}
+                puck="rose" puckIcon="reports"
+                details={{
+                  title: `Transfer certificates · ${tcs.length} on file`,
+                  sub: `${issuedThisMonth.length} processed this month · newest first`,
+                  items: tcs.length === 0 ? [] : tcs.slice(0, 12).map((t) => ({
+                    label: t.studentName || t.student || t.studentId,
+                    value: t.status || "requested",
+                    sub: `${t.cls || "—"} · ${t.requestedAt ? String(t.requestedAt).slice(0, 10) : ""}`,
+                    tone: t.status === "issued" ? "ok" : t.status === "rejected" ? "bad" : "warn",
+                  })),
+                }}
+              />
+            </>
+          );
+        })()}
       </div>
 
       <div className="card">
@@ -310,16 +402,45 @@ export default function ScreenStudents({ E, refresh, role }) {
                 <tr><td colSpan={10} className="empty">No students match this filter.</td></tr>
               )}
               {visible.map((s) => (
-                <tr key={s.id}>
+                <tr
+                  key={s.id}
+                  style={tcByStudent[s.id] === "issued" ? {
+                    // Dim the whole row when the TC has been issued — the
+                    // student has formally left, so they read as inactive
+                    // even if they're still on the active list (e.g. a
+                    // legacy row from before the auto-archive landed).
+                    opacity: 0.55,
+                    background: "var(--card-2)",
+                  } : undefined}
+                  title={tcByStudent[s.id] === "issued" ? "Deactivated — TC issued" : undefined}
+                >
                   <td><input type="checkbox" checked={picked.has(s.id)} onChange={() => togglePick(s.id)} /></td>
                   <td>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <AvatarChip initials={s.name.split(" ").map((n) => n[0]).join("")} />
-                      <span style={{ fontSize: 12.5, fontWeight: 500 }}>
+                      <span style={{ fontSize: 12.5, fontWeight: 500, textDecoration: tcByStudent[s.id] === "issued" ? "line-through" : "none" }}>
                         {s.name}
-                        {s.__added && (
+                        {s.__added && tcByStudent[s.id] !== "issued" && (
                           <span className="chip ok" style={{ marginLeft: 6, fontSize: 10, height: 18, padding: "0 6px" }}>
                             <span className="dot" />new
+                          </span>
+                        )}
+                        {tcByStudent[s.id] === "issued" && (
+                          <span
+                            className="chip bad"
+                            style={{ marginLeft: 6, fontSize: 10, height: 18, padding: "0 6px" }}
+                            title="Transfer certificate issued — student has left, account deactivated"
+                          >
+                            <span className="dot" />Deactivated · TC issued
+                          </span>
+                        )}
+                        {tcByStudent[s.id] === "approved" && (
+                          <span
+                            className="chip warn"
+                            style={{ marginLeft: 6, fontSize: 10, height: 18, padding: "0 6px" }}
+                            title="Transfer certificate approved — awaiting issue"
+                          >
+                            <span className="dot" />TC approved
                           </span>
                         )}
                       </span>
@@ -327,7 +448,21 @@ export default function ScreenStudents({ E, refresh, role }) {
                   </td>
                   <td style={{ fontFamily: "var(--font-mono)", fontSize: 11.5, color: "var(--ink-3)" }}>{s.id}</td>
                   <td><span className="chip">{s.cls}</span></td>
-                  <td style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--ink-3)" }}>{s.parent}</td>
+                  <td style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--ink-3)" }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <span>{s.parent}</span>
+                      {canEdit && (
+                        <button
+                          className="icon-btn"
+                          style={{ width: 22, height: 22 }}
+                          onClick={() => setPhoneEditingOf(s)}
+                          title="Edit parent phone number"
+                        >
+                          <Icon name="pencil" size={11} />
+                        </button>
+                      )}
+                    </span>
+                  </td>
                   <td>
                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                       <div className="bar" style={{ width: 60 }}>
@@ -359,8 +494,8 @@ export default function ScreenStudents({ E, refresh, role }) {
                         onClose={() => setOpenMenuFor(null)}
                         onView={() => { setProfileOf(s); setOpenMenuFor(null); }}
                         onEdit={() => { setEditingOf(s); setOpenMenuFor(null); }}
-                        onTC={() => { flash(`TC requested for ${s.name} · queued`); setOpenMenuFor(null); }}
-                        onMessage={() => { window.open(`https://wa.me/${s.parent.replace(/[^0-9]/g, "")}`, "_blank"); flash("Opened WhatsApp"); setOpenMenuFor(null); }}
+                        onTC={() => { setTcReasonFor(s); setOpenMenuFor(null); }}
+                        onMessage={() => { setMessageStudent(s); setOpenMenuFor(null); }}
                         onWithdraw={() => { setConfirmArchive(s); setOpenMenuFor(null); }}
                         onRestore={() => restoreStudent(s)}
                       />
@@ -381,13 +516,29 @@ export default function ScreenStudents({ E, refresh, role }) {
         />
       )}
       {showAdmission && <AdmissionModal classes={E.CLASSES || []} routes={E.ROUTES || []} students={E.ADDED_STUDENTS || []} onClose={() => setShowAdmission(false)} onSubmit={submitAdmission} />}
+      {issuedLogin && <CredentialsModal data={issuedLogin} onClose={() => setIssuedLogin(null)} flash={flash} />}
       {showImport && <ImportModal onClose={() => setShowImport(false)} onFile={handleImportFile} />}
       {profileOf && (
         <ProfileModal
           student={profileOf}
           onClose={() => setProfileOf(null)}
-          onMessage={() => { window.open(`https://wa.me/${profileOf.parent.replace(/[^0-9]/g, "")}`, "_blank"); flash("Opened WhatsApp"); }}
-          onTC={() => { flash(`TC requested for ${profileOf.name} · queued`); setProfileOf(null); }}
+          onMessage={() => { setMessageStudent(profileOf); setProfileOf(null); }}
+          onTC={() => { setTcReasonFor(profileOf); setProfileOf(null); }}
+        />
+      )}
+      {messageStudent && (
+        <MessageParentModal
+          student={messageStudent}
+          onClose={() => setMessageStudent(null)}
+          flash={flash}
+        />
+      )}
+      {tcReasonFor && (
+        <IssueTcModal
+          student={tcReasonFor}
+          onClose={() => setTcReasonFor(null)}
+          onIssued={async () => { await refresh?.(); }}
+          flash={flash}
         />
       )}
       {editingOf && canEdit && (
@@ -396,6 +547,16 @@ export default function ScreenStudents({ E, refresh, role }) {
           classes={E.CLASSES || []}
           onClose={() => setEditingOf(null)}
           onSubmit={submitEdit}
+        />
+      )}
+      {phoneEditingOf && canEdit && (
+        <EditPhoneModal
+          student={phoneEditingOf}
+          onClose={() => setPhoneEditingOf(null)}
+          onSubmit={async (parent) => {
+            await submitEdit({ id: phoneEditingOf.id, parent });
+            setPhoneEditingOf(null);
+          }}
         />
       )}
     </div>
@@ -687,6 +848,10 @@ function EditStudentModal({ student, classes = [], onClose, onSubmit }) {
   );
 }
 
+// Mirrors termFeeFor() in app/api/students/route.js — kept in sync so the
+// admission form can preview the suggested term fee per class.
+const suggestedTermFee = (clsN) => 14000 + (Number(clsN) || 1) * 1000;
+
 function AdmissionModal({ classes = [], routes = [], students = [], onClose, onSubmit }) {
   // Fall back to class 1 if the configured list is empty.
   const classList = classes.length ? classes : [{ n: 1, label: "Class 1", sections: ["A", "B"] }];
@@ -695,7 +860,13 @@ function AdmissionModal({ classes = [], routes = [], students = [], onClose, onS
     const c = classList.find((x) => String(x.n) === String(n));
     return (c && c.sections && c.sections.length) ? c.sections : ["A"];
   };
-  const [form, setForm] = useState({ name: "", cls: initialCls, section: sectionsFor(initialCls)[0], phoneDigits: "", transport: "—", pickupStop: "" });
+  const [form, setForm] = useState({
+    name: "", cls: initialCls, section: sectionsFor(initialCls)[0],
+    phoneDigits: "", transport: "—", pickupStop: "",
+    // Fee starts blank → uses the auto-suggested per-class amount on submit.
+    // The admin can type a value to override (scholarship, sibling discount, etc).
+    feeAmount: "",
+  });
   // Keep the section valid when the class changes.
   useEffect(() => {
     const avail = sectionsFor(form.cls);
@@ -721,11 +892,14 @@ function AdmissionModal({ classes = [], routes = [], students = [], onClose, onS
     ? `+91 ${form.phoneDigits.slice(0, 5)} ${form.phoneDigits.slice(5)}`
     : "";
   const phoneOk = !form.phoneDigits || (form.phoneDigits.length === 10 && /^[6-9]/.test(form.phoneDigits));
-  const formValid = form.name.trim() && phoneOk;
+  const suggestedFee = suggestedTermFee(form.cls);
+  const feeNum = form.feeAmount === "" ? null : Math.floor(Number(form.feeAmount));
+  const feeOk = feeNum === null || (Number.isFinite(feeNum) && feeNum >= 0);
+  const formValid = form.name.trim() && phoneOk && feeOk;
 
   const submit = async (e) => {
     e.preventDefault();
-    setTouched({ name: true, phone: true });
+    setTouched({ name: true, phone: true, fee: true });
     if (!formValid) return;
     setBusy(true);
     try {
@@ -736,6 +910,8 @@ function AdmissionModal({ classes = [], routes = [], students = [], onClose, onS
         parent: form.phoneDigits ? formattedPhone : "",
         transport: form.transport,
         pickupStop: form.transport && form.transport !== "—" ? form.pickupStop || "" : "",
+        // Omit when blank so the API uses the auto-derived per-class fee.
+        feeAmount: feeNum === null ? undefined : feeNum,
       });
     } finally {
       setBusy(false);
@@ -772,6 +948,52 @@ function AdmissionModal({ classes = [], routes = [], students = [], onClose, onS
             </select>
           </Field>
         </div>
+
+        <Field label="Term fee (₹)">
+          <div style={{
+            display: "flex", alignItems: "center", height: 34,
+            border: "1px solid", borderColor: feeOk ? "var(--rule)" : "var(--bad)",
+            borderRadius: 9, background: "var(--card)", overflow: "hidden",
+          }}>
+            <span style={{
+              display: "inline-flex", alignItems: "center", padding: "0 10px",
+              background: "var(--card-2)", borderRight: "1px solid var(--rule)",
+              fontFamily: "var(--font-mono)", fontSize: 12.5, color: "var(--ink-3)",
+            }}>₹</span>
+            <input
+              type="text"
+              inputMode="numeric"
+              value={form.feeAmount}
+              onChange={(e) => set("feeAmount", e.target.value.replace(/\D/g, ""))}
+              onBlur={() => setTouched((t) => ({ ...t, fee: true }))}
+              placeholder={String(suggestedFee)}
+              style={{
+                flex: 1, border: 0, background: "transparent", outline: "none",
+                padding: "0 10px", fontSize: 13,
+                fontFamily: "var(--font-mono)", letterSpacing: "0.05em",
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => set("feeAmount", "")}
+              title="Use suggested term fee for this class"
+              style={{
+                background: "none", border: 0, color: "var(--accent)",
+                fontSize: 11, fontWeight: 500, cursor: "pointer",
+                padding: "0 10px", height: "100%",
+              }}
+            >
+              Reset
+            </button>
+          </div>
+          <span style={{ fontSize: 11, color: "var(--ink-4)" }}>
+            {form.feeAmount === ""
+              ? <>Suggested ₹{suggestedFee.toLocaleString("en-IN")} for Class {form.cls}. Type to override (scholarship, sibling discount, etc).</>
+              : feeNum === 0
+                ? <>No pending fee will be raised for this admission.</>
+                : <>Outstanding will be set to ₹{feeNum.toLocaleString("en-IN")}.</>}
+          </span>
+        </Field>
 
         <Field label="Parent mobile (10 digits, Indian)">
           <div style={{
@@ -1210,6 +1432,330 @@ function Field({ label, children }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
       <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>{label}</span>
       {children}
+    </div>
+  );
+}
+
+// Tiny focused phone-only edit dialog. Reuses the same Indian-mobile
+// validation as the full edit form so the API never sees a malformed
+// number. Submitting calls submitEdit({ id, parent }) — empty input
+// stores "—" (clears the contact).
+function EditPhoneModal({ student, onClose, onSubmit }) {
+  const initialDigits = String(student.parent || "").replace(/\D/g, "").slice(-10);
+  const [digits, setDigits] = useState(
+    initialDigits.length === 10 && /^[6-9]/.test(initialDigits) ? initialDigits : ""
+  );
+  const [busy, setBusy] = useState(false);
+  const [err, setErr]   = useState("");
+
+  const phoneError = (() => {
+    if (!digits) return null; // optional — empty clears the contact
+    if (digits.length !== 10) return "Phone must be exactly 10 digits";
+    if (!/^[6-9]/.test(digits)) return "Indian mobile numbers start with 6, 7, 8 or 9";
+    return null;
+  })();
+
+  const formatted = digits.length === 10
+    ? `+91 ${digits.slice(0, 5)} ${digits.slice(5)}`
+    : "";
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    if (phoneError) { setErr(phoneError); return; }
+    setBusy(true); setErr("");
+    try {
+      // Empty digits → save "—" so the API clears the contact.
+      await onSubmit(digits ? formatted : "—");
+    } catch (ex) {
+      setErr(ex.message || String(ex));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <ModalShell
+      title="Edit parent phone"
+      sub={`${student.id} · ${student.name}`}
+      onClose={onClose}
+      width={420}
+    >
+      <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <Field label="Parent mobile (10 digits, Indian)">
+          <div style={{
+            display: "flex",
+            border: "1px solid",
+            borderColor: phoneError ? "var(--bad)" : "var(--rule)",
+            borderRadius: 9, background: "var(--card)", overflow: "hidden", height: 38,
+          }}>
+            <span style={{
+              display: "inline-flex", alignItems: "center", padding: "0 12px",
+              background: "var(--card-2)", borderRight: "1px solid var(--rule)",
+              fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--ink-3)",
+            }}>+91</span>
+            <input
+              type="tel" inputMode="numeric" maxLength={10}
+              autoFocus
+              value={digits}
+              onChange={(e) => setDigits(e.target.value.replace(/\D/g, "").slice(0, 10))}
+              placeholder="98765 43210"
+              style={{
+                flex: 1, border: 0, background: "transparent", outline: "none",
+                padding: "0 12px", fontSize: 14,
+                fontFamily: "var(--font-mono)", letterSpacing: "0.05em",
+              }}
+            />
+            <span style={{
+              display: "inline-flex", alignItems: "center", padding: "0 12px",
+              fontSize: 11, fontFamily: "var(--font-mono)",
+              color: digits.length === 10 ? "var(--ok)" : "var(--ink-4)",
+            }}>{digits.length}/10</span>
+          </div>
+          {phoneError ? (
+            <span style={{ fontSize: 11, color: "var(--bad)" }}>{phoneError}</span>
+          ) : digits ? (
+            <span style={{ fontSize: 11, color: "var(--ok)" }}>Saves as {formatted}</span>
+          ) : (
+            <span style={{ fontSize: 11, color: "var(--ink-4)" }}>Leave blank to clear the contact.</span>
+          )}
+        </Field>
+
+        {err && (
+          <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "9px 12px", borderRadius: 7, fontSize: 12 }}>{err}</div>
+        )}
+
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
+          <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+          <button type="submit" className="btn accent" disabled={busy || !!phoneError}>
+            <Icon name="check" size={13} />{busy ? "Saving…" : "Save phone"}
+          </button>
+        </div>
+      </form>
+    </ModalShell>
+  );
+}
+
+// Shown once after admission whenever a fresh parent account was minted by
+// the API. Staff can copy email + password and hand them to the parent.
+function CredentialsModal({ data, onClose, flash }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const copy = async (txt, what) => {
+    try { await navigator.clipboard.writeText(txt); flash(`${what} copied`, "ok"); }
+    catch { flash(`Couldn't copy — select & copy manually`, "bad"); }
+  };
+  const copyBoth = () => copy(`Login: ${data.email}\nPassword: ${data.defaultPassword}`, "Credentials");
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(20,16,10,0.5)",
+      display: "grid", placeItems: "center", zIndex: 260, padding: 16,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 460 }}>
+        <div className="card-head">
+          <div>
+            <div className="card-title">Parent login created</div>
+            <div className="card-sub">For {data.studentName} ({data.studentId}) — share these with the parent</div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
+        <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <CredRow label="Login email" value={data.email} onCopy={() => copy(data.email, "Email")} />
+          <CredRow label="Password" value={data.defaultPassword} onCopy={() => copy(data.defaultPassword, "Password")} mono />
+          <div style={{ background: "var(--bg-2)", border: "1px dashed var(--rule)", padding: "9px 12px", borderRadius: 8, fontSize: 11.5, color: "var(--ink-3)" }}>
+            The parent can sign in at the login screen and pick the <b>Parent</b> role. Their dashboard will be scoped to {data.studentName} only.
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <button className="btn" onClick={copyBoth}><Icon name="download" size={13} />Copy both</button>
+            <button className="btn accent" onClick={onClose}>Done</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CredRow({ label, value, onCopy, mono }) {
+  return (
+    <div style={{ background: "var(--bg-2)", borderRadius: 8, padding: "8px 12px", display: "flex", alignItems: "center", gap: 10 }}>
+      <div style={{ minWidth: 110 }}>
+        <div style={{ fontSize: 10.5, color: "var(--ink-4)", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 500 }}>{label}</div>
+        <div style={{ fontSize: 13, fontWeight: 500, color: "var(--ink)", marginTop: 2, fontFamily: mono ? "var(--font-mono)" : undefined }}>{value}</div>
+      </div>
+      <div style={{ flex: 1 }} />
+      <button className="btn sm" onClick={onCopy} title={`Copy ${label.toLowerCase()}`}>
+        <Icon name="download" size={11} />Copy
+      </button>
+    </div>
+  );
+}
+
+// Compose-and-send WhatsApp message to a parent. Uses Evolution API directly
+// via /api/parents/message. Template suggestions can be picked or edited.
+function MessageParentModal({ student, onClose, flash }) {
+  const TEMPLATES = [
+    {
+      label: "General check-in",
+      body: `Dear Parent,\n\nThis is a quick note from Sanfort International School regarding ${student.name} (Class ${student.cls}). Please feel free to reach out if you have any questions.\n\n— Sanfort International School`,
+    },
+    {
+      label: "Request a meeting",
+      body: `Dear Parent,\n\nWe would like to meet with you regarding ${student.name} (Class ${student.cls}). Please let us know a convenient time this week.\n\n— Sanfort International School`,
+    },
+    {
+      label: "Attendance follow-up",
+      body: `Dear Parent,\n\n${student.name} (Class ${student.cls}) was marked absent recently. Kindly let us know the reason or share an update.\n\n— Sanfort International School`,
+    },
+  ];
+  const [body, setBody] = useState(TEMPLATES[0].body);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  async function send() {
+    if (!body.trim() || busy) return;
+    setBusy(true); setErr("");
+    try {
+      const r = await fetch("/api/parents/message", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          studentId: student.id,
+          studentName: student.name,
+          cls: student.cls,
+          message: body.trim(),
+        }),
+      });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || "Send failed");
+      flash(`Message sent to ${student.name}'s parent dashboard`);
+      onClose();
+    } catch (e) { setErr(e.message); setBusy(false); }
+  }
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)",
+      display: "grid", placeItems: "center", zIndex: 250, padding: 16,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 540 }}>
+        <div className="card-head">
+          <div>
+            <div className="card-title">Message {student.name}'s parent</div>
+            <div className="card-sub">{student.id} · Class {student.cls} · delivered to the parent dashboard</div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
+        <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ background: "var(--bg-2)", padding: 10, borderRadius: 7, fontSize: 11.5, color: "var(--ink-3)", lineHeight: 1.5 }}>
+            This message will appear on the parent's dashboard in the <b>From the school</b> card. It is not sent over WhatsApp or SMS.
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {TEMPLATES.map((t) => (
+              <button key={t.label} type="button" className="btn sm ghost" onClick={() => setBody(t.body)}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+          <textarea
+            className="input"
+            style={{ width: "100%", height: 180, padding: "10px 12px", lineHeight: 1.5, resize: "vertical", fontSize: 12.5 }}
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            placeholder="Type your message…"
+          />
+          {err && <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "9px 12px", borderRadius: 7, fontSize: 12 }}>{err}</div>}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <button className="btn ghost" onClick={onClose}>Cancel</button>
+            <button className="btn accent" onClick={send} disabled={busy || !body.trim()}>
+              <Icon name="megaphone" size={12} />{busy ? "Sending…" : "Send to dashboard"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Quick TC request modal — collects a reason and POSTs to /api/tc so the
+// new request shows up in the Transfer Certificates screen for the
+// principal to approve.
+function IssueTcModal({ student, onClose, onIssued, flash }) {
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  async function submit() {
+    if (busy) return;
+    setBusy(true); setErr("");
+    try {
+      const r = await fetch("/api/tc", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          studentId: student.id,
+          studentName: student.name,
+          cls: student.cls,
+          reason: reason.trim() || null,
+        }),
+      });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
+      flash(`TC request ${j.request.id} created · see Transfer certificates`);
+      await onIssued?.();
+      onClose();
+    } catch (e) { setErr(e.message); setBusy(false); }
+  }
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)",
+      display: "grid", placeItems: "center", zIndex: 250, padding: 16,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 460 }}>
+        <div className="card-head">
+          <div>
+            <div className="card-title">Issue TC for {student.name}?</div>
+            <div className="card-sub">{student.id} · Class {student.cls}</div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
+        <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ background: "var(--bg-2)", padding: 12, borderRadius: 8, fontSize: 12, color: "var(--ink-3)" }}>
+            This creates a TC request that will appear in the <b>Transfer Certificates</b> screen for the principal to approve and issue.
+          </div>
+          <label style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+            <span style={{ fontSize: 11, fontWeight: 500, color: "var(--ink-2)", textTransform: "uppercase", letterSpacing: 0.4 }}>Reason (optional)</span>
+            <textarea
+              className="input"
+              style={{ width: "100%", height: 80, padding: "8px 10px", lineHeight: 1.5, resize: "vertical" }}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="e.g. Family relocation, change of school"
+            />
+          </label>
+          {err && <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "9px 12px", borderRadius: 7, fontSize: 12 }}>{err}</div>}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <button className="btn ghost" onClick={onClose}>Cancel</button>
+            <button className="btn accent" onClick={submit} disabled={busy}>
+              <Icon name="book" size={12} />{busy ? "Submitting…" : "Submit TC request"}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

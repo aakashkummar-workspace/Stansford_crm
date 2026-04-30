@@ -11,6 +11,18 @@ import Icon from "./Icon";
 //
 // Click an alert → jump to the relevant screen.
 
+// Map a notification.type → icon name. New types map here as we add them.
+const TYPE_ICONS = {
+  parent_message: "send",
+  donor_form:     "donors",
+  leave_request:  "calendar",
+  gov_doc_expiry: "warning",
+  remark_reward:  "shield",
+};
+function iconForType(t) {
+  return TYPE_ICONS[t] || "bell";
+}
+
 // Parse a donor "next touchpoint" string. Mirrors parseNextTouchpoint in
 // Donors.jsx; kept local to avoid importing a screen component into the shell.
 function parseDonorNext(raw) {
@@ -63,6 +75,37 @@ function buildAlerts(E) {
     });
   }
 
+  // Government documents nearing expiry / already expired. We surface
+  // expired and <= 30d-out separately so the principal can triage.
+  const govDocs = E.GOVERNMENT_DOCUMENTS || [];
+  const now = new Date();
+  const expiredDocs = [];
+  const soonDocs = [];
+  for (const d of govDocs) {
+    if (!d.expiryDate) continue;
+    const exp = new Date(`${d.expiryDate}T00:00:00`);
+    if (Number.isNaN(exp.getTime())) continue;
+    const days = Math.round((exp - now) / 86_400_000);
+    if (days < 0)        expiredDocs.push({ d, days });
+    else if (days <= 30) soonDocs.push({ d, days });
+  }
+  if (expiredDocs.length) {
+    alerts.push({
+      tone: "bad", icon: "warning", screen: "government_documents",
+      title: `${expiredDocs.length} expired document${expiredDocs.length === 1 ? "" : "s"}`,
+      sub: expiredDocs.slice(0, 3).map(({ d }) => d.title).join(" · "),
+      ts: "now",
+    });
+  }
+  if (soonDocs.length) {
+    alerts.push({
+      tone: "warn", icon: "warning", screen: "government_documents",
+      title: `${soonDocs.length} document${soonDocs.length === 1 ? "" : "s"} expiring soon`,
+      sub: soonDocs.slice(0, 3).map(({ d, days }) => `${d.title} · ${days}d`).join(" · "),
+      ts: "30d",
+    });
+  }
+
   // Donor touchpoint reminders. Fire on the scheduled day, nag for a week
   // after (overdue), and give a heads-up in the preceding 3 days so the
   // principal isn't surprised. Older / farther-out dates stay silent.
@@ -98,10 +141,32 @@ function buildAlerts(E) {
 export default function NotificationsPanel({ E, role, setCurrent }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
+  // DB-backed notifications + unread counter. Polled every 30s so the
+  // badge stays roughly live without web sockets. Resets when the
+  // popover opens or a row is marked read.
+  const [dbItems, setDbItems] = useState([]);
+  const [dbUnread, setDbUnread] = useState(0);
 
   const alerts = useMemo(() => buildAlerts(E), [E]);
   const audit  = (E.AUDIT || []).slice(0, 8);
-  const total  = alerts.length;
+  const total  = alerts.length + dbUnread;
+
+  async function refreshNotifications() {
+    try {
+      const r = await fetch("/api/notifications", { cache: "no-store" });
+      const j = await r.json().catch(() => ({}));
+      if (j?.ok) {
+        setDbItems(j.items || []);
+        setDbUnread(j.unread || 0);
+      }
+    } catch {}
+  }
+  useEffect(() => {
+    refreshNotifications();
+    const t = setInterval(refreshNotifications, 30_000);
+    return () => clearInterval(t);
+  }, []);
+  useEffect(() => { if (open) refreshNotifications(); }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -114,6 +179,39 @@ export default function NotificationsPanel({ E, role, setCurrent }) {
 
   function jump(screen) {
     if (screen && setCurrent) setCurrent(screen);
+    setOpen(false);
+  }
+
+  async function dismiss(id) {
+    setDbItems((items) => items.map((n) => n.id === id ? { ...n, isRead: true } : n));
+    setDbUnread((u) => Math.max(0, u - 1));
+    try {
+      await fetch("/api/notifications", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+    } catch {}
+  }
+  async function dismissAll() {
+    setDbItems((items) => items.map((n) => ({ ...n, isRead: true })));
+    setDbUnread(0);
+    try {
+      await fetch("/api/notifications", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ all: true }),
+      });
+    } catch {}
+  }
+  function handleDbClick(n) {
+    // Best-effort screen routing from redirectUrl. We support
+    // ?screen=foo[&...] which the topbar uses for in-app jumps.
+    if (n.redirectUrl) {
+      const m = String(n.redirectUrl).match(/screen=([a-z_]+)/i);
+      if (m && m[1] && setCurrent) setCurrent(m[1]);
+    }
+    dismiss(n.id);
     setOpen(false);
   }
 
@@ -159,7 +257,68 @@ export default function NotificationsPanel({ E, role, setCurrent }) {
                 fontWeight: 600,
               }}>{total} live</span>
             )}
+            {dbUnread > 0 && (
+              <button
+                onClick={dismissAll}
+                style={{
+                  marginLeft: "auto", background: "none", border: 0,
+                  color: "var(--ink-3)", cursor: "pointer",
+                  fontSize: 10.5, fontWeight: 500,
+                }}
+              >Mark all read</button>
+            )}
           </div>
+
+          {/* DB-backed notifications (parent messages, donor-form submissions,
+              leave requests, gov-doc expiry alerts). Unread items show a
+              dot; clicking either navigates via redirect_url or just
+              marks the row read. */}
+          {dbItems.length > 0 && (
+            <div style={{ padding: "8px 6px", borderBottom: "1px solid var(--rule)" }}>
+              <div style={{
+                fontSize: 10, color: "var(--ink-4)", textTransform: "uppercase",
+                letterSpacing: 0.6, fontWeight: 500, padding: "4px 10px 6px",
+              }}>Inbox{dbUnread ? ` · ${dbUnread} unread` : ""}</div>
+              {dbItems.slice(0, 8).map((n) => (
+                <div
+                  key={n.id}
+                  onClick={() => handleDbClick(n)}
+                  style={{
+                    display: "flex", gap: 10, padding: "9px 10px",
+                    borderRadius: 8, cursor: "pointer",
+                    transition: "background .12s",
+                    opacity: n.isRead ? 0.65 : 1,
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-2)")}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                >
+                  <span style={{
+                    width: 28, height: 28, borderRadius: 7,
+                    background: n.isRead ? "var(--bg-2)" : "var(--accent-soft)",
+                    color: n.isRead ? "var(--ink-3)" : "var(--accent)",
+                    display: "grid", placeItems: "center", flexShrink: 0,
+                  }}>
+                    <Icon name={iconForType(n.type)} size={13} />
+                  </span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12.5, fontWeight: n.isRead ? 400 : 500, color: "var(--ink)" }}>{n.title}</div>
+                    {n.description && (
+                      <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {n.description}
+                      </div>
+                    )}
+                  </div>
+                  {!n.isRead && (
+                    <span style={{
+                      width: 7, height: 7, borderRadius: "50%",
+                      background: "var(--accent)", flexShrink: 0,
+                      alignSelf: "center",
+                    }} />
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
 
           {/* Live alerts */}
           {alerts.length > 0 && (

@@ -1,16 +1,37 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
+import { resolveSchool, downloadPdf } from "@/lib/export";
 import { KPI, StatusChip } from "../ui";
 
-export default function ScreenComplaints({ E, refresh, role }) {
+// Three buckets every parent complaint falls into. Order matters — it's the
+// order shown in the picker chips and the staff filter strip. The default
+// assignee for each is used to auto-route the ticket on submission.
+const COMPLAINT_CATEGORIES = [
+  { key: "academic",     label: "Academic",     icon: "academic",  defaultAssignee: "Class Teacher" },
+  { key: "non_academic", label: "Non-academic", icon: "complaint", defaultAssignee: "Admin Desk" },
+  { key: "transport",    label: "Transport",    icon: "bus",       defaultAssignee: "Transport Coordinator" },
+];
+const CATEGORY_BY_KEY = Object.fromEntries(COMPLAINT_CATEGORIES.map((c) => [c.key, c]));
+
+export default function ScreenComplaints({ E, refresh, role, session }) {
+  const school = resolveSchool(E?.SETTINGS);
+  const actor  = session?.name || null;
   const isParent = role === "parent";
   const isStaff = role === "principal" || role === "teacher" || role === "admin" || role === "academic_director";
 
   const [status, setStatus] = useState("All");
+  // Staff can filter the complaints register by category — parents only ever
+  // see their own tickets so the chip strip is hidden from them.
+  const [categoryFilter, setCategoryFilter] = useState("All");
   const complaints = E.COMPLAINTS || [];
-  const filtered = status === "All" ? complaints : complaints.filter((c) => c.status === status);
+  const filtered = useMemo(() => {
+    let list = complaints;
+    if (status !== "All") list = list.filter((c) => c.status === status);
+    if (categoryFilter !== "All") list = list.filter((c) => (c.category || "non_academic") === categoryFilter);
+    return list;
+  }, [complaints, status, categoryFilter]);
 
   // Toast feedback
   const [toast, setToast] = useState(null);
@@ -40,6 +61,13 @@ export default function ScreenComplaints({ E, refresh, role }) {
 
   const submitNew = async (form) => {
     try {
+      // Auto-route by category when the parent files a general complaint.
+      // Leave requests bypass the category picker and always go to the
+      // class teacher.
+      const cat = form.type === "general" ? CATEGORY_BY_KEY[form.category] : null;
+      const assignee = form.type === "leave_request"
+        ? "Class Teacher"
+        : (cat?.defaultAssignee || "Admin Desk");
       const r = await fetch("/api/complaints", {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -49,8 +77,9 @@ export default function ScreenComplaints({ E, refresh, role }) {
           parent: form.parent || (child ? `Parent of ${child.name}` : ""),
           issue: form.issue,
           type: form.type,
+          category: form.type === "general" ? form.category : null,
           submittedBy: "parent",
-          assigned: form.type === "leave_request" ? "Class Teacher" : "Admin Desk",
+          assigned: assignee,
         }),
       });
       const json = await r.json().catch(() => ({}));
@@ -67,6 +96,7 @@ export default function ScreenComplaints({ E, refresh, role }) {
   const submitStaffLog = async (form) => {
     try {
       const stu = students.find((s) => s.id === form.studentId);
+      const cat = form.type === "general" ? CATEGORY_BY_KEY[form.category] : null;
       const r = await fetch("/api/complaints", {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -76,8 +106,11 @@ export default function ScreenComplaints({ E, refresh, role }) {
           parent: form.parent || (stu ? `Parent of ${stu.name}` : "Walk-in"),
           issue: form.issue,
           type: form.type,
+          category: form.type === "general" ? form.category : null,
           submittedBy: role,
-          assigned: form.assigned || (form.type === "leave_request" ? "Class Teacher" : "Admin Desk"),
+          assigned: form.assigned || (form.type === "leave_request"
+            ? "Class Teacher"
+            : (cat?.defaultAssignee || "Admin Desk")),
         }),
       });
       const json = await r.json().catch(() => ({}));
@@ -89,31 +122,47 @@ export default function ScreenComplaints({ E, refresh, role }) {
     } catch (e) { flash("Network error", "bad"); }
   };
 
-  const exportCsv = () => {
+  const exportPdf = () => {
     if (complaints.length === 0) { flash("Nothing to export", "bad"); return; }
     const today = new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
-    const header = ["#", "ID", "Student", "Class", "Parent", "Type", "Issue", "Assigned", "Status", "Date", "Submitted by"];
     const rows = filtered.length ? filtered : complaints;
-    const csv = [
-      `# Vidyalaya360 — Parent Complaints — ${today} (${status})`,
-      `# Generated: ${new Date().toLocaleString("en-IN")}`,
-      `# Counts: Open=${complaints.filter((c) => c.status === "Open").length} · In Progress=${complaints.filter((c) => c.status === "In Progress").length} · Resolved=${complaints.filter((c) => c.status === "Resolved").length}`,
-      header.join(","),
-      ...rows.map((c, i) => [
-        i + 1, c.id, csvEsc(c.student), csvEsc(c.cls), csvEsc(c.parent),
-        c.type === "leave_request" ? "Leave request" : "Complaint",
-        csvEsc(c.issue), csvEsc(c.assigned), c.status, csvEsc(c.date),
-        c.submittedBy || "parent",
-      ].join(",")),
-    ].join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `complaints-${status.toLowerCase().replace(" ", "-")}-${today.replace(/\s+/g, "-").toLowerCase()}.csv`;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    flash(`Exported ${rows.length} complaint${rows.length === 1 ? "" : "s"}`);
+    downloadPdf({
+      title: `Parent Complaints · ${status}`,
+      subtitle: `${rows.length} complaint${rows.length === 1 ? "" : "s"} · current snapshot`,
+      school, actor,
+      dateRange: today,
+      orientation: "landscape",
+      summary: [
+        { label: "Open",        value: complaints.filter((c) => c.status === "Open").length },
+        { label: "In progress", value: complaints.filter((c) => c.status === "In Progress").length },
+        { label: "Resolved",    value: complaints.filter((c) => c.status === "Resolved").length },
+        { label: "Total",       value: complaints.length },
+      ],
+      columns: [
+        { key: "i",        label: "#",        align: "right",  width: "32px" },
+        { key: "id",       label: "ID",       width: "90px" },
+        { key: "student",  label: "Student" },
+        { key: "cls",      label: "Class",    align: "center", width: "60px" },
+        { key: "parent",   label: "Parent" },
+        { key: "category", label: "Category", width: "110px" },
+        { key: "issue",    label: "Issue" },
+        { key: "assigned", label: "Assigned to" },
+        { key: "status",   label: "Status",   align: "center", width: "100px" },
+        { key: "date",     label: "Date",     align: "right",  width: "90px" },
+      ],
+      rows: rows.map((c, i) => ({
+        i: i + 1, id: c.id,
+        student: c.student || "—", cls: c.cls || "—",
+        parent: c.parent || "—",
+        category: c.category ? (CATEGORY_BY_KEY[c.category]?.label || c.category) : "—",
+        issue: c.issue || "—",
+        assigned: c.assigned || "—",
+        status: c.status || "—",
+        date: c.date || "—",
+      })),
+      filename: `${school.name.replace(/\s+/g, "-").toLowerCase()}-complaints-${status.toLowerCase().replace(" ", "-")}-${today.replace(/\s+/g, "-").toLowerCase()}`,
+    });
+    flash(`Opened PDF preview · ${rows.length} complaint${rows.length === 1 ? "" : "s"}`);
   };
 
   return (
@@ -137,8 +186,8 @@ export default function ScreenComplaints({ E, refresh, role }) {
             <button className="btn accent" onClick={() => setShowForm(true)}><Icon name="plus" size={13} />New ticket</button>
           ) : (
             <>
-              <button className="btn" onClick={exportCsv} disabled={complaints.length === 0}>
-                <Icon name="download" size={13} />Export
+              <button className="btn" onClick={exportPdf} disabled={complaints.length === 0} title="Open a printable, branded PDF report">
+                <Icon name="download" size={13} />Export PDF
               </button>
               {isStaff && (
                 <button className="btn accent" onClick={() => setShowStaffLog(true)}>
@@ -151,13 +200,60 @@ export default function ScreenComplaints({ E, refresh, role }) {
       </div>
 
       <div className="grid g-4" style={{ marginBottom: 14 }}>
-        <KPI label={isParent ? "My open" : "Open"} value={complaints.filter((c) => c.status === "Open").length} sub="needs action" puck="rose" puckIcon="warning" />
-        <KPI label="In progress" value={complaints.filter((c) => c.status === "In Progress").length} sub="being handled" puck="peach" puckIcon="clock" />
-        <KPI label="Resolved" value={complaints.filter((c) => c.status === "Resolved").length} sub="closed out" puck="mint" puckIcon="check" />
-        <KPI label={isParent ? "Leave requests" : "Parent CSAT"}
-          value={isParent ? complaints.filter((c) => c.type === "leave_request").length : "—"}
-          sub={isParent ? "submitted by you" : "needs survey data"}
-          puck="cream" puckIcon={isParent ? "calendar" : "heart"} />
+        {(() => {
+          const open = complaints.filter((c) => c.status === "Open");
+          const inProg = complaints.filter((c) => c.status === "In Progress");
+          const resolved = complaints.filter((c) => c.status === "Resolved");
+          const leaves = complaints.filter((c) => c.type === "leave_request");
+          const itemFor = (c, tone) => ({
+            label: c.issue?.slice(0, 50) || "—",
+            value: c.cls || "—",
+            sub: `${c.student || ""}${c.date ? ` · ${c.date}` : ""}`,
+            tone,
+          });
+          return (
+            <>
+              <KPI
+                label={isParent ? "My open" : "Open"} value={open.length} sub="needs action"
+                puck="rose" puckIcon="warning"
+                details={{
+                  title: `Open · ${open.length}`,
+                  sub: open.length === 0 ? "Nothing open right now" : "Awaiting first response",
+                  items: open.map((c) => itemFor(c, "bad")),
+                }}
+              />
+              <KPI
+                label="In progress" value={inProg.length} sub="being handled"
+                puck="peach" puckIcon="clock"
+                details={{
+                  title: `In progress · ${inProg.length}`,
+                  sub: inProg.length === 0 ? "Nothing actively being worked" : "Being handled",
+                  items: inProg.map((c) => itemFor(c, "warn")),
+                }}
+              />
+              <KPI
+                label="Resolved" value={resolved.length} sub="closed out"
+                puck="mint" puckIcon="check"
+                details={{
+                  title: `Resolved · ${resolved.length}`,
+                  sub: "Recently closed",
+                  items: resolved.slice(0, 12).map((c) => itemFor(c, "ok")),
+                }}
+              />
+              <KPI
+                label={isParent ? "Leave requests" : "Parent CSAT"}
+                value={isParent ? leaves.length : "—"}
+                sub={isParent ? "submitted by you" : "needs survey data"}
+                puck="cream" puckIcon={isParent ? "calendar" : "heart"}
+                details={isParent ? {
+                  title: `Leave requests · ${leaves.length}`,
+                  sub: "Tickets filed as leave requests",
+                  items: leaves.map((c) => itemFor(c, c.status === "Resolved" ? "ok" : "warn")),
+                } : undefined}
+              />
+            </>
+          );
+        })()}
       </div>
 
       <div className="card">
@@ -174,6 +270,38 @@ export default function ScreenComplaints({ E, refresh, role }) {
             </div>
           </div>
         </div>
+
+        {/* Category filter strip — staff only. Counts reflect the underlying
+            complaints array, not the currently-filtered view, so toggling a
+            category never makes its own pill go to zero. */}
+        {!isParent && (
+          <div style={{ padding: "8px 14px", borderBottom: "1px solid var(--rule-2)", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <span style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 500, marginRight: 4 }}>
+              Category
+            </span>
+            <button
+              onClick={() => setCategoryFilter("All")}
+              className={`chip ${categoryFilter === "All" ? "accent" : ""}`}
+              style={{ cursor: "pointer", padding: "4px 10px" }}
+            >
+              All · {complaints.length}
+            </button>
+            {COMPLAINT_CATEGORIES.map((cat) => {
+              const n = complaints.filter((c) => (c.category || "non_academic") === cat.key).length;
+              return (
+                <button
+                  key={cat.key}
+                  onClick={() => setCategoryFilter(cat.key)}
+                  className={`chip ${categoryFilter === cat.key ? "accent" : ""}`}
+                  style={{ cursor: "pointer", padding: "4px 10px" }}
+                >
+                  <Icon name={cat.icon} size={10} />{cat.label} · {n}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         <div style={{ overflowX: "auto" }}>
           <table className="table">
             <thead>
@@ -181,6 +309,7 @@ export default function ScreenComplaints({ E, refresh, role }) {
                 <th>ID</th>
                 {!isParent && <th>Student · Parent</th>}
                 <th>Type</th>
+                <th>Category</th>
                 <th>Issue</th>
                 {!isParent && <th>Assigned</th>}
                 <th>Date</th>
@@ -190,13 +319,15 @@ export default function ScreenComplaints({ E, refresh, role }) {
             </thead>
             <tbody>
               {filtered.length === 0 && (
-                <tr><td colSpan={isParent ? 6 : 8} className="empty">
+                <tr><td colSpan={isParent ? 7 : 9} className="empty">
                   {isParent
                     ? `You haven't raised any tickets yet. Click "New ticket" to start.`
                     : "No complaints match this filter."}
                 </td></tr>
               )}
-              {filtered.map((c) => (
+              {filtered.map((c) => {
+                const cat = c.category ? CATEGORY_BY_KEY[c.category] : null;
+                return (
                 <tr key={c.id}>
                   <td style={{ fontFamily: "var(--font-mono)", fontSize: 11.5, color: "var(--ink-3)" }}>{c.id}</td>
                   {!isParent && (
@@ -210,7 +341,12 @@ export default function ScreenComplaints({ E, refresh, role }) {
                       ? <span className="chip info"><Icon name="calendar" size={10} />Leave</span>
                       : <span className="chip"><span className="dot" />Issue</span>}
                   </td>
-                  <td style={{ fontSize: 13, maxWidth: 420 }}>{c.issue}</td>
+                  <td>
+                    {cat
+                      ? <span className="chip"><Icon name={cat.icon} size={10} />{cat.label}</span>
+                      : <span style={{ fontSize: 11, color: "var(--ink-4)" }}>—</span>}
+                  </td>
+                  <td style={{ fontSize: 13, maxWidth: 360 }}>{c.issue}</td>
                   {!isParent && <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{c.assigned}</td>}
                   <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{c.date}</td>
                   <td><StatusChip status={c.status} /></td>
@@ -223,7 +359,8 @@ export default function ScreenComplaints({ E, refresh, role }) {
                     )}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -254,17 +391,13 @@ export default function ScreenComplaints({ E, refresh, role }) {
   );
 }
 
-function csvEsc(v) {
-  const s = String(v ?? "");
-  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-  return s;
-}
 
 // ---------- log complaint modal (staff side) ----------
 // Used when a parent walks in or calls — staff records the complaint on
 // their behalf, picking the student from the live roster so it links.
 function StaffLogModal({ students, onClose, onSubmit }) {
   const [type, setType] = useState("general");
+  const [category, setCategory] = useState("academic");
   const [studentId, setStudentId] = useState(students[0]?.id || "");
   const [parent, setParent] = useState("");
   const [issue, setIssue] = useState("");
@@ -287,10 +420,15 @@ function StaffLogModal({ students, onClose, onSubmit }) {
     setErr("");
     setBusy(true);
     try {
+      const cat = type === "general" ? CATEGORY_BY_KEY[category] : null;
       await onSubmit({
-        studentId, type, issue: issue.trim(),
+        studentId, type,
+        category: type === "general" ? category : null,
+        issue: issue.trim(),
         parent: parent.trim() || (stu ? `Parent of ${stu.name}` : "Walk-in"),
-        assigned: assigned.trim() || (type === "leave_request" ? "Class Teacher" : "Admin Desk"),
+        assigned: assigned.trim() || (type === "leave_request"
+          ? "Class Teacher"
+          : (cat?.defaultAssignee || "Admin Desk")),
       });
     } catch (ex) { setErr(ex.message || String(ex)); }
     finally { setBusy(false); }
@@ -320,6 +458,23 @@ function StaffLogModal({ students, onClose, onSubmit }) {
               </button>
             </div>
           </Field>
+          {type === "general" && (
+            <Field label="Category *">
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {COMPLAINT_CATEGORIES.map((cat) => (
+                  <button
+                    key={cat.key}
+                    type="button"
+                    onClick={() => setCategory(cat.key)}
+                    className={`chip ${category === cat.key ? "accent" : ""}`}
+                    style={{ cursor: "pointer", padding: "6px 12px" }}
+                  >
+                    <Icon name={cat.icon} size={11} />{cat.label}
+                  </button>
+                ))}
+              </div>
+            </Field>
+          )}
           <Field label="Student *">
             {students.length === 0 ? (
               <div className="empty" style={{ padding: 12, fontSize: 12 }}>
@@ -338,7 +493,14 @@ function StaffLogModal({ students, onClose, onSubmit }) {
               <input className="input" value={parent} onChange={(e) => setParent(e.target.value)} placeholder={stu ? `Parent of ${stu.name}` : "Parent"} />
             </Field>
             <Field label="Assign to">
-              <input className="input" value={assigned} onChange={(e) => setAssigned(e.target.value)} placeholder={type === "leave_request" ? "Class Teacher" : "Admin Desk"} />
+              <input
+                className="input"
+                value={assigned}
+                onChange={(e) => setAssigned(e.target.value)}
+                placeholder={type === "leave_request"
+                  ? "Class Teacher"
+                  : (CATEGORY_BY_KEY[category]?.defaultAssignee || "Admin Desk")}
+              />
             </Field>
           </div>
           <Field label={type === "leave_request" ? "Reason and dates" : "Describe the issue"}>
@@ -372,6 +534,9 @@ function StaffLogModal({ students, onClose, onSubmit }) {
 // ---------- new ticket modal (parent) ----------
 function NewTicketModal({ child, onClose, onSubmit }) {
   const [type, setType] = useState("general");
+  // Category only applies to general complaints — leave requests skip it
+  // and go straight to the class teacher.
+  const [category, setCategory] = useState("academic");
   const [issue, setIssue] = useState("");
   const [parentName, setParentName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -386,9 +551,17 @@ function NewTicketModal({ child, onClose, onSubmit }) {
     e.preventDefault();
     if (!issue.trim()) return;
     setBusy(true);
-    try { await onSubmit({ type, issue: issue.trim(), parent: parentName.trim() || (child.name ? `Parent of ${child.name}` : "Parent") }); }
-    finally { setBusy(false); }
+    try {
+      await onSubmit({
+        type,
+        category: type === "general" ? category : null,
+        issue: issue.trim(),
+        parent: parentName.trim() || (child.name ? `Parent of ${child.name}` : "Parent"),
+      });
+    } finally { setBusy(false); }
   };
+
+  const routedTo = type === "leave_request" ? "Class Teacher" : (CATEGORY_BY_KEY[category]?.defaultAssignee || "Admin Desk");
 
   return (
     <div onClick={onClose} style={{
@@ -414,6 +587,23 @@ function NewTicketModal({ child, onClose, onSubmit }) {
               </button>
             </div>
           </Field>
+          {type === "general" && (
+            <Field label="Category *">
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {COMPLAINT_CATEGORIES.map((cat) => (
+                  <button
+                    key={cat.key}
+                    type="button"
+                    onClick={() => setCategory(cat.key)}
+                    className={`chip ${category === cat.key ? "accent" : ""}`}
+                    style={{ cursor: "pointer", padding: "6px 12px" }}
+                  >
+                    <Icon name={cat.icon} size={11} />{cat.label}
+                  </button>
+                ))}
+              </div>
+            </Field>
+          )}
           <Field label="Your name (optional)">
             <input className="input" value={parentName} onChange={(e) => setParentName(e.target.value)} placeholder={child.name ? `Parent of ${child.name}` : "Your name"} />
           </Field>
@@ -430,7 +620,7 @@ function NewTicketModal({ child, onClose, onSubmit }) {
             />
           </Field>
           <div style={{ background: "var(--card-2)", border: "1px solid var(--rule-2)", borderRadius: 9, padding: 10, fontSize: 11.5, color: "var(--ink-3)" }}>
-            We'll respond as soon as possible. You'll see status updates (Open → In Progress → Resolved) on this page.
+            This will be routed to <b>{routedTo}</b>. You'll see status updates (Open → In Progress → Resolved) on this page.
           </div>
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
             <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>

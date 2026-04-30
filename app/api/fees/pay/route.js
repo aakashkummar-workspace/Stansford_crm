@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
-import { payPendingFee, addActivity, logAudit } from "@/lib/db";
+import { payPendingFee, addActivity, logAudit, fileRead } from "@/lib/db";
+import { supabase, supabaseEnabled, fromStudent } from "@/lib/supabase";
 import { getSession } from "@/lib/auth";
+import { notifyWhatsApp } from "@/lib/whatsapp";
+import { feeTypeLabel } from "@/lib/format";
+import { renderReceiptPng } from "@/lib/receipt-image";
 
 export async function POST(req) {
   const session = await getSession();
@@ -53,6 +57,87 @@ export async function POST(req) {
       `${paid.id} ${paid.name} · ₹${paid.amount.toLocaleString("en-IN")}${isPartial ? ` (₹${remaining.toLocaleString("en-IN")} left)` : ""}`,
     );
   } catch {}
+
+  // Fire the fee_paid event to n8n → WhatsApp. Fire-and-forget: any glitch
+  // here must not block the API response. Look up the student via Supabase
+  // first (where new admissions live), fall back to the file store.
+  try {
+    const sid = paid.studentId || paid.student_id;
+    let student = null;
+    if (supabaseEnabled && sid) {
+      const sel = await supabase.from("students").select("*").eq("id", sid).maybeSingle();
+      if (sel.data) student = fromStudent(sel.data);
+    }
+    if (!student && sid) {
+      student = (fileRead().addedStudents || []).find((s) => s.id === sid);
+    }
+    const phone = student?.parent;
+    if (phone) {
+      // Render the actual bill as a PNG (server-side via @napi-rs/canvas) and
+      // ship it as base64 so the n8n → Evolution chain doesn't need a
+      // publicly-reachable URL. Caption is short text shown beneath the image.
+      const amountLabel = `₹${paid.amount.toLocaleString("en-IN")}`;
+      const now = new Date();
+      const dateStr = now.toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric" });
+      const monthLabel = now.toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+      const slNo = (paid.id.match(/\d+/) || [""])[0].slice(-3).padStart(3, "0");
+
+      let imageBase64 = null;
+      try {
+        imageBase64 = renderReceiptPng({
+          admissionNo: student?.id || sid || "—",
+          studentName: paid.name,
+          cls: student?.cls || paid.cls || "—",
+          monthLabel,
+          dateStr,
+          slNo,
+          receiptId: paid.id,
+          method: paid.method || "—",
+          feeType: paid.feeType,
+          amount: paid.amount,
+          balancePending: isPartial ? remaining : 0,
+          cashier: actor || "Cashier",
+        });
+      } catch (e) {
+        console.warn(`[whatsapp] receipt render failed: ${e.message}`);
+      }
+
+      const balanceLabel = `₹${(isPartial ? remaining : 0).toLocaleString("en-IN")}`;
+      const caption = [
+        `Name: ${paid.name}`,
+        `Class & Section: ${student?.cls || paid.cls || "—"}`,
+        `Fees paid: ${amountLabel}`,
+        `Balance to pay: ${balanceLabel}`,
+        "",
+        "Thank you for paying the fees.",
+        "— Sanfort International School",
+      ].join("\n");
+
+      // Don't await — let it run in the background.
+      notifyWhatsApp("fee_paid", {
+        phone,
+        parentName: "Parent",
+        studentName: paid.name,
+        studentId: student?.id || sid,
+        cls: student?.cls || null,
+        amount: amountLabel,
+        receiptId: paid.id,
+        feeType: feeTypeLabel(paid.feeType),
+        partial: isPartial,
+        remaining: isPartial ? remaining : 0,
+        method: paid.method,
+        // n8n image branch reads imageUrl OR imageBase64. The base64 is the
+        // full data URI ("data:image/png;base64,...") — both Evolution API
+        // and Meta Cloud API accept this directly as media.
+        imageUrl: imageBase64,
+        caption,
+      }).catch(() => {});
+    } else {
+      console.warn(`[whatsapp] fee_paid skipped: no phone for studentId=${sid}`);
+    }
+  } catch (e) {
+    console.warn(`[whatsapp] fee_paid lookup failed: ${e.message}`);
+  }
 
   return NextResponse.json({
     ok: true,

@@ -56,6 +56,60 @@ export const KPI = ({ label, value, unit, delta, deltaDir, sub, sparkData, puck,
   );
 };
 
+// Single row inside a KPI details popup. If `item.children` is a non-empty
+// array, the row becomes expandable — clicking it toggles a panel that
+// renders each child with the same styling, indented one level.
+function KpiItem({ item, depth = 0 }) {
+  const it = item;
+  const hasChildren = Array.isArray(it.children) && it.children.length > 0;
+  const [open, setOpen] = useState(false);
+  const toneColor = it.tone === "ok"
+    ? "var(--ok)"
+    : it.tone === "bad"
+      ? "var(--bad)"
+      : it.tone === "warn"
+        ? "var(--warn, #b07a18)"
+        : "var(--ink-2)";
+  return (
+    <>
+      <div
+        onClick={hasChildren ? () => setOpen((v) => !v) : undefined}
+        role={hasChildren ? "button" : undefined}
+        tabIndex={hasChildren ? 0 : undefined}
+        onKeyDown={hasChildren ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen((v) => !v); } } : undefined}
+        style={{
+          display: "flex", alignItems: "center", gap: 10,
+          padding: "8px 10px",
+          background: depth > 0 ? "var(--card)" : "var(--bg-2)",
+          border: "1px solid var(--rule-2)", borderRadius: 8,
+          cursor: hasChildren ? "pointer" : "default",
+          marginLeft: depth * 14,
+        }}
+      >
+        {hasChildren && (
+          <Icon name={open ? "chevronDown" : "chevronRight"} size={12} />
+        )}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 500, color: "var(--ink)" }}>{it.label}</div>
+          {it.sub && <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{it.sub}</div>}
+        </div>
+        {it.value != null && (
+          <span className="mono" style={{ fontSize: 13, fontWeight: 500, color: toneColor }}>
+            {it.value}
+          </span>
+        )}
+      </div>
+      {hasChildren && open && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {it.children.map((child, i) => (
+            <KpiItem key={i} item={child} depth={depth + 1} />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 function KpiDetailsModal({ title, sub, items, body, onClose }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
@@ -83,21 +137,7 @@ function KpiDetailsModal({ title, sub, items, body, onClose }) {
           {Array.isArray(items) && items.length > 0 && (
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {items.map((it, i) => (
-                <div key={i} style={{
-                  display: "flex", alignItems: "center", gap: 10,
-                  padding: "8px 10px", background: "var(--bg-2)",
-                  border: "1px solid var(--rule-2)", borderRadius: 8,
-                }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 12.5, fontWeight: 500, color: "var(--ink)" }}>{it.label}</div>
-                    {it.sub && <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{it.sub}</div>}
-                  </div>
-                  {it.value != null && (
-                    <span className="mono" style={{ fontSize: 13, fontWeight: 500, color: it.tone === "ok" ? "var(--ok)" : it.tone === "bad" ? "var(--bad)" : "var(--ink-2)" }}>
-                      {it.value}
-                    </span>
-                  )}
-                </div>
+                <KpiItem key={i} item={it} />
               ))}
             </div>
           )}
@@ -268,6 +308,56 @@ export const StatusChip = ({ status, children }) => (
     {children || status}
   </span>
 );
+
+// Build the standard UPI deep-link URI from the bits the bank QR needs.
+// Returns null if the payee VPA is missing — caller should render a CTA
+// asking the user to configure their UPI ID instead of an unscannable QR.
+export function buildUpiUri({ upiId, payeeName, amount, note, transactionRef }) {
+  if (!upiId) return null;
+  const params = new URLSearchParams();
+  params.set("pa", upiId);
+  if (payeeName) params.set("pn", payeeName);
+  if (amount && Number(amount) > 0) params.set("am", String(Math.floor(Number(amount))));
+  params.set("cu", "INR");
+  if (note) params.set("tn", note);
+  if (transactionRef) params.set("tr", transactionRef);
+  return `upi://pay?${params.toString()}`;
+}
+
+// Real, scannable QR rendered as a PNG by the public api.qrserver.com
+// generator (no extra npm dep). Falls back to a friendly placeholder when
+// the UPI ID hasn't been configured in Settings yet.
+export const UpiQR = ({ size = 180, uri, hint }) => {
+  if (!uri) {
+    return (
+      <div style={{
+        width: size, height: size,
+        border: "1.5px dashed var(--rule)", borderRadius: 12,
+        display: "grid", placeItems: "center", padding: 14, textAlign: "center",
+        background: "var(--bg-2)", color: "var(--ink-3)", fontSize: 11.5, lineHeight: 1.5,
+      }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ink-2)", marginBottom: 6 }}>
+            UPI not configured
+          </div>
+          {hint || "Add a UPI ID under Settings → Finance to make this QR scannable."}
+        </div>
+      </div>
+    );
+  }
+  // Branded QR rendered server-side by /api/fees/qr-image — Sanfort blue +
+  // orange with the school logo in the center. 2x size for retina sharpness.
+  const src = `/api/fees/qr-image?size=${size * 2}&data=${encodeURIComponent(uri)}`;
+  return (
+    <img
+      src={src}
+      width={size}
+      height={size}
+      alt="UPI QR code"
+      style={{ display: "block", borderRadius: 6, background: "#fff" }}
+    />
+  );
+};
 
 export const FakeQR = ({ size = 156, seed = 7 }) => {
   const n = 21;

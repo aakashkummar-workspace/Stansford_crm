@@ -16,7 +16,33 @@ import {
   fromInventory, fromMovement,
   fromBroadcast, fromTemplate, fromRecipientList,
   fromDonor, fromCampaign,
+  toTask, fromTask,
+  toMeeting, fromMeeting, fromMeetingRsvp,
+  toVolunteer, fromVolunteer, fromVolunteerHours,
+  toChatThread, fromChatThread, fromChatMessage,
+  toTcRequest, fromTcRequest,
+  fromTeacherAttendance,
+  toTransportAttendance, fromTransportAttendance,
+  toStaffAward, fromStaffAward,
+  toExam, fromExam, fromExamMark,
+  toMaintenance, fromMaintenance,
+  toExpense, fromExpense,
+  toDocument, fromDocument,
+  toDonorReceipt, fromDonorReceipt,
+  toSchool, fromSchool,
+  // New tables wired in for full Supabase persistence.
+  toTimetable, fromTimetable,
+  toBook, fromBook,
+  toLoan, fromLoan,
 } from "./supabase.js";
+
+// Helper: detect "missing table / unknown column" errors so we can fall back
+// silently to the file store while a schema migration is pending.
+function isSchemaMissError(err) {
+  if (!err) return false;
+  const msg = String(err.message || err.code || "").toLowerCase();
+  return /relation .* does not exist|could not find the table|schema cache|column .* does not exist|undefined column/.test(msg);
+}
 
 export const BACKEND = supabaseEnabled ? "supabase" : "file";
 
@@ -93,7 +119,7 @@ const STATIC_EMPTIES = {
     teacherNPS: { value: "—", delta: "", sub: "" },
   },
   classStrength: [], staff: [], inventory: [], donors: [], incomeSeries: [],
-  automations: [], schools: [], anomalies: [], donationPipeline: [],
+  schools: [], anomalies: [], donationPipeline: [],
   compliance: [], aiBrief: [], roles: [
     { k: "super", label: "Super Admin", icon: "shield" },
     { k: "principal", label: "Principal", icon: "school" },
@@ -145,7 +171,7 @@ async function runBatched(tasks, batchSize = 4) {
 
 export async function readAllData() {
   if (supabaseEnabled) {
-    const [s, pf, rf, cm, eq, dl, rt, al, ac, cls, st, inv, mv, bc, tp, rl, dn, cp] = await runBatched([
+    const [s, pf, rf, cm, eq, dl, rt, al, ac, cls, st, inv, mv, bc, tp, rl, dn, cp, txa, tt, lib, lns, invCats, ex, mk] = await runBatched([
       () => safeSelect("students",     (q) => q.order("created_at", { ascending: false })),
       () => safeSelect("pending_fees", (q) => q.order("created_at", { ascending: false })),
       () => safeSelect("recent_fees",  (q) => q.order("paid_at",    { ascending: false })),
@@ -164,6 +190,14 @@ export async function readAllData() {
       () => safeSelect("recipient_lists",   (q) => q.order("created_at", { ascending: false })),
       () => safeSelect("donors",       (q) => q.order("created_at", { ascending: false })),
       () => safeSelect("campaigns",    (q) => q.order("created_at", { ascending: false })),
+      () => safeSelect("transport_attendance", (q) => q.order("date", { ascending: false }).limit(2000)),
+      // New tables — see schema.sql additions.
+      () => safeSelect("timetable",            (q) => q.order("cls",        { ascending: true })),
+      () => safeSelect("library",              (q) => q.order("added_at",   { ascending: false })),
+      () => safeSelect("library_loans",        (q) => q.order("borrowed_at",{ ascending: false }).limit(2000)),
+      () => safeSelect("inventory_categories", (q) => q.order("created_at", { ascending: true })),
+      () => safeSelect("exams",                (q) => q.order("created_at", { ascending: false })),
+      () => safeSelect("exam_marks",           (q) => q.order("recorded_at",{ ascending: false }).limit(5000)),
     ]);
     const stopMap = pickupStopsSafe();
     const allStudents = s.map((row) => {
@@ -203,7 +237,7 @@ export async function readAllData() {
       recentFees:    [...rf.map(fromRecentFee), ...fileRecentFeesSafe()],
       complaints:    [...cm.map(fromComplaint), ...fileComplaintsSafe()],
       enquiries:     [...(eq || []).map(fromEnquiry), ...fileEnquiriesSafe()],
-      dailyLogs:     dl.map(fromDailyLog),
+      dailyLogs:     applyDailyLogOverlays(dl.map(fromDailyLog)),
       // Union with file-store routes in case writes fell back to file
       // (PostgREST cache lag or table missing).
       routes:        [...(rt || []).map(fromRoute), ...fileRoutesSafe()],
@@ -246,15 +280,101 @@ export async function readAllData() {
         ...(cp || []).map(fromCampaign),
         ...(fileCampaignsSafe()),
       ],
-      donorReceipts: fileDonorReceiptsSafe(),
+      // Union of Supabase + file. Same fix as expenses — without the
+      // cloud read, donations created in Supabase never showed up in the
+      // Money Control "Donation" income line. Deduped by id.
+      donorReceipts: await mergeDonorReceipts(),
       rolePermissions: rolePermissionsSafe(),
       tasks: fileTasksSafe(),
-      expenses: fileExpensesSafe(),
-      tcRequests: fileTcRequestsSafe(),
+      // Union of Supabase + file so Money Control sees expenses logged via
+      // either backend. Without the cloud read, /api/expenses POSTed to
+      // Supabase succeeded but never appeared on the KPI strip. Deduped
+      // by id so a row that exists in both counts once.
+      expenses: await mergeExpenses(),
+      // Same merge pattern as expenses + donor_receipts — without the
+      // cloud read, an "issued" TC saved to Supabase never reached the
+      // Students screen, so the "TC issued" chip stayed off.
+      tcRequests: await mergeTcRequests(),
+      maintenanceLogs: fileMaintenanceLogsSafe(),
+      transportAttendance: [
+        ...((txa || []).map(fromTransportAttendance)),
+        ...fileTransportAttendanceSafe(),
+      ],
+      staffAwards: await listStaffAwards().catch(() => []),
+      subjects: await listSubjects().catch(() => DEFAULT_SUBJECTS),
+      // App-wide settings (trust identity, finance, communication, security)
+      // — exposed to the client so every screen's CSV / PDF export can
+      // stamp the right school name on the header. Falls back to {} so
+      // exports default to the bundled "Sanfort International School" if
+      // settings haven't been written yet.
+      appSettings: await readSettings().catch(() => ({})),
+      teacherAttendance: safeArr("teacherAttendance"),
+      // Union of Supabase exams + file-store exams. Without the Supabase
+      // half, exams created on the cloud backend never appeared in
+      // /api/data, which made every newly-created exam look like it had
+      // "replaced" the prior one (the UI was actually showing whatever
+      // stale row sat in the file store). Dedupe by id, Supabase wins.
+      exams: (() => {
+        const cloud = (ex || []).map(fromExam);
+        const file  = safeArr("exams");
+        const m = new Map();
+        for (const e of file)  if (e?.id) m.set(e.id, e);
+        for (const e of cloud) if (e?.id) m.set(e.id, e);
+        return [...m.values()];
+      })(),
+      // Same union pattern for marks (the per-student scores).
+      marks: (() => {
+        const cloud = (mk || []).map(fromExamMark);
+        const file  = safeArr("marks");
+        const m = new Map();
+        for (const r of file)  if (r?.id) m.set(r.id, r);
+        for (const r of cloud) if (r?.id) m.set(r.id, r);
+        return [...m.values()];
+      })(),
       meetings: safeArr("meetings"),
       volunteers: safeArr("volunteers"),
       chatThreads: safeArr("chatThreads"),
       feeReminders: safeArr("feeReminders"),
+      // Union of Supabase rows + file-store rows so the dev fallback keeps
+      // working if the migration hasn't been applied yet, AND so any rows
+      // written via the file-store path before the table existed still show.
+      // De-dupe by id (Supabase wins) where applicable.
+      inventoryCategories: (() => {
+        const set = new Set([...(invCats || []).map((r) => r.key), ...safeArr("inventoryCategories")]);
+        return [...set];
+      })(),
+      // v2 additions — expense categories, public donor-form submissions.
+      // Failures are tolerated so a fresh install (where the v2 migration
+      // hasn't been applied yet) still loads.
+      expenseCategories: await listExpenseCategories().catch(() => safeArr("expenseCategories")),
+      donorFormSubmissions: await listDonorFormSubmissions({ limit: 200 }).catch(() => safeArr("donorFormSubmissions")),
+      leaveRequests: await listLeaveRequests({ limit: 200 }).catch(() => safeArr("leaveRequests")),
+      remarksRewards: await listRemarksRewards({ limit: 200 }).catch(() => safeArr("remarksRewards")),
+      governmentDocuments: await listGovernmentDocuments({ limit: 200 }).catch(() => safeArr("governmentDocuments")),
+      studentActivities: await listStudentActivities({ limit: 500 }).catch(() => safeArr("studentActivities")),
+      customRoles: await listCustomRoles().catch(() => safeArr("customRoles")),
+      scaleSessions: await listScaleSessions({ limit: 200 }).catch(() => safeArr("scaleSessions")),
+      scaleEntries:  await listScaleEntries({ limit: 2000 }).catch(() => safeArr("scaleEntries")),
+      scaleSupportPlans: await listSupportPlans({ limit: 200 }).catch(() => safeArr("scaleSupportPlans")),
+      scaleDailyRituals: await listDailyRituals({ limit: 200 }).catch(() => safeArr("scaleDailyRituals")),
+      library: (() => {
+        const sb = (lib || []).map(fromBook);
+        const seen = new Set(sb.map((b) => b.id));
+        const file = safeArr("library").filter((b) => !seen.has(b.id));
+        return [...sb, ...file];
+      })(),
+      libraryLoans: (() => {
+        const sb = (lns || []).map(fromLoan);
+        const seen = new Set(sb.map((l) => l.id));
+        const file = safeArr("libraryLoans").filter((l) => !seen.has(l.id));
+        return [...sb, ...file];
+      })(),
+      timetable: (() => {
+        const sb = (tt || []).map(fromTimetable);
+        const seen = new Set(sb.map((t) => t.id));
+        const file = safeArr("timetable").filter((t) => !seen.has(t.id));
+        return [...sb, ...file];
+      })(),
     };
   }
   const db = fileRead();
@@ -265,6 +385,11 @@ export async function readAllData() {
     classes: (db.classes && db.classes.length) ? db.classes : STATIC_EMPTIES.classes,
     addedStudents:    all.filter((x) => (x.status ?? "active") !== "archived"),
     archivedStudents: all.filter((x) => x.status === "archived"),
+    inventoryCategories: Array.isArray(db.inventoryCategories) ? db.inventoryCategories : [],
+    library: Array.isArray(db.library) ? db.library : [],
+    libraryLoans: Array.isArray(db.libraryLoans) ? db.libraryLoans : [],
+    timetable: Array.isArray(db.timetable) ? db.timetable : [],
+    appSettings: db.appSettings && typeof db.appSettings === "object" ? db.appSettings : {},
   };
 }
 
@@ -561,14 +686,136 @@ export async function restoreStudent(id) {
 export const removeStudent = archiveStudent;
 
 // ---------- fees ----------
+// Default fee type assigned when callers don't specify one — keeps behavior
+// of existing admission code paths unchanged.
+const DEFAULT_FEE_TYPE = "term1";
+
 export async function addPendingFee(row) {
+  // Stamp a feeType (and a back-link studentId) so the row plays nicely with
+  // the new multi-fee-per-student model. Existing callers that don't supply
+  // these fall through with sensible defaults.
+  const filled = {
+    ...row,
+    studentId: row.studentId || row.id,
+    feeType: row.feeType || DEFAULT_FEE_TYPE,
+  };
   if (supabaseEnabled) {
-    await supabase.from("pending_fees").insert(toPendingFee(row));
+    await supabase.from("pending_fees").insert(toPendingFee(filled));
     return;
   }
   const db = fileRead();
-  db.pendingFees.unshift(row);
+  db.pendingFees.unshift(filled);
   fileWrite(db);
+}
+
+// Append a brand-new pending-fee row of a specific type for an existing
+// student (e.g. principal adds "Kit Fees" for a child who already has a
+// Term I balance). Composite id keeps multiple types coexisting in storage.
+export async function addStudentFeeItem({ studentId, feeType, amount, due }) {
+  const amt = Math.max(0, Math.floor(Number(amount) || 0));
+  if (!studentId) throw new Error("studentId required");
+  if (!amt) throw new Error("amount must be positive");
+  const ftype = String(feeType || DEFAULT_FEE_TYPE).trim().toLowerCase();
+  // Look up the student to copy their name + class onto the row (the Fees
+  // table joins on these for the picker / receipt).
+  let student = null;
+  if (supabaseEnabled) {
+    const sSel = await supabase.from("students").select("*").eq("id", studentId).maybeSingle();
+    if (sSel.data) student = fromStudent(sSel.data);
+  }
+  if (!student) {
+    const db = fileRead();
+    student = (db.addedStudents || []).find((s) => s.id === studentId);
+  }
+  if (!student) throw new Error("student not found");
+  const row = {
+    id: `${studentId}__${ftype}`,
+    studentId,
+    feeType: ftype,
+    name: student.name,
+    cls: student.cls,
+    amount: amt,
+    due: due || "in 7 days",
+    overdue: false,
+  };
+  if (supabaseEnabled) {
+    // Upsert by id so re-adding the same fee type just updates the amount.
+    await supabase.from("pending_fees").upsert(toPendingFee(row), { onConflict: "id" });
+    return row;
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.pendingFees)) db.pendingFees = [];
+  const idx = db.pendingFees.findIndex((f) => f.id === row.id);
+  if (idx === -1) db.pendingFees.unshift(row);
+  else db.pendingFees[idx] = { ...db.pendingFees[idx], ...row };
+  // Keep the student's overall fee status consistent.
+  const sIdx = (db.addedStudents || []).findIndex((s) => s.id === studentId);
+  if (sIdx !== -1 && db.addedStudents[sIdx].fee === "paid") {
+    db.addedStudents[sIdx].fee = "pending";
+  }
+  fileWrite(db);
+  return row;
+}
+
+// Set the outstanding pending-fee amount for a student. If a pending row
+// already exists it's updated in place; otherwise one is created using the
+// student's name/class. Passing amount === 0 clears the pending row.
+// Returns { fee, amount } where fee mirrors the new student.fee status.
+export async function setPendingFeeAmount(studentId, amount) {
+  const amt = Math.max(0, Math.floor(Number(amount) || 0));
+
+  if (supabaseEnabled) {
+    const sSel = await supabase.from("students").select("*").eq("id", studentId).maybeSingle();
+    if (!sSel.data) return null;
+    const student = fromStudent(sSel.data);
+
+    const fSel = await supabase.from("pending_fees").select("*").eq("id", studentId).maybeSingle();
+    if (amt === 0) {
+      if (fSel.data) await supabase.from("pending_fees").delete().eq("id", studentId);
+      // Don't touch student.fee — they may already be 'paid'.
+      return { fee: student.fee, amount: 0 };
+    }
+    if (fSel.data) {
+      await supabase.from("pending_fees").update({ amount: amt }).eq("id", studentId);
+    } else {
+      await supabase.from("pending_fees").insert(toPendingFee({
+        id: student.id, name: student.name, cls: student.cls,
+        amount: amt, due: "in 7 days", overdue: false,
+      }));
+    }
+    // If the student was 'paid', a fresh outstanding amount means they're
+    // back to 'pending' (or 'partial' if some receipts already exist —
+    // but we treat any reopened balance as 'pending' for simplicity).
+    let nextStatus = student.fee;
+    if (student.fee === "paid" || !student.fee) nextStatus = "pending";
+    try { await supabase.from("students").update({ fee: nextStatus }).eq("id", studentId); } catch {}
+    return { fee: nextStatus, amount: amt };
+  }
+
+  const db = fileRead();
+  const sIdx = (db.addedStudents || []).findIndex((s) => s.id === studentId);
+  if (sIdx === -1) return null;
+  const student = db.addedStudents[sIdx];
+  const fIdx = (db.pendingFees || []).findIndex((f) => f.id === studentId);
+
+  if (amt === 0) {
+    if (fIdx !== -1) db.pendingFees.splice(fIdx, 1);
+    fileWrite(db);
+    return { fee: student.fee, amount: 0 };
+  }
+  if (fIdx !== -1) {
+    db.pendingFees[fIdx] = { ...db.pendingFees[fIdx], amount: amt };
+  } else {
+    db.pendingFees.unshift({
+      id: student.id, name: student.name, cls: student.cls,
+      amount: amt, due: "in 7 days", overdue: false,
+    });
+  }
+  let nextStatus = student.fee;
+  if (student.fee === "paid" || !student.fee) nextStatus = "pending";
+  db.addedStudents[sIdx] = { ...student, fee: nextStatus };
+  fileWrite(db);
+  return { fee: nextStatus, amount: amt };
 }
 
 // Pay a pending fee — supports partial payments. Pass `amount` to take just
@@ -608,12 +855,19 @@ export async function payPendingFee(id, method, amount) {
   // Build the receipt row. Each payment gets a unique receipt id so the
   // same student can have multiple receipts (e.g. partial payments).
   const receiptId = `RCP-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 999)}`;
+  // ISO timestamp of payment — used by Reports for date-range filtering. The
+  // human-readable `time` ("just now", "5 mins ago") stays for the UI table.
+  const paidAt = new Date().toISOString();
+  // Resolve the underlying student id for the receipt's back-link, in case the
+  // pending row uses the new composite id ("STN-9001__kit").
+  const realStudentId = f.studentId || (typeof f.id === "string" && f.id.includes("__") ? f.id.split("__")[0] : f.id);
   const paidRow = {
     id: receiptId,
-    student_id: f.id,
-    studentId: f.id, // file-backend convenience
+    student_id: realStudentId,
+    studentId: realStudentId, // file-backend convenience
     name: f.name, cls: f.cls, amount: requested,
-    method, time: "just now",
+    method, time: "just now", paidAt,
+    feeType: f.feeType || DEFAULT_FEE_TYPE,
     status: isFull ? "paid" : "partial",
   };
   const newStudentFeeStatus = isFull ? "paid" : "partial";
@@ -632,9 +886,10 @@ export async function payPendingFee(id, method, amount) {
     // student would still work but we couldn't show them on the parent
     // dashboard / parent's Fees screen.
     const ins = await supabase.from("recent_fees").insert({
-      id: receiptId, student_id: f.id,
+      id: receiptId, student_id: realStudentId,
       name: f.name, cls: f.cls, amount: requested,
-      method, time: "just now",
+      method, time: "just now", paid_at: paidAt,
+      fee_type: f.feeType || DEFAULT_FEE_TYPE,
       status: isFull ? "paid" : "partial",
     });
     if (ins.error) {
@@ -703,6 +958,138 @@ export async function patchEnquiryStatus(id, status) {
   return db.enquiries[idx];
 }
 
+// Promote an enquiry into a real admission. This is a single transactional
+// "convert" step that:
+//   1. creates the student row (with the same auto-fee schedule as a
+//      walk-in admission)
+//   2. raises an opening pending fee
+//   3. provisions a parent login user (role=parent, linkedId=studentId)
+//      with a generated temporary password the office can hand to the
+//      parent. Email is synthetic (parent.<student-id>@school.local) so
+//      we don't need a real one from the enquiry form.
+//   4. flips the enquiry's status to "Converted"
+//
+// Idempotent: calling it again on an already-converted enquiry returns the
+// same student/parent without creating duplicates. The temp password is
+// only available the FIRST time — subsequent calls return null for
+// `parentLogin.tempPassword` since we only store the bcrypt hash.
+//
+// Returns: { enquiry, student, parentLogin: { email, tempPassword|null, alreadyExisted } }
+export async function convertEnquiryToAdmission(enquiryId, opts = {}) {
+  // Lazy require so the file backend doesn't pull jose/bcrypt unless needed.
+  const { hashPassword } = require("./auth.js");
+
+  // Pull the enquiry first so we can copy its fields.
+  let enquiry = null;
+  if (supabaseEnabled) {
+    const r = await supabase.from("enquiries").select("*").eq("id", enquiryId).maybeSingle();
+    if (r.data) enquiry = fromEnquiry(r.data);
+  }
+  if (!enquiry) {
+    const db = fileRead();
+    enquiry = (db.enquiries || []).find((e) => e.id === enquiryId) || null;
+  }
+  if (!enquiry) return null;
+
+  // Helpers — reuse the same shapes as walk-in admissions so the data is
+  // indistinguishable downstream.
+  const monthYear = new Date().toLocaleDateString("en-IN", { month: "short", year: "numeric" });
+  const newStudentId = `STN-${9000 + Math.floor(Math.random() * 999)}`;
+  const termFeeFor = (cls) => {
+    const n = Number(String(cls).split("-")[0]) || 1;
+    return 14000 + n * 1000;
+  };
+
+  // Reuse / create the student.
+  // If the enquiry already names a student id (set on a previous convert),
+  // skip the student-creation step.
+  let student = null;
+  if (enquiry.studentId) {
+    if (supabaseEnabled) {
+      const r = await supabase.from("students").select("*").eq("id", enquiry.studentId).maybeSingle();
+      if (r.data) student = fromStudent(r.data);
+    }
+    if (!student) {
+      const db = fileRead();
+      student = (db.addedStudents || []).find((s) => s.id === enquiry.studentId) || null;
+    }
+  }
+  if (!student) {
+    const cls = Number(enquiry.cls) || 1;
+    const section = (opts.section || "A").toUpperCase();
+    student = await addStudent({
+      id: newStudentId,
+      name: enquiry.name,
+      cls: `${cls}-${section}`,
+      parent: enquiry.phone || enquiry.parent || "—",
+      fee: "pending",
+      attendance: 0,
+      transport: "—",
+      pickupStop: null,
+      joined: monthYear,
+    });
+    // Raise the opening pending fee so it shows up on Fees.
+    try {
+      await addPendingFee({
+        id: student.id,
+        name: student.name,
+        cls: student.cls,
+        amount: termFeeFor(student.cls),
+        due: "in 7 days",
+        overdue: false,
+      });
+    } catch {}
+  }
+
+  // Provision the parent user. Email is derived from the student id so it's
+  // unique per child without needing real email collection.
+  const parentEmail = `parent.${student.id.toLowerCase()}@school.local`;
+  let parentExisting = await getUserByEmail(parentEmail);
+  let tempPassword = null;
+  if (!parentExisting) {
+    // Easy-to-read 8-char password, mixed-case + digits, no ambiguous chars.
+    const ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    tempPassword = Array.from({ length: 8 }, () => ALPHABET[Math.floor(Math.random() * ALPHABET.length)]).join("");
+    const passwordHash = await hashPassword(tempPassword);
+    await createUser({
+      id: `USR-PAR-${student.id}`,
+      email: parentEmail,
+      passwordHash,
+      role: "parent",
+      name: `${enquiry.parent && enquiry.parent !== "—" ? enquiry.parent : "Parent"} (${student.name})`,
+      linkedId: student.id,
+    });
+    parentExisting = await getUserByEmail(parentEmail);
+  }
+
+  // Update enquiry status (and stash the new student id) so re-converts are
+  // idempotent. Best-effort: if the column doesn't exist yet (older schemas)
+  // we still flip the status.
+  if (supabaseEnabled) {
+    try {
+      await supabase.from("enquiries").update({ status: "Converted" }).eq("id", enquiry.id);
+    } catch {}
+  }
+  const fdb = fileRead();
+  if (Array.isArray(fdb.enquiries)) {
+    const idx = fdb.enquiries.findIndex((e) => e.id === enquiry.id);
+    if (idx !== -1) {
+      fdb.enquiries[idx] = { ...fdb.enquiries[idx], status: "Converted", studentId: student.id };
+      fileWrite(fdb);
+    }
+  }
+
+  return {
+    enquiry: { ...enquiry, status: "Converted", studentId: student.id },
+    student,
+    parentLogin: {
+      email: parentEmail,
+      tempPassword,                    // null on re-convert (only first time)
+      alreadyExisted: !tempPassword,
+    },
+  };
+}
+
 export async function addEnquiry(row) {
   if (supabaseEnabled) {
     const ins = await supabase.from("enquiries").insert(row).select().single();
@@ -725,6 +1112,60 @@ function fileAddEnquiry(row) {
 }
 
 // ---------- transport ----------
+
+// File-backend safe reader for transport attendance — used by readAllData()
+// to merge file-fallback rows into the Supabase response.
+function fileTransportAttendanceSafe() {
+  try {
+    const db = fileRead();
+    return Array.isArray(db.transportAttendance) ? db.transportAttendance : [];
+  } catch { return []; }
+}
+
+// Record (or update) a per-student boarding entry. The composite key is
+// (studentId, date, direction) so a second tap on the same trip overwrites
+// the previous status (board → absent flips cleanly without dupes).
+//
+// Returns the persisted row.
+export async function recordTransportAttendance(row) {
+  const studentId = String(row?.studentId || "").trim();
+  const date = String(row?.date || "").trim() || new Date().toISOString().slice(0, 10);
+  const direction = (row?.direction || "morning") === "evening" ? "evening" : "morning";
+  const status = ["boarded", "absent", "skipped"].includes(row?.status) ? row.status : "boarded";
+  if (!studentId) throw new Error("studentId required");
+
+  const persistRow = {
+    studentId, date, direction, status,
+    routeCode: row.routeCode || null,
+    stopName: row.stopName || null,
+    studentName: row.studentName || null,
+    cls: row.cls || null,
+    markedBy: row.markedBy || null,
+    markedAt: new Date().toISOString(),
+  };
+
+  if (supabaseEnabled) {
+    // Try Supabase first. Upsert on the composite PK so flipping status is atomic.
+    const ins = await supabase
+      .from("transport_attendance")
+      .upsert(toTransportAttendance(persistRow), { onConflict: "student_id,date,direction" })
+      .select()
+      .maybeSingle();
+    if (!ins.error) return persistRow;
+    // Fall through to file backend if the table isn't there yet.
+  }
+
+  const db = fileRead();
+  if (!Array.isArray(db.transportAttendance)) db.transportAttendance = [];
+  const idx = db.transportAttendance.findIndex(
+    (x) => x.studentId === studentId && x.date === date && (x.direction || "morning") === direction
+  );
+  if (idx === -1) db.transportAttendance.unshift(persistRow);
+  else db.transportAttendance[idx] = persistRow;
+  fileWrite(db);
+  return persistRow;
+}
+
 export async function setStopBoarding(code, stopName, action) {
   if (supabaseEnabled) {
     const sel = await supabase.from("routes").select("*").eq("code", code).maybeSingle();
@@ -979,10 +1420,10 @@ export async function upsertDailyLog(row) {
       .upsert(dbRow, { onConflict: "student_id,date" })
       .select().single();
     // PostgREST cache lag: strip whichever new column is unknown and retry.
-    // Loop because there can be multiple missing columns (e.g. attendance +
-    // leave_reason + classwork_status + homework_status all missing on an
-    // older install) — strip them one at a time.
+    // Track everything we had to drop so we can mirror it into a side-store
+    // file overlay (so the values still survive across reads).
     let attempt = dbRow;
+    const droppedKeys = [];
     let safety = 5;
     while (r.error && safety-- > 0) {
       const m = /Could not find the '([a-z_]+)' column/i.exec(r.error.message);
@@ -991,13 +1432,26 @@ export async function upsertDailyLog(row) {
       const nextAttempt = { ...attempt };
       delete nextAttempt[colName];
       if (Object.keys(nextAttempt).length === Object.keys(attempt).length) break;
+      droppedKeys.push(colName);
       attempt = nextAttempt;
       r = await supabase.from("daily_logs")
         .upsert(attempt, { onConflict: "student_id,date" })
         .select().single();
     }
     if (r.error) throw new Error(r.error.message);
-    return { fresh: true, log: fromDailyLog(r.data) };
+    const persisted = fromDailyLog(r.data);
+    // Mirror dropped fields into a side-store keyed by (studentId, date).
+    if (droppedKeys.length > 0) {
+      saveDailyLogOverlay(row.studentId, row.date, {
+        classworkStatus: row.classworkStatus || null,
+        homeworkStatus: row.homeworkStatus || null,
+        attendance: row.attendance || null,
+        leaveReason: row.leaveReason || null,
+      });
+    }
+    // Merge any prior overlay so the response reflects the true state.
+    const overlay = readDailyLogOverlay(row.studentId, row.date);
+    return { fresh: true, log: { ...persisted, ...stripNullish(overlay) } };
   }
   const db = fileRead();
   if (!Array.isArray(db.dailyLogs)) db.dailyLogs = [];
@@ -1076,16 +1530,15 @@ export async function addStaff(row) {
 
   // Auto-provision a login account for teachers so they (a) show up in the
   // "Class teacher" picker on the Classes screen and (b) can sign in
-  // immediately. The default password is the staff first name (lowercased)
-  // + "123" — easy for the principal to share. Returned in the response.
+  // immediately. Common password — same for every teacher account so the
+  // principal only ever has to share one credential. Returned in the response
+  // so the UI can show it once at creation time.
   let createdLogin = null;
   if (filled.role === "Teacher" && filled.email) {
     try {
       const existing = await getUserByEmail(filled.email);
       if (!existing) {
-        const firstName = String(filled.name).trim().split(/\s+/)[0].toLowerCase().replace(/[^a-z]/g, "") || "teacher";
-        const defaultPassword = `${firstName}123`;
-        // Lazy require to avoid a circular import at module-load time.
+        const defaultPassword = COMMON_TEACHER_PASSWORD;
         const { hashPassword } = require("./auth.js");
         const passwordHash = await hashPassword(defaultPassword);
         await createUser({
@@ -1096,7 +1549,7 @@ export async function addStaff(row) {
           name: filled.name,
           linkedId: null,
         });
-        createdLogin = { email: filled.email, defaultPassword };
+        createdLogin = { email: filled.email, defaultPassword, role: "teacher" };
       }
     } catch (e) {
       console.warn(`[db] auto-provision teacher login failed: ${e.message}`);
@@ -1104,6 +1557,46 @@ export async function addStaff(row) {
   }
 
   return { ...saved, createdLogin };
+}
+
+// Common credentials used when an account is auto-created on staff/student add.
+// Documented here so they're easy to find + change in one place.
+const COMMON_TEACHER_PASSWORD = "teacher123";
+const COMMON_PARENT_PASSWORD  = "parent123";
+
+// Derive a parent login email when one wasn't explicitly supplied. Format is
+// `parent.{lowercased-student-id}@school.local` — predictable + unique per
+// child so re-admission of a withdrawn student gets a fresh inbox.
+function deriveParentEmail(studentId) {
+  return `parent.${String(studentId).toLowerCase()}@school.local`;
+}
+
+// Create a parent login linked to a student so the parent dashboard scopes to
+// just their child. Idempotent — won't create a duplicate if one exists.
+// Returns { email, defaultPassword, role } when a fresh account was made,
+// null otherwise.
+export async function provisionParentLogin({ studentId, studentName, parentEmail }) {
+  if (!studentId) return null;
+  const email = (parentEmail && String(parentEmail).trim().toLowerCase()) || deriveParentEmail(studentId);
+  try {
+    const existing = await getUserByEmail(email);
+    if (existing) return null;
+    const defaultPassword = COMMON_PARENT_PASSWORD;
+    const { hashPassword } = require("./auth.js");
+    const passwordHash = await hashPassword(defaultPassword);
+    await createUser({
+      id: `USR-${Date.now().toString(36).toUpperCase()}`,
+      email,
+      passwordHash,
+      role: "parent",
+      name: `${studentName || "Parent"} (parent)`,
+      linkedId: studentId,
+    });
+    return { email, defaultPassword, role: "parent" };
+  } catch (e) {
+    console.warn(`[db] auto-provision parent login failed: ${e.message}`);
+    return null;
+  }
 }
 
 function fileAddStaff(filled) {
@@ -1239,24 +1732,88 @@ function fileRecipientListsSafe() {
 
 // ---------- volunteers ----------
 export async function listVolunteers() {
+  // Pull from Supabase + file store and union them. We don't use a PostgREST
+  // embed for volunteer_hours here because the volunteers/volunteer_hours
+  // tables don't have an FK declared, so `select("*, volunteer_hours(*)")`
+  // returns PGRST200 and the whole call errors out — silently masking every
+  // cloud volunteer behind the file-store fallback. Hours are fetched in a
+  // second small query and grouped by volunteer_id in JS.
+  let cloud = [];
+  if (supabaseEnabled) {
+    const sel = await supabase.from("volunteers").select("*").order("created_at", { ascending: false });
+    if (!sel.error) {
+      cloud = (sel.data || []).map((r) => ({ ...fromVolunteer(r), assignments: [] }));
+      const hoursSel = await supabase.from("volunteer_hours").select("*").order("created_at", { ascending: false });
+      if (!hoursSel.error && Array.isArray(hoursSel.data)) {
+        const byVid = new Map();
+        for (const h of hoursSel.data) {
+          const vid = h.volunteer_id;
+          if (!byVid.has(vid)) byVid.set(vid, []);
+          byVid.get(vid).push(fromVolunteerHours(h));
+        }
+        for (const v of cloud) v.assignments = byVid.get(v.id) || [];
+      }
+    } else if (!isSchemaMissError(sel.error)) {
+      console.warn(`[db] volunteers fell back: ${sel.error.message}`);
+    }
+  }
   const db = fileRead();
-  return Array.isArray(db.volunteers) ? db.volunteers : [];
+  const file = Array.isArray(db.volunteers) ? db.volunteers : [];
+  // Dedupe by id, Supabase wins.
+  const merged = new Map();
+  for (const v of file)  if (v?.id) merged.set(v.id, v);
+  for (const v of cloud) if (v?.id) merged.set(v.id, v);
+  return [...merged.values()];
 }
-export async function addVolunteer({ name, email, phone, skills, availability, notes }) {
+export async function addVolunteer(payload = {}) {
+  const name = payload.name;
   if (!name?.trim()) throw new Error("Name required");
   const now = new Date();
   const v = {
     id: `VOL-${1000 + Math.floor(Math.random() * 8999)}`,
     name: name.trim(),
-    email: email || null,
-    phone: phone || null,
-    skills: Array.isArray(skills) ? skills : (skills ? [skills] : []),
-    availability: availability || "weekends",
-    notes: notes || null,
+    email: payload.email || null,
+    phone: payload.phone || null,
+    skills: Array.isArray(payload.skills) ? payload.skills : (payload.skills ? [payload.skills] : []),
+    availability: payload.availability || "weekends",
+    notes: payload.notes || null,
     hours: 0,
     assignments: [],
     createdAt: now.toISOString(),
+    // Extended Sanvi registration fields. All optional — older callers that
+    // only pass {name, email, phone, skills, availability, notes} still work.
+    dob: payload.dob || null,
+    age: payload.age == null ? null : Number(payload.age),
+    gender: payload.gender || null,
+    address: payload.address || null,
+    idType: payload.idType || null,
+    idNumber: payload.idNumber || null,
+    panNumber: payload.panNumber || null,
+    emergency: payload.emergency || null, // { name, relationship, phone }
+    qualification: payload.qualification || null,
+    otherSkill: payload.otherSkill || null,
+    previousExperience: payload.previousExperience || null,
+    interests: Array.isArray(payload.interests) ? payload.interests : [],
+    otherInterest: payload.otherInterest || null,
+    preferredTime: payload.preferredTime || null,
+    duration: payload.duration || null, // "short" | "long"
+    references: Array.isArray(payload.references) ? payload.references : [],
+    health: payload.health || null,
+    declarationAgreed: !!payload.declarationAgreed,
+    signatureName: payload.signatureName || null,
+    signatureDate: payload.signatureDate || null,
+    // For Office Use
+    dateOfJoining: payload.dateOfJoining || null,
+    assignedRole: payload.assignedRole || null,
+    approvedBy: payload.approvedBy || null,
   };
+  if (supabaseEnabled) {
+    const ins = await supabase.from("volunteers").insert(toVolunteer(v)).select().single();
+    if (!ins.error) return { ...fromVolunteer(ins.data), assignments: [] };
+    if (!isSchemaMissError(ins.error)) throw new Error(ins.error.message);
+    // Schema doesn't yet have the extended columns — fall through to the file
+    // store, which will keep every field of the new shape intact.
+  }
   const db = fileRead();
   if (!Array.isArray(db.volunteers)) db.volunteers = [];
   db.volunteers.unshift(v);
@@ -1264,15 +1821,34 @@ export async function addVolunteer({ name, email, phone, skills, availability, n
   return v;
 }
 export async function logVolunteerHours(id, { hours, activity, date }) {
+  const h = Math.max(0, Number(hours) || 0);
+  const today = date || new Date().toISOString().slice(0, 10);
+  if (supabaseEnabled) {
+    const sel = await supabase.from("volunteers").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      const newHours = (Number(sel.data.hours) || 0) + h;
+      const upd = await supabase.from("volunteers").update({ hours: newHours }).eq("id", id).select().single();
+      if (!upd.error) {
+        await supabase.from("volunteer_hours").insert({
+          id: `VA-${Date.now().toString(36).toUpperCase()}`,
+          volunteer_id: id, hours: h, activity: activity || "—", date: today,
+        });
+        const all = await supabase.from("volunteer_hours").select("*").eq("volunteer_id", id).order("created_at", { ascending: false });
+        return { ...fromVolunteer(upd.data), assignments: (all.data || []).map(fromVolunteerHours) };
+      }
+      if (!isSchemaMissError(upd.error)) throw new Error(upd.error.message);
+    } else if (sel.error && !isSchemaMissError(sel.error)) {
+      throw new Error(sel.error.message);
+    }
+  }
   const db = fileRead();
   if (!Array.isArray(db.volunteers)) db.volunteers = [];
   const idx = db.volunteers.findIndex((v) => v.id === id);
   if (idx === -1) throw new Error("Volunteer not found");
   const v = db.volunteers[idx];
-  const h = Math.max(0, Number(hours) || 0);
   v.hours = (Number(v.hours) || 0) + h;
   v.assignments = [
-    { id: `VA-${Date.now().toString(36).toUpperCase()}`, hours: h, activity: activity || "—", date: date || new Date().toISOString().slice(0, 10) },
+    { id: `VA-${Date.now().toString(36).toUpperCase()}`, hours: h, activity: activity || "—", date: today },
     ...(v.assignments || []),
   ];
   db.volunteers[idx] = v;
@@ -1280,6 +1856,14 @@ export async function logVolunteerHours(id, { hours, activity, date }) {
   return v;
 }
 export async function removeVolunteer(id) {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("volunteers").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      await supabase.from("volunteer_hours").delete().eq("volunteer_id", id);
+      await supabase.from("volunteers").delete().eq("id", id);
+      return fromVolunteer(sel.data);
+    }
+  }
   const db = fileRead();
   if (!Array.isArray(db.volunteers)) db.volunteers = [];
   const idx = db.volunteers.findIndex((v) => v.id === id);
@@ -1297,11 +1881,23 @@ export async function removeVolunteer(id) {
 const MEETING_AUDIENCE_PREFIXES = ["all", "class:", "user:"];
 
 export async function listMeetings({ forEmail, role, classes } = {}) {
-  const db = fileRead();
-  const all = Array.isArray(db.meetings) ? db.meetings : [];
+  let all = [];
+  if (supabaseEnabled) {
+    const sel = await supabase.from("meetings").select("*, meeting_rsvps(*)").order("created_at", { ascending: false });
+    if (!sel.error) {
+      all = (sel.data || []).map((r) => ({
+        ...fromMeeting(r),
+        rsvps: (r.meeting_rsvps || []).map(fromMeetingRsvp),
+      }));
+    } else if (!isSchemaMissError(sel.error)) {
+      console.warn(`[db] meetings fell back: ${sel.error.message}`);
+    }
+  }
+  if (all.length === 0) {
+    const db = fileRead();
+    all = Array.isArray(db.meetings) ? db.meetings : [];
+  }
   if (!forEmail) return all;
-  // Visibility: admin/principal see everything. Others only see meetings whose
-  // audience matches them.
   if (role === "admin" || role === "principal" || role === "academic_director") return all;
   return all.filter((m) => {
     if (m.createdByEmail === forEmail) return true;
@@ -1332,6 +1928,11 @@ export async function addMeeting({ title, description, scheduledAt, location, au
     createdAt: now.toISOString(),
     rsvps: [],
   };
+  if (supabaseEnabled) {
+    const ins = await supabase.from("meetings").insert(toMeeting(m)).select().single();
+    if (!ins.error) return { ...fromMeeting(ins.data), rsvps: [] };
+    if (!isSchemaMissError(ins.error)) throw new Error(ins.error.message);
+  }
   const db = fileRead();
   if (!Array.isArray(db.meetings)) db.meetings = [];
   db.meetings.unshift(m);
@@ -1341,6 +1942,24 @@ export async function addMeeting({ title, description, scheduledAt, location, au
 
 export async function rsvpMeeting({ id, fromEmail, fromName, response }) {
   if (!["yes", "no", "maybe"].includes(response)) throw new Error("response must be yes/no/maybe");
+  if (supabaseEnabled) {
+    const sel = await supabase.from("meetings").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      const row = {
+        meeting_id: id, from_email: fromEmail,
+        from_name: fromName || fromEmail, response,
+        responded_at: new Date().toISOString(),
+      };
+      const up = await supabase.from("meeting_rsvps").upsert(row, { onConflict: "meeting_id,from_email" });
+      if (!up.error) {
+        const all = await supabase.from("meeting_rsvps").select("*").eq("meeting_id", id);
+        return { ...fromMeeting(sel.data), rsvps: (all.data || []).map(fromMeetingRsvp) };
+      }
+      if (!isSchemaMissError(up.error)) throw new Error(up.error.message);
+    } else if (sel.error && !isSchemaMissError(sel.error)) {
+      throw new Error(sel.error.message);
+    }
+  }
   const db = fileRead();
   if (!Array.isArray(db.meetings)) db.meetings = [];
   const idx = db.meetings.findIndex((m) => m.id === id);
@@ -1354,6 +1973,14 @@ export async function rsvpMeeting({ id, fromEmail, fromName, response }) {
 }
 
 export async function removeMeeting(id) {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("meetings").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      await supabase.from("meeting_rsvps").delete().eq("meeting_id", id);
+      await supabase.from("meetings").delete().eq("id", id);
+      return fromMeeting(sel.data);
+    }
+  }
   const db = fileRead();
   if (!Array.isArray(db.meetings)) db.meetings = [];
   const idx = db.meetings.findIndex((m) => m.id === id);
@@ -1373,47 +2000,117 @@ function threadKey(parentEmail, teacherEmail, studentId) {
 }
 
 export async function listChatThreads({ forEmail, role } = {}) {
-  const db = fileRead();
-  const all = Array.isArray(db.chatThreads) ? db.chatThreads : [];
+  let all = [];
+  if (supabaseEnabled) {
+    const sel = await supabase.from("chat_threads").select("*, chat_messages(*)").order("last_message_at", { ascending: false, nullsFirst: false });
+    if (!sel.error) {
+      all = (sel.data || []).map((r) => ({
+        ...fromChatThread(r),
+        messages: (r.chat_messages || []).map(fromChatMessage)
+          .sort((a, b) => (a.sentAt || "").localeCompare(b.sentAt || "")),
+      }));
+    } else if (!isSchemaMissError(sel.error)) {
+      console.warn(`[db] chat_threads fell back: ${sel.error.message}`);
+    }
+  }
+  if (all.length === 0) {
+    const db = fileRead();
+    all = Array.isArray(db.chatThreads) ? db.chatThreads : [];
+  }
   if (!forEmail) return all;
   const lower = forEmail.toLowerCase();
-  // Parent sees threads where they're the parent; teacher sees threads where they're the teacher.
-  return all.filter((t) => {
-    if (role === "parent") return (t.parentEmail || "").toLowerCase() === lower;
-    if (role === "teacher") return (t.teacherEmail || "").toLowerCase() === lower;
-    return true; // admin / principal see all
-  });
+  if (role === "parent") {
+    return all.filter((t) => (t.parentEmail || "").toLowerCase() === lower);
+  }
+  if (role === "teacher") {
+    // Teachers see threads addressed directly to them OR for any class
+    // they're the class teacher of (so chats with co-teachers of the
+    // same class are visible too — useful when one teacher is on leave
+    // and a parent needs continuity).
+    let myClasses = [];
+    try {
+      const me = await getUserByEmail(forEmail);
+      myClasses = Array.isArray(me?.linkedClasses) ? me.linkedClasses : [];
+    } catch {}
+    const myClassSet = new Set(myClasses.map((c) => String(c).toUpperCase()));
+    return all.filter((t) => {
+      if ((t.teacherEmail || "").toLowerCase() === lower) return true;
+      if (t.cls && myClassSet.has(String(t.cls).toUpperCase())) return true;
+      return false;
+    });
+  }
+  return all; // admin/principal see everything
 }
 
-export async function getOrCreateThread({ parentEmail, parentName, teacherEmail, teacherName, studentId, studentName, cls }) {
-  if (!parentEmail || !teacherEmail || !studentId) throw new Error("parentEmail, teacherEmail, studentId required");
-  const key = threadKey(parentEmail, teacherEmail, studentId);
-  const db = fileRead();
+// Helper: ensure the file-store has a copy of this thread. Returns the
+// row reference inside db.chatThreads (mutable). The file copy acts as a
+// safety net so message appends never lose data even if Supabase
+// momentarily fails / the cloud table is missing / RLS rejects a write.
+function ensureFileThread(db, key, fields) {
   if (!Array.isArray(db.chatThreads)) db.chatThreads = [];
   let thread = db.chatThreads.find((t) => t.id === key);
   if (!thread) {
     thread = {
       id: key,
-      parentEmail, parentName: parentName || parentEmail,
-      teacherEmail, teacherName: teacherName || teacherEmail,
-      studentId, studentName: studentName || "—",
-      cls: cls || "—",
+      parentEmail: fields.parentEmail,
+      parentName: fields.parentName || fields.parentEmail,
+      teacherEmail: fields.teacherEmail,
+      teacherName: fields.teacherName || fields.teacherEmail,
+      studentId: fields.studentId,
+      studentName: fields.studentName || "—",
+      cls: fields.cls || "—",
       messages: [],
       createdAt: new Date().toISOString(),
       lastMessageAt: null,
     };
     db.chatThreads.unshift(thread);
-    fileWrite(db);
   }
   return thread;
 }
 
+export async function getOrCreateThread({ parentEmail, parentName, teacherEmail, teacherName, studentId, studentName, cls }) {
+  if (!parentEmail || !teacherEmail || !studentId) throw new Error("parentEmail, teacherEmail, studentId required");
+  const key = threadKey(parentEmail, teacherEmail, studentId);
+  const fields = { parentEmail, parentName, teacherEmail, teacherName, studentId, studentName, cls };
+
+  // ALWAYS keep a file-store copy of the thread (safety net). The Supabase
+  // copy below is best-effort — a network blip, schema mismatch, or RLS
+  // rejection won't break send.
+  const db = fileRead();
+  const fileThread = ensureFileThread(db, key, fields);
+  fileWrite(db);
+
+  if (supabaseEnabled) {
+    try {
+      const sel = await supabase.from("chat_threads").select("*, chat_messages(*)").eq("id", key).maybeSingle();
+      if (sel.data) {
+        return {
+          ...fromChatThread(sel.data),
+          messages: (sel.data.chat_messages || []).map(fromChatMessage)
+            .sort((a, b) => (a.sentAt || "").localeCompare(b.sentAt || "")),
+        };
+      }
+      if (sel.error && !isSchemaMissError(sel.error)) {
+        console.warn(`[db] chat thread select fell back to file: ${sel.error.message}`);
+      }
+      const ins = await supabase.from("chat_threads").insert(toChatThread({
+        id: key, parentEmail, parentName: parentName || parentEmail,
+        teacherEmail, teacherName: teacherName || teacherEmail,
+        studentId, studentName: studentName || "—", cls: cls || "—",
+      })).select().single();
+      if (!ins.error) return { ...fromChatThread(ins.data), messages: [] };
+      if (!isSchemaMissError(ins.error)) {
+        console.warn(`[db] chat thread insert fell back to file: ${ins.error.message}`);
+      }
+    } catch (e) {
+      console.warn(`[db] chat thread cloud path errored, using file: ${e.message}`);
+    }
+  }
+  return fileThread;
+}
+
 export async function appendChatMessage({ threadId, fromEmail, fromName, fromRole, body }) {
   if (!threadId || !body?.trim()) throw new Error("threadId + body required");
-  const db = fileRead();
-  if (!Array.isArray(db.chatThreads)) db.chatThreads = [];
-  const idx = db.chatThreads.findIndex((t) => t.id === threadId);
-  if (idx === -1) throw new Error("Thread not found");
   const now = new Date();
   const msg = {
     id: `MSG-${now.getTime().toString(36).toUpperCase()}-${Math.floor(Math.random() * 999)}`,
@@ -1421,10 +2118,64 @@ export async function appendChatMessage({ threadId, fromEmail, fromName, fromRol
     body: String(body).trim(),
     sentAt: now.toISOString(),
   };
-  db.chatThreads[idx].messages.push(msg);
-  db.chatThreads[idx].lastMessageAt = msg.sentAt;
+
+  // Try Supabase first (best-effort).
+  let cloudOk = false;
+  let cloudThread = null;
+  let cloudMessages = null;
+  if (supabaseEnabled) {
+    try {
+      const sel = await supabase.from("chat_threads").select("*").eq("id", threadId).maybeSingle();
+      if (sel.data) {
+        const ins = await supabase.from("chat_messages").insert({
+          id: msg.id, thread_id: threadId,
+          from_email: msg.fromEmail, from_name: msg.fromName, from_role: msg.fromRole,
+          body: msg.body, sent_at: msg.sentAt,
+        });
+        if (!ins.error) {
+          await supabase.from("chat_threads").update({ last_message_at: msg.sentAt }).eq("id", threadId);
+          const all = await supabase.from("chat_messages").select("*").eq("thread_id", threadId).order("sent_at");
+          cloudOk = true;
+          cloudThread = { ...fromChatThread(sel.data), lastMessageAt: msg.sentAt };
+          cloudMessages = (all.data || []).map(fromChatMessage);
+        } else if (!isSchemaMissError(ins.error)) {
+          console.warn(`[db] chat message insert fell back to file: ${ins.error.message}`);
+        }
+      } else if (sel.error && !isSchemaMissError(sel.error)) {
+        console.warn(`[db] chat message select fell back to file: ${sel.error.message}`);
+      }
+    } catch (e) {
+      console.warn(`[db] chat message cloud path errored, using file: ${e.message}`);
+    }
+  }
+
+  // Always mirror to file. If the thread isn't there yet (e.g. only ever
+  // lived in Supabase), recreate it from the threadId components so the
+  // append still succeeds — better to over-write than to throw.
+  const db = fileRead();
+  if (!Array.isArray(db.chatThreads)) db.chatThreads = [];
+  let thread = db.chatThreads.find((t) => t.id === threadId);
+  if (!thread) {
+    const [pe, te, sid] = String(threadId).split("::");
+    thread = ensureFileThread(db, threadId, {
+      parentEmail: pe || fromEmail || "",
+      parentName: cloudThread?.parentName || pe || "",
+      teacherEmail: te || "",
+      teacherName: cloudThread?.teacherName || te || "",
+      studentId: sid || "",
+      studentName: cloudThread?.studentName || "—",
+      cls: cloudThread?.cls || "—",
+    });
+  }
+  thread.messages = thread.messages || [];
+  thread.messages.push(msg);
+  thread.lastMessageAt = msg.sentAt;
   fileWrite(db);
-  return { thread: db.chatThreads[idx], message: msg };
+
+  if (cloudOk) {
+    return { thread: { ...cloudThread, messages: cloudMessages }, message: msg };
+  }
+  return { thread, message: msg };
 }
 
 // ---------- transfer certificates ----------
@@ -1446,6 +2197,11 @@ export async function addTcRequest({ studentId, studentName, cls, reason, reques
     issuedBy: null,
     serialNo: null,
   };
+  if (supabaseEnabled) {
+    const ins = await supabase.from("tc_requests").insert(toTcRequest(tc)).select().single();
+    if (!ins.error) return fromTcRequest(ins.data);
+    if (!isSchemaMissError(ins.error)) throw new Error(ins.error.message);
+  }
   const db = fileRead();
   if (!Array.isArray(db.tcRequests)) db.tcRequests = [];
   db.tcRequests.unshift(tc);
@@ -1454,6 +2210,27 @@ export async function addTcRequest({ studentId, studentName, cls, reason, reques
 }
 
 export async function updateTcRequest(id, patch = {}) {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("tc_requests").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      const next = { ...fromTcRequest(sel.data) };
+      const upd = {};
+      if (patch.status && TC_STATUSES.includes(patch.status)) upd.status = patch.status;
+      if (typeof patch.reason === "string") upd.reason = patch.reason;
+      if (upd.status === "issued" && !next.issuedAt) {
+        upd.issued_at = new Date().toISOString();
+        upd.issued_by = patch.issuedBy || "Admin";
+        const cnt = await supabase.from("tc_requests").select("id", { count: "exact", head: true }).eq("status", "issued");
+        const issuedCount = (cnt.count || 0) + 1;
+        upd.serial_no = `TC/${new Date().getFullYear()}/${String(issuedCount).padStart(4, "0")}`;
+      }
+      const r = await supabase.from("tc_requests").update(upd).eq("id", id).select().single();
+      if (!r.error) return fromTcRequest(r.data);
+      if (!isSchemaMissError(r.error)) throw new Error(r.error.message);
+    } else if (sel.error && !isSchemaMissError(sel.error)) {
+      throw new Error(sel.error.message);
+    }
+  }
   const db = fileRead();
   if (!Array.isArray(db.tcRequests)) db.tcRequests = [];
   const idx = db.tcRequests.findIndex((t) => t.id === id);
@@ -1463,7 +2240,6 @@ export async function updateTcRequest(id, patch = {}) {
   if (patch.status === "issued" && !next.issuedAt) {
     next.issuedAt = new Date().toISOString();
     next.issuedBy = patch.issuedBy || "Admin";
-    // Auto-assign a serial number on issuance.
     const issuedCount = db.tcRequests.filter((t) => t.status === "issued").length + 1;
     next.serialNo = `TC/${new Date().getFullYear()}/${String(issuedCount).padStart(4, "0")}`;
   }
@@ -1474,11 +2250,23 @@ export async function updateTcRequest(id, patch = {}) {
 }
 
 export async function listTcRequests() {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("tc_requests").select("*").order("requested_at", { ascending: false });
+    if (!sel.error) return (sel.data || []).map(fromTcRequest);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] tc_requests fell back: ${sel.error.message}`);
+  }
   const db = fileRead();
   return Array.isArray(db.tcRequests) ? db.tcRequests : [];
 }
 
 export async function removeTcRequest(id) {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("tc_requests").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      await supabase.from("tc_requests").delete().eq("id", id);
+      return fromTcRequest(sel.data);
+    }
+  }
   const db = fileRead();
   if (!Array.isArray(db.tcRequests)) db.tcRequests = [];
   const idx = db.tcRequests.findIndex((t) => t.id === id);
@@ -1489,16 +2277,271 @@ export async function removeTcRequest(id) {
   return removed;
 }
 
+// ---------- teacher attendance ----------
+// One row per (teacherId, date). Self-marked by teachers, can be overridden
+// by principal/admin. File-only for now.
+const TEACHER_ATTENDANCE_STATUSES = ["present", "absent", "leave"];
+
+export async function markTeacherAttendance({ teacherId, teacherName, date, status, leaveReason, markedBy }) {
+  if (!teacherId || !date) throw new Error("teacherId + date required");
+  const st = TEACHER_ATTENDANCE_STATUSES.includes(status) ? status : "present";
+  const row = {
+    id: `TAT-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 999)}`,
+    teacherId,
+    teacherName: teacherName || "—",
+    date,
+    status: st,
+    leaveReason: st === "leave" ? (leaveReason || "") : null,
+    markedBy: markedBy || teacherId,
+    markedAt: new Date().toISOString(),
+  };
+  if (supabaseEnabled) {
+    const dbRow = {
+      id: row.id, teacher_id: teacherId, teacher_name: row.teacherName,
+      date, status: st, leave_reason: row.leaveReason,
+      marked_by: row.markedBy, marked_at: row.markedAt,
+    };
+    const up = await supabase.from("teacher_attendance").upsert(dbRow, { onConflict: "teacher_id,date" }).select().single();
+    if (!up.error) return fromTeacherAttendance(up.data);
+    if (!isSchemaMissError(up.error)) throw new Error(up.error.message);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.teacherAttendance)) db.teacherAttendance = [];
+  const idx = db.teacherAttendance.findIndex((r) => r.teacherId === teacherId && r.date === date);
+  if (idx !== -1) row.id = db.teacherAttendance[idx].id;
+  if (idx === -1) db.teacherAttendance.unshift(row); else db.teacherAttendance[idx] = row;
+  fileWrite(db);
+  return row;
+}
+
+export async function listTeacherAttendance({ teacherId, fromDate, toDate } = {}) {
+  if (supabaseEnabled) {
+    let q = supabase.from("teacher_attendance").select("*").order("date", { ascending: false });
+    if (teacherId) q = q.eq("teacher_id", teacherId);
+    if (fromDate)  q = q.gte("date", fromDate);
+    if (toDate)    q = q.lte("date", toDate);
+    const sel = await q;
+    if (!sel.error) return (sel.data || []).map(fromTeacherAttendance);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] teacher_attendance fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  let all = Array.isArray(db.teacherAttendance) ? db.teacherAttendance : [];
+  if (teacherId) all = all.filter((r) => r.teacherId === teacherId);
+  if (fromDate)  all = all.filter((r) => r.date >= fromDate);
+  if (toDate)    all = all.filter((r) => r.date <= toDate);
+  return all;
+}
+
+// ---------- exams & marks ----------
+// An exam describes the assessment ("Unit Test 1 · 5-A · Maths" with max marks).
+// Marks are stored per (examId, studentId). One mark row per student per exam.
+const EXAM_TYPES = ["unit_test", "mid_term", "final", "assignment", "practical", "project"];
+
+export async function addExam({ name, type, cls, subject, maxMarks, date, createdBy }) {
+  if (!name || !cls || !subject) throw new Error("name, cls and subject required");
+  const t = EXAM_TYPES.includes(type) ? type : "unit_test";
+  const now = new Date();
+  const exam = {
+    id: `EXM-${now.getTime().toString(36).toUpperCase()}-${Math.floor(Math.random() * 999)}`,
+    name: String(name).trim(),
+    type: t,
+    cls: String(cls),
+    subject: String(subject).trim(),
+    maxMarks: Math.max(1, Number(maxMarks) || 100),
+    date: date || now.toISOString().slice(0, 10),
+    createdBy: createdBy || "Teacher",
+    createdAt: now.toISOString(),
+  };
+  if (supabaseEnabled) {
+    const ins = await supabase.from("exams").insert(toExam(exam)).select().single();
+    if (!ins.error) return fromExam(ins.data);
+    if (!isSchemaMissError(ins.error)) throw new Error(ins.error.message);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.exams)) db.exams = [];
+  db.exams.unshift(exam);
+  fileWrite(db);
+  return exam;
+}
+
+export async function listExams({ cls, subject } = {}) {
+  if (supabaseEnabled) {
+    let q = supabase.from("exams").select("*").order("created_at", { ascending: false });
+    if (cls)     q = q.eq("cls", cls);
+    if (subject) q = q.eq("subject", subject);
+    const sel = await q;
+    if (!sel.error) return (sel.data || []).map(fromExam);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] exams fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  let all = Array.isArray(db.exams) ? db.exams : [];
+  if (cls)     all = all.filter((e) => e.cls === cls);
+  if (subject) all = all.filter((e) => e.subject === subject);
+  return all;
+}
+
+export async function removeExam(id) {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("exams").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      await supabase.from("exam_marks").delete().eq("exam_id", id);
+      await supabase.from("exams").delete().eq("id", id);
+      return fromExam(sel.data);
+    }
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.exams)) db.exams = [];
+  const idx = db.exams.findIndex((e) => e.id === id);
+  if (idx === -1) return null;
+  const removed = db.exams[idx];
+  db.exams.splice(idx, 1);
+  if (Array.isArray(db.marks)) db.marks = db.marks.filter((m) => m.examId !== id);
+  fileWrite(db);
+  return removed;
+}
+
+export async function saveMarks({ examId, studentId, studentName, score, remarks, recordedBy }) {
+  if (!examId || !studentId) throw new Error("examId + studentId required");
+  let exam = null;
+  if (supabaseEnabled) {
+    const sel = await supabase.from("exams").select("*").eq("id", examId).maybeSingle();
+    if (sel.data) exam = fromExam(sel.data);
+  }
+  if (!exam) {
+    const db = fileRead();
+    exam = (db.exams || []).find((e) => e.id === examId);
+  }
+  if (!exam) throw new Error("Exam not found");
+  const sc = Math.max(0, Math.min(exam.maxMarks, Number(score) || 0));
+  const row = {
+    id: `MRK-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 999)}`,
+    examId, studentId, studentName: studentName || "—",
+    score: sc, maxMarks: exam.maxMarks,
+    remarks: remarks || null,
+    recordedBy: recordedBy || "Teacher",
+    recordedAt: new Date().toISOString(),
+  };
+  if (supabaseEnabled) {
+    const dbRow = {
+      id: row.id, exam_id: examId, student_id: studentId,
+      student_name: row.studentName, score: sc, max_marks: exam.maxMarks,
+      remarks: row.remarks, recorded_by: row.recordedBy, recorded_at: row.recordedAt,
+    };
+    const up = await supabase.from("exam_marks").upsert(dbRow, { onConflict: "exam_id,student_id" }).select().single();
+    if (!up.error) return fromExamMark(up.data);
+    if (!isSchemaMissError(up.error)) throw new Error(up.error.message);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.marks)) db.marks = [];
+  const idx = db.marks.findIndex((m) => m.examId === examId && m.studentId === studentId);
+  if (idx !== -1) row.id = db.marks[idx].id;
+  if (idx === -1) db.marks.unshift(row); else db.marks[idx] = row;
+  fileWrite(db);
+  return row;
+}
+
+export async function listMarks({ examId, studentId } = {}) {
+  if (supabaseEnabled) {
+    let q = supabase.from("exam_marks").select("*").order("recorded_at", { ascending: false });
+    if (examId)    q = q.eq("exam_id", examId);
+    if (studentId) q = q.eq("student_id", studentId);
+    const sel = await q;
+    if (!sel.error) return (sel.data || []).map(fromExamMark);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] exam_marks fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  let all = Array.isArray(db.marks) ? db.marks : [];
+  if (examId)    all = all.filter((m) => m.examId === examId);
+  if (studentId) all = all.filter((m) => m.studentId === studentId);
+  return all;
+}
+
+export const __EXAM_META = { TYPES: EXAM_TYPES };
+export const __TEACHER_ATTENDANCE_META = { STATUSES: TEACHER_ATTENDANCE_STATUSES };
+
+// ---------- vehicle maintenance ----------
+// One log entry per maintenance event. Tied to a bus by `busNumber` (string —
+// matches the route's `bus` field). `nextDueDate` drives renewal alerts.
+const MAINTENANCE_TYPES = ["service", "fuel", "insurance", "FC", "PUC", "repair", "tyre", "battery"];
+
+export async function addMaintenanceLog({ busNumber, routeCode, type, date, odometer, vendor, cost, notes, nextDueDate, recordedBy }) {
+  if (!busNumber) throw new Error("busNumber required");
+  const t = MAINTENANCE_TYPES.includes(type) ? type : "service";
+  const now = new Date();
+  const log = {
+    id: `MNT-${now.getTime().toString(36).toUpperCase()}-${Math.floor(Math.random() * 999)}`,
+    busNumber: String(busNumber).trim(),
+    routeCode: routeCode || null,
+    type: t,
+    date: date || now.toISOString().slice(0, 10),
+    odometer: odometer ? Number(odometer) : null,
+    vendor: vendor || null,
+    cost: cost ? Math.max(0, Math.round(Number(cost))) : 0,
+    notes: notes || null,
+    nextDueDate: nextDueDate || null,
+    recordedBy: recordedBy || "unknown",
+    createdAt: now.toISOString(),
+  };
+  if (supabaseEnabled) {
+    const ins = await supabase.from("maintenance_logs").insert(toMaintenance(log)).select().single();
+    if (!ins.error) return fromMaintenance(ins.data);
+    if (!isSchemaMissError(ins.error)) throw new Error(ins.error.message);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.maintenanceLogs)) db.maintenanceLogs = [];
+  db.maintenanceLogs.unshift(log);
+  fileWrite(db);
+  return log;
+}
+
+export async function listMaintenanceLogs({ busNumber } = {}) {
+  if (supabaseEnabled) {
+    let q = supabase.from("maintenance_logs").select("*").order("created_at", { ascending: false });
+    if (busNumber) q = q.eq("bus_number", busNumber);
+    const sel = await q;
+    if (!sel.error) return (sel.data || []).map(fromMaintenance);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] maintenance_logs fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  const all = Array.isArray(db.maintenanceLogs) ? db.maintenanceLogs : [];
+  if (busNumber) return all.filter((l) => l.busNumber === busNumber);
+  return all;
+}
+
+export async function removeMaintenanceLog(id) {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("maintenance_logs").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      await supabase.from("maintenance_logs").delete().eq("id", id);
+      return fromMaintenance(sel.data);
+    }
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.maintenanceLogs)) db.maintenanceLogs = [];
+  const idx = db.maintenanceLogs.findIndex((l) => l.id === id);
+  if (idx === -1) return null;
+  const removed = db.maintenanceLogs[idx];
+  db.maintenanceLogs.splice(idx, 1);
+  fileWrite(db);
+  return removed;
+}
+
+export const __MAINTENANCE_META = { TYPES: MAINTENANCE_TYPES };
+
 // ---------- expenses ----------
 // Logged expenses with a scope ("school" or "trust") so the Money screen and
 // Trust dashboard can filter / sum independently.
 const EXPENSE_SCOPES = ["school", "trust"];
 const EXPENSE_CATEGORIES = [
   "Salary", "Utilities", "Supplies", "Maintenance", "Transport", "Events",
-  "Stationery", "Software", "Marketing", "Donation outflow", "Misc",
+  "Stationery", "Software", "Marketing", "Donation outflow",
+  // Stamped automatically by the inventory cascade — admin-edited
+  // expenses can also use it manually.
+  "Inventory purchase",
+  "Misc",
 ];
 
-export async function addExpense({ scope, category, amount, vendor, memo, date, paymentMethod, recordedBy }) {
+export async function addExpense({ scope, category, amount, vendor, memo, date, paymentMethod, recordedBy, inventoryId } = {}) {
   const amt = Math.max(0, Math.round(Number(amount) || 0));
   if (!amt) throw new Error("Amount must be greater than zero");
   const sc = EXPENSE_SCOPES.includes(scope) ? scope : "school";
@@ -1506,15 +2549,24 @@ export async function addExpense({ scope, category, amount, vendor, memo, date, 
   const exp = {
     id: `EXP-${now.getTime().toString(36).toUpperCase()}-${Math.floor(Math.random() * 999)}`,
     scope: sc,
-    category: EXPENSE_CATEGORIES.includes(category) ? category : "Misc",
+    // Allow any string the caller passes — the dropdown enforces the
+    // built-in list, custom categories from expense_categories pass
+    // through, and the inventory cascade stamps "Inventory purchase".
+    category: typeof category === "string" && category.trim() ? category.trim() : "Misc",
     amount: amt,
     vendor: vendor || null,
     memo: memo || null,
     date: date || now.toISOString().slice(0, 10),
     paymentMethod: paymentMethod || "Bank transfer",
     recordedBy: recordedBy || "unknown",
+    inventoryId: inventoryId || null,
     createdAt: now.toISOString(),
   };
+  if (supabaseEnabled) {
+    const ins = await supabase.from("expenses").insert(toExpense(exp)).select().single();
+    if (!ins.error) return fromExpense(ins.data);
+    if (!isSchemaMissError(ins.error)) throw new Error(ins.error.message);
+  }
   const db = fileRead();
   if (!Array.isArray(db.expenses)) db.expenses = [];
   db.expenses.unshift(exp);
@@ -1523,6 +2575,13 @@ export async function addExpense({ scope, category, amount, vendor, memo, date, 
 }
 
 export async function listExpenses({ scope } = {}) {
+  if (supabaseEnabled) {
+    let q = supabase.from("expenses").select("*").order("created_at", { ascending: false });
+    if (scope) q = q.eq("scope", scope);
+    const sel = await q;
+    if (!sel.error) return (sel.data || []).map(fromExpense);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] expenses fell back: ${sel.error.message}`);
+  }
   const db = fileRead();
   const all = Array.isArray(db.expenses) ? db.expenses : [];
   if (scope) return all.filter((e) => e.scope === scope);
@@ -1530,6 +2589,13 @@ export async function listExpenses({ scope } = {}) {
 }
 
 export async function removeExpense(id) {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("expenses").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      await supabase.from("expenses").delete().eq("id", id);
+      return fromExpense(sel.data);
+    }
+  }
   const db = fileRead();
   if (!Array.isArray(db.expenses)) db.expenses = [];
   const idx = db.expenses.findIndex((e) => e.id === id);
@@ -1541,6 +2607,130 @@ export async function removeExpense(id) {
 }
 
 export const __EXPENSE_META = { SCOPES: EXPENSE_SCOPES, CATEGORIES: EXPENSE_CATEGORIES };
+
+// ---------- schools (trust-level multi-school) ----------
+export async function listSchools() {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("schools").select("*").order("created_at", { ascending: true });
+    if (!sel.error) return (sel.data || []).filter((r) => !r.archived_at).map(fromSchool);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] schools fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  return Array.isArray(db.schools) ? db.schools : [];
+}
+
+export async function addSchool(row) {
+  const id = row.id || `SCH-${Date.now().toString(36).toUpperCase()}`;
+  const filled = {
+    id,
+    name: String(row.name || "").trim(),
+    city: row.city || null,
+    status: row.status || "Active",
+    students: Number(row.students) || 0,
+    fees: Number(row.fees) || 0,
+    wellness: row.wellness || null,
+    puck: row.puck || "ink",
+  };
+  if (!filled.name) throw new Error("School name is required");
+  if (supabaseEnabled) {
+    const ins = await supabase.from("schools").insert(toSchool(filled)).select().single();
+    if (!ins.error) return fromSchool(ins.data);
+    if (!isSchemaMissError(ins.error)) throw new Error(ins.error.message);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.schools)) db.schools = [];
+  db.schools.unshift(filled);
+  fileWrite(db);
+  return filled;
+}
+
+export async function updateSchool(id, patch = {}) {
+  if (!id) throw new Error("id required");
+  if (supabaseEnabled) {
+    const sel = await supabase.from("schools").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      const upd = toSchool({ ...fromSchool(sel.data), ...patch, id });
+      delete upd.id;
+      const r = await supabase.from("schools").update(upd).eq("id", id).select().single();
+      if (!r.error) return fromSchool(r.data);
+      if (!isSchemaMissError(r.error)) throw new Error(r.error.message);
+    } else if (sel.error && !isSchemaMissError(sel.error)) {
+      throw new Error(sel.error.message);
+    }
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.schools)) db.schools = [];
+  const idx = db.schools.findIndex((s) => s.id === id);
+  if (idx === -1) return null;
+  db.schools[idx] = { ...db.schools[idx], ...patch };
+  fileWrite(db);
+  return db.schools[idx];
+}
+
+export async function archiveSchool(id) {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("schools").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      const upd = await supabase.from("schools")
+        .update({ archived_at: new Date().toISOString() }).eq("id", id);
+      if (upd.error && /archived_at/.test(upd.error.message)) {
+        await supabase.from("schools").delete().eq("id", id);
+      }
+      return fromSchool(sel.data);
+    }
+  }
+  const db = fileRead();
+  const idx = (db.schools || []).findIndex((s) => s.id === id);
+  if (idx === -1) return null;
+  const removed = db.schools[idx];
+  db.schools.splice(idx, 1);
+  fileWrite(db);
+  return removed;
+}
+
+// ---------- app settings (trust-wide config bag) ----------
+// Stored as { section, key, value } rows. Read returns a nested object:
+// { section: { key: value, ... }, ... }
+export async function readSettings() {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("app_settings").select("section, key, value");
+    if (!sel.error) {
+      const out = {};
+      for (const row of sel.data || []) {
+        if (!out[row.section]) out[row.section] = {};
+        out[row.section][row.key] = row.value;
+      }
+      return out;
+    }
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] app_settings fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  return db.appSettings && typeof db.appSettings === "object" ? db.appSettings : {};
+}
+
+export async function writeSettings(patch) {
+  if (!patch || typeof patch !== "object") throw new Error("patch must be an object");
+  const rows = [];
+  for (const section of Object.keys(patch)) {
+    const sectionMap = patch[section] || {};
+    if (typeof sectionMap !== "object") continue;
+    for (const key of Object.keys(sectionMap)) {
+      rows.push({ section, key, value: String(sectionMap[key] ?? ""), updated_at: new Date().toISOString() });
+    }
+  }
+  if (supabaseEnabled && rows.length) {
+    const up = await supabase.from("app_settings").upsert(rows, { onConflict: "section,key" });
+    if (up.error && !isSchemaMissError(up.error)) console.warn(`[db] settings upsert failed: ${up.error.message}`);
+  }
+  const db = fileRead();
+  if (!db.appSettings || typeof db.appSettings !== "object") db.appSettings = {};
+  for (const row of rows) {
+    if (!db.appSettings[row.section]) db.appSettings[row.section] = {};
+    db.appSettings[row.section][row.key] = row.value;
+  }
+  fileWrite(db);
+  return readSettings();
+}
 
 // ---------- documents ----------
 // Generic document attachment — entity can be "student" | "staff" | "volunteer"
@@ -1556,11 +2746,16 @@ export async function addDocument({ entityType, entityId, label, fileName, mimeT
     label: label || fileName,
     fileName,
     mimeType: mimeType || "application/octet-stream",
-    dataUrl,                      // base64 preview — enough for inline view
+    dataUrl,
     sizeBytes: dataUrl.length,
     uploadedBy: uploadedBy || "unknown",
     uploadedAt: now.toISOString(),
   };
+  if (supabaseEnabled) {
+    const ins = await supabase.from("documents").insert(toDocument(doc)).select().single();
+    if (!ins.error) return fromDocument(ins.data);
+    if (!isSchemaMissError(ins.error)) throw new Error(ins.error.message);
+  }
   const db = fileRead();
   if (!Array.isArray(db.documents)) db.documents = [];
   db.documents.unshift(doc);
@@ -1569,6 +2764,17 @@ export async function addDocument({ entityType, entityId, label, fileName, mimeT
 }
 
 export async function listDocuments({ entityType, entityId } = {}) {
+  if (supabaseEnabled) {
+    // Strip the heavy `data_url` column — download endpoint serves it.
+    let q = supabase.from("documents")
+      .select("id, entity_type, entity_id, label, file_name, mime_type, size_bytes, uploaded_by, uploaded_at")
+      .order("uploaded_at", { ascending: false });
+    if (entityType) q = q.eq("entity_type", entityType);
+    if (entityId)   q = q.eq("entity_id", entityId);
+    const sel = await q;
+    if (!sel.error) return (sel.data || []).map(fromDocument);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] documents fell back: ${sel.error.message}`);
+  }
   const db = fileRead();
   const all = Array.isArray(db.documents) ? db.documents : [];
   if (!entityType) return all.map(stripBlob);
@@ -1579,11 +2785,23 @@ export async function listDocuments({ entityType, entityId } = {}) {
 function stripBlob({ dataUrl, ...rest }) { return rest; }
 
 export async function getDocument(id) {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("documents").select("*").eq("id", id).maybeSingle();
+    if (sel.data) return fromDocument(sel.data);
+    if (sel.error && !isSchemaMissError(sel.error)) console.warn(`[db] document fell back: ${sel.error.message}`);
+  }
   const db = fileRead();
   return (db.documents || []).find((d) => d.id === id) || null;
 }
 
 export async function removeDocument(id) {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("documents").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      await supabase.from("documents").delete().eq("id", id);
+      return stripBlob(fromDocument(sel.data));
+    }
+  }
   const db = fileRead();
   if (!Array.isArray(db.documents)) db.documents = [];
   const idx = db.documents.findIndex((d) => d.id === id);
@@ -1609,6 +2827,13 @@ function fileTasksSafe() {
 }
 
 export async function listTasks(filter = {}) {
+  if (supabaseEnabled) {
+    let q = supabase.from("tasks").select("*").order("created_at", { ascending: false });
+    if (filter.assignedTo) q = q.eq("assigned_to", filter.assignedTo);
+    const sel = await q;
+    if (!sel.error) return (sel.data || []).map(fromTask);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] tasks fell back: ${sel.error.message}`);
+  }
   const all = fileTasksSafe();
   if (filter.assignedTo) return all.filter((t) => t.assignedTo === filter.assignedTo);
   return all;
@@ -1635,6 +2860,11 @@ export async function addTask({ title, description, assignedTo, assignedToName, 
     createdAt: now.toISOString(),
     updatedAt: now.toISOString(),
   };
+  if (supabaseEnabled) {
+    const ins = await supabase.from("tasks").insert(toTask(task)).select().single();
+    if (!ins.error) return fromTask(ins.data);
+    if (!isSchemaMissError(ins.error)) throw new Error(ins.error.message);
+  }
   const db = fileRead();
   if (!Array.isArray(db.tasks)) db.tasks = [];
   db.tasks.unshift(task);
@@ -1644,6 +2874,22 @@ export async function addTask({ title, description, assignedTo, assignedToName, 
 
 export async function updateTask(id, patch = {}) {
   if (!id) throw new Error("id required");
+  if (supabaseEnabled) {
+    const sel = await supabase.from("tasks").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      const upd = { updated_at: new Date().toISOString() };
+      if (patch.status && TASK_STATUSES.includes(patch.status)) upd.status = patch.status;
+      if (typeof patch.title === "string" && patch.title.trim()) upd.title = patch.title.trim();
+      if (typeof patch.description === "string") upd.description = patch.description.trim() || null;
+      if (TASK_PRIORITIES.includes(patch.priority)) upd.priority = patch.priority;
+      if (typeof patch.dueDate === "string") upd.due_date = patch.dueDate || null;
+      const r = await supabase.from("tasks").update(upd).eq("id", id).select().single();
+      if (!r.error) return fromTask(r.data);
+      if (!isSchemaMissError(r.error)) throw new Error(r.error.message);
+    } else if (sel.error && !isSchemaMissError(sel.error)) {
+      throw new Error(sel.error.message);
+    }
+  }
   const db = fileRead();
   if (!Array.isArray(db.tasks)) db.tasks = [];
   const idx = db.tasks.findIndex((t) => t.id === id);
@@ -1662,6 +2908,13 @@ export async function updateTask(id, patch = {}) {
 
 export async function removeTask(id) {
   if (!id) return null;
+  if (supabaseEnabled) {
+    const sel = await supabase.from("tasks").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      await supabase.from("tasks").delete().eq("id", id);
+      return fromTask(sel.data);
+    }
+  }
   const db = fileRead();
   if (!Array.isArray(db.tasks)) db.tasks = [];
   const idx = db.tasks.findIndex((t) => t.id === id);
@@ -1679,10 +2932,61 @@ function safeArr(key) {
   } catch { return []; }
 }
 
+// Side-store for daily-log fields that don't yet exist in the Supabase
+// schema (classwork_status, homework_status, …). Keyed by `${studentId}|${date}`.
+function dailyLogOverlayKey(studentId, date) { return `${studentId}|${date}`; }
+function saveDailyLogOverlay(studentId, date, patch) {
+  if (!studentId || !date || !patch) return;
+  const db = fileRead();
+  if (!db.dailyLogOverlays || typeof db.dailyLogOverlays !== "object") db.dailyLogOverlays = {};
+  const key = dailyLogOverlayKey(studentId, date);
+  db.dailyLogOverlays[key] = { ...(db.dailyLogOverlays[key] || {}), ...stripNullish(patch) };
+  fileWrite(db);
+}
+function readDailyLogOverlay(studentId, date) {
+  try {
+    const db = fileRead();
+    return (db.dailyLogOverlays && db.dailyLogOverlays[dailyLogOverlayKey(studentId, date)]) || null;
+  } catch { return null; }
+}
+// Layer the side-store overlay onto each Supabase-backed daily log so the UI
+// sees fields (classworkStatus, homeworkStatus, attendance, leaveReason) that
+// the schema may not have yet.
+function applyDailyLogOverlays(logs) {
+  const overlays = dailyLogOverlaysSafe();
+  if (!overlays || Object.keys(overlays).length === 0) return logs;
+  return (logs || []).map((l) => {
+    const o = overlays[`${l.studentId}|${l.date}`];
+    return o ? { ...l, ...stripNullish(o) } : l;
+  });
+}
+
+function dailyLogOverlaysSafe() {
+  try {
+    const db = fileRead();
+    return (db.dailyLogOverlays && typeof db.dailyLogOverlays === "object") ? db.dailyLogOverlays : {};
+  } catch { return {}; }
+}
+function stripNullish(obj) {
+  if (!obj) return {};
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v !== null && v !== undefined && v !== "") out[k] = v;
+  }
+  return out;
+}
+
 function fileTcRequestsSafe() {
   try {
     const db = fileRead();
     return Array.isArray(db.tcRequests) ? db.tcRequests : [];
+  } catch { return []; }
+}
+
+function fileMaintenanceLogsSafe() {
+  try {
+    const db = fileRead();
+    return Array.isArray(db.maintenanceLogs) ? db.maintenanceLogs : [];
   } catch { return []; }
 }
 
@@ -1691,6 +2995,40 @@ function fileExpensesSafe() {
     const db = fileRead();
     return Array.isArray(db.expenses) ? db.expenses : [];
   } catch { return []; }
+}
+
+// Merge Supabase + file-store expenses, deduping by id so a row that
+// exists in both backends only counts once on the Money Control KPIs.
+async function mergeExpenses() {
+  const map = new Map();
+  let cloud = [];
+  try { cloud = await listExpenses(); } catch {}
+  for (const r of cloud) if (r?.id && !map.has(r.id)) map.set(r.id, r);
+  for (const r of fileExpensesSafe()) if (r?.id && !map.has(r.id)) map.set(r.id, r);
+  return Array.from(map.values());
+}
+
+// Same pattern for donor receipts — Money Control's donation income line
+// reads these, so a missed cloud row used to silently undercount donations.
+async function mergeDonorReceipts() {
+  const map = new Map();
+  let cloud = [];
+  try { cloud = await listDonorReceipts(); } catch {}
+  for (const r of cloud) if (r?.id && !map.has(r.id)) map.set(r.id, r);
+  for (const r of fileDonorReceiptsSafe()) if (r?.id && !map.has(r.id)) map.set(r.id, r);
+  return Array.from(map.values());
+}
+
+// Same pattern for TC requests — the Students screen looks at this list to
+// stamp the "TC approved / issued" chip; without the cloud read, the chip
+// stayed off whenever the TC update went to Supabase.
+async function mergeTcRequests() {
+  const map = new Map();
+  let cloud = [];
+  try { cloud = await listTcRequests(); } catch {}
+  for (const r of cloud) if (r?.id && !map.has(r.id)) map.set(r.id, r);
+  for (const r of fileTcRequestsSafe()) if (r?.id && !map.has(r.id)) map.set(r.id, r);
+  return Array.from(map.values());
 }
 
 function rolePermissionsSafe() {
@@ -1788,6 +3126,11 @@ function writeOpeningReceipt(donor, amount) {
     issuedAt: now.toISOString(),
     issuedAtLabel: now.toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }),
   };
+  if (supabaseEnabled) {
+    supabase.from("donor_receipts").insert(toDonorReceipt(receipt)).then(({ error }) => {
+      if (error && !isSchemaMissError(error)) console.warn(`[db] donor_receipts insert failed: ${error.message}`);
+    });
+  }
   const db = fileRead();
   if (!Array.isArray(db.donorReceipts)) db.donorReceipts = [];
   db.donorReceipts.unshift(receipt);
@@ -1843,6 +3186,12 @@ export async function recordDonation(donorId, { amount, method, memo, campaignId
       .eq("id", donor.id);
     if (upd.error) console.warn(`[db] donor update fell back: ${upd.error.message}`);
   }
+  // Persist the receipt to Supabase too.
+  if (supabaseEnabled) {
+    const ins = await supabase.from("donor_receipts").insert(toDonorReceipt(receipt));
+    if (ins.error && !isSchemaMissError(ins.error)) console.warn(`[db] donor_receipts insert failed: ${ins.error.message}`);
+  }
+
   // Mirror to the file copy regardless — keeps receipts and totals in one place.
   const db = fileRead();
   if (!Array.isArray(db.donors)) db.donors = [];
@@ -1857,6 +3206,11 @@ export async function recordDonation(donorId, { amount, method, memo, campaignId
 }
 
 export async function listDonorReceipts() {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("donor_receipts").select("*").order("issued_at", { ascending: false });
+    if (!sel.error) return (sel.data || []).map(fromDonorReceipt);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] donor_receipts fell back: ${sel.error.message}`);
+  }
   const db = fileRead();
   return Array.isArray(db.donorReceipts) ? db.donorReceipts : [];
 }
@@ -1926,7 +3280,7 @@ export async function addBroadcast(row) {
   const filled = {
     id,
     campaign: String(row.campaign || "").trim() || "Manual broadcast",
-    channel: ["whatsapp", "sms", "both"].includes(row.channel) ? row.channel : "whatsapp",
+    channel: ["whatsapp", "sms", "both", "in_app"].includes(row.channel) ? row.channel : "whatsapp",
     audience: row.audience || "all",
     audienceLabel: row.audienceLabel || row.audience || "All parents",
     message: row.message || "",
@@ -1958,7 +3312,7 @@ export async function addTemplate(row) {
   const filled = {
     id,
     name: String(row.name || "").trim(),
-    channel: ["whatsapp", "sms", "both"].includes(row.channel) ? row.channel : "whatsapp",
+    channel: ["whatsapp", "sms", "both", "in_app"].includes(row.channel) ? row.channel : "whatsapp",
     body: String(row.body || "").trim(),
   };
   if (!filled.name) throw new Error("Template name required");
@@ -2032,7 +3386,13 @@ export async function addInventoryItem(row) {
   const filled = {
     id,
     name: String(row.name || "").trim(),
-    category: ["book", "uniform", "asset"].includes(row.category) ? row.category : "asset",
+    // Categories used to be restricted to {book, uniform, asset}. Now any
+    // string up to 32 chars is accepted (lowercased + slugged) so the school
+    // can create their own buckets — "stationery", "lab", "sports" etc.
+    category: (() => {
+      const raw = String(row.category || "asset").trim().toLowerCase().slice(0, 32);
+      return raw.replace(/[^a-z0-9_-]+/g, "_") || "asset";
+    })(),
     cls: row.cls || null,
     onHand: Math.max(0, Number(row.onHand) || 0),
     min: Math.max(0, Number(row.min) || 0),
@@ -2042,17 +3402,55 @@ export async function addInventoryItem(row) {
   };
   if (!filled.name) throw new Error("Item name is required");
 
+  let saved;
   if (supabaseEnabled) {
     const ins = await supabase.from("inventory").insert(toInventory(filled)).select().single();
     if (ins.error) {
       if (/inventory/i.test(ins.error.message)) {
-        return fileAddInventory(filled);
+        saved = fileAddInventory(filled);
+      } else {
+        throw new Error(ins.error.message);
       }
-      throw new Error(ins.error.message);
+    } else {
+      saved = fromInventory(ins.data);
     }
-    return fromInventory(ins.data);
+  } else {
+    saved = fileAddInventory(filled);
   }
-  return fileAddInventory(filled);
+
+  // Cascade: if the item carries a cost, log a matching expense so the
+  // money screen sees inventory purchases as part of school spend. Best
+  // effort — failures don't fail the inventory write.
+  await maybeLogInventoryExpense(saved, row.recordedBy);
+
+  return saved;
+}
+
+// Helper: write an expense row mirroring an inventory purchase. Called
+// from addInventoryItem (initial stock) and moveInventory (restock with
+// type="in"). Skips if cost is zero.
+async function maybeLogInventoryExpense(item, recordedBy, qtyOverride = null) {
+  if (!item) return null;
+  const qty = qtyOverride != null ? Number(qtyOverride) : Number(item.onHand) || 0;
+  const unit = Number(item.unitPrice) || 0;
+  const total = Math.round(qty * unit);
+  if (!total) return null;
+  try {
+    return await addExpense({
+      scope: "school",
+      category: "Inventory purchase",
+      amount: total,
+      vendor: item.supplier || null,
+      memo: `${item.name}${qty ? ` · ${qty} units` : ""}${unit ? ` @ ₹${unit}` : ""}`,
+      date: new Date().toISOString().slice(0, 10),
+      paymentMethod: "Bank transfer",
+      recordedBy: recordedBy || "Inventory",
+      inventoryId: item.id,
+    });
+  } catch (e) {
+    console.warn(`[inventory→expense] cascade failed for ${item.id}: ${e.message}`);
+    return null;
+  }
 }
 
 function fileAddInventory(filled) {
@@ -2061,6 +3459,29 @@ function fileAddInventory(filled) {
   db.inventory.unshift(filled);
   fileWrite(db);
   return filled;
+}
+
+// Persist a category id ("stationery", "lab"…) so it shows up in the picker
+// even before any items use it. Idempotent — duplicates collapse to one row.
+export async function addInventoryCategory(rawCategory) {
+  const slug = String(rawCategory || "").trim().toLowerCase().slice(0, 32).replace(/[^a-z0-9_-]+/g, "_");
+  if (!slug) throw new Error("Category is required");
+  // Supabase first — upsert by primary key so re-saving the same slug is a
+  // safe no-op rather than a duplicate-key error.
+  if (supabaseEnabled) {
+    const up = await supabase.from("inventory_categories").upsert({ key: slug }, { onConflict: "key" });
+    if (up.error && !isSchemaMissError(up.error)) {
+      console.warn(`[inventory_categories] upsert fell back: ${up.error.message}`);
+    }
+  }
+  // Mirror to the file store so the dev fallback stays in sync.
+  const db = fileRead();
+  if (!Array.isArray(db.inventoryCategories)) db.inventoryCategories = [];
+  if (!db.inventoryCategories.includes(slug)) {
+    db.inventoryCategories.push(slug);
+    fileWrite(db);
+  }
+  return slug;
 }
 
 export async function moveInventory({ itemId, type, qty, note, who }) {
@@ -2110,6 +3531,10 @@ export async function moveInventory({ itemId, type, qty, note, who }) {
         note: moveRow.note, who: moveRow.who, at: moveRow.at,
       });
     } catch {}
+    // Cascade to expenses on a stock-IN movement.
+    if (t === "in") {
+      try { await maybeLogInventoryExpense(current, who, q); } catch {}
+    }
     return { item: { ...current, onHand: newOnHand, issued: newIssued }, movement: moveRow };
   }
 
@@ -2123,6 +3548,10 @@ export async function moveInventory({ itemId, type, qty, note, who }) {
   db.movements.unshift(moveRow);
   if (db.movements.length > 100) db.movements.length = 100;
   fileWrite(db);
+  // Cascade to expenses on a stock-IN movement.
+  if (t === "in") {
+    try { await maybeLogInventoryExpense(db.inventory[idx], who, q); } catch {}
+  }
   return { item: db.inventory[idx], movement: moveRow };
 }
 
@@ -2145,6 +3574,711 @@ export async function archiveInventoryItem(id) {
   const removed = db.inventory[idx];
   db.inventory.splice(idx, 1);
   fileWrite(db);
+  return removed;
+}
+
+// ---------- library ----------
+// Books are file-store-only for now (Supabase tables not yet provisioned).
+// Same pattern as the rest: a shape with `id`, plus a derived `available`
+// computed from active loans rather than stored, so the count can never get
+// out of sync with the loan log.
+
+export async function addBook(row) {
+  const id = row.id || `BOOK-${1000 + Math.floor(Math.random() * 8999)}`;
+  const filled = {
+    id,
+    title: String(row.title || "").trim(),
+    author: String(row.author || "").trim(),
+    category: String(row.category || "general").trim().toLowerCase().slice(0, 32).replace(/[^a-z0-9_-]+/g, "_") || "general",
+    isbn: String(row.isbn || "").trim() || null,
+    shelf: String(row.shelf || "").trim() || null,
+    totalCopies: Math.max(1, Number(row.totalCopies) || 1),
+    addedAt: new Date().toISOString(),
+  };
+  if (!filled.title) throw new Error("Title is required");
+  // Supabase first; fall back to the file store if the table isn't there yet
+  // or PostgREST hasn't refreshed its schema cache after the migration.
+  if (supabaseEnabled) {
+    const ins = await supabase.from("library").insert(toBook(filled)).select().maybeSingle();
+    if (!ins.error) {
+      // Mirror to file too so dashboards built off the file store stay aligned.
+      const db = fileRead();
+      if (!Array.isArray(db.library)) db.library = [];
+      db.library.unshift(filled); fileWrite(db);
+      return ins.data ? fromBook(ins.data) : filled;
+    }
+    if (!isSchemaMissError(ins.error)) {
+      throw new Error(ins.error.message);
+    }
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.library)) db.library = [];
+  db.library.unshift(filled);
+  fileWrite(db);
+  return filled;
+}
+
+export async function updateBook(id, patch) {
+  // Build the update payload + run the active-loan guard once (works against
+  // either backend by reading the file's loan log, which mirrors Supabase).
+  const db = fileRead();
+  const idx = (db.library || []).findIndex((b) => b.id === id);
+  const allowed = {};
+  if (typeof patch.title === "string")    allowed.title    = patch.title.trim();
+  if (typeof patch.author === "string")   allowed.author   = patch.author.trim();
+  if (typeof patch.category === "string") allowed.category = patch.category.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "_") || "general";
+  if (typeof patch.isbn === "string")     allowed.isbn     = patch.isbn.trim() || null;
+  if (typeof patch.shelf === "string")    allowed.shelf    = patch.shelf.trim() || null;
+  if (patch.totalCopies != null) {
+    const n = Math.max(0, Math.floor(Number(patch.totalCopies)));
+    const active = (db.libraryLoans || []).filter((l) => l.bookId === id && !l.returnedAt).length;
+    if (n < active) throw new Error(`Cannot set total below ${active} (active loans)`);
+    allowed.totalCopies = n;
+  }
+  if (supabaseEnabled) {
+    // Map allowed → snake_case columns for the Supabase patch.
+    const sbPatch = {};
+    if (allowed.title    != null) sbPatch.title    = allowed.title;
+    if (allowed.author   != null) sbPatch.author   = allowed.author;
+    if (allowed.category != null) sbPatch.category = allowed.category;
+    if (allowed.isbn     !== undefined) sbPatch.isbn  = allowed.isbn;
+    if (allowed.shelf    !== undefined) sbPatch.shelf = allowed.shelf;
+    if (allowed.totalCopies != null) sbPatch.total_copies = allowed.totalCopies;
+    const upd = await supabase.from("library").update(sbPatch).eq("id", id).select().maybeSingle();
+    if (!upd.error && upd.data) {
+      // Keep file mirror coherent.
+      if (idx !== -1) { db.library[idx] = { ...db.library[idx], ...allowed }; fileWrite(db); }
+      return fromBook(upd.data);
+    }
+    if (!isSchemaMissError(upd.error)) {
+      // PostgREST returned a real error (not a missing table) — surface it.
+      if (upd.error) throw new Error(upd.error.message);
+    }
+  }
+  if (idx === -1) return null;
+  db.library[idx] = { ...db.library[idx], ...allowed };
+  fileWrite(db);
+  return db.library[idx];
+}
+
+export async function removeBook(id) {
+  const db = fileRead();
+  const active = (db.libraryLoans || []).some((l) => l.bookId === id && !l.returnedAt);
+  if (active) throw new Error("Cannot remove a book with active loans — return them first");
+  let removed = null;
+  if (supabaseEnabled) {
+    const sel = await supabase.from("library").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      const del = await supabase.from("library").delete().eq("id", id);
+      if (!del.error) removed = fromBook(sel.data);
+    }
+  }
+  const idx = (db.library || []).findIndex((b) => b.id === id);
+  if (idx !== -1) {
+    if (!removed) removed = db.library[idx];
+    db.library.splice(idx, 1);
+    fileWrite(db);
+  }
+  return removed;
+}
+
+// Issue a book to a borrower (student or teacher). Decrements availability
+// implicitly via the loan log. Throws if no copies are free.
+export async function borrowBook({ bookId, borrowerType, borrowerId, borrowerName, dueDays, issuedBy }) {
+  if (!bookId) throw new Error("bookId required");
+  if (!["student", "teacher", "staff"].includes(borrowerType)) throw new Error("borrowerType must be student/teacher/staff");
+  if (!borrowerId) throw new Error("borrowerId required");
+  const db = fileRead();
+  const book = (db.library || []).find((b) => b.id === bookId);
+  if (!book) throw new Error("Book not found");
+  const active = (db.libraryLoans || []).filter((l) => l.bookId === bookId && !l.returnedAt);
+  if (active.length >= (book.totalCopies || 0)) throw new Error("No copies available right now");
+  // Block multiple active loans of the same book to the same borrower —
+  // common-sense rule and avoids confusion in the loans table.
+  if (active.some((l) => l.borrowerId === borrowerId && l.borrowerType === borrowerType)) {
+    throw new Error(`${borrowerName || borrowerId} already has this book on loan`);
+  }
+  const days = Math.max(1, Math.min(60, Number(dueDays) || 14));
+  const now = new Date();
+  const due = new Date(now.getTime() + days * 86400000);
+  const loan = {
+    id: `LOAN-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 999)}`,
+    bookId,
+    bookTitle: book.title,
+    borrowerType,
+    borrowerId,
+    borrowerName: borrowerName || borrowerId,
+    borrowedAt: now.toISOString(),
+    dueAt: due.toISOString(),
+    returnedAt: null,
+    issuedBy: issuedBy || "Librarian",
+  };
+  // Persist to Supabase first so the row appears for everyone (other
+  // sessions, Reports, dashboards). Mirror to file as a safety net.
+  if (supabaseEnabled) {
+    const ins = await supabase.from("library_loans").insert(toLoan(loan));
+    if (ins.error && !isSchemaMissError(ins.error)) {
+      console.warn(`[library_loans] insert fell back: ${ins.error.message}`);
+    }
+  }
+  if (!Array.isArray(db.libraryLoans)) db.libraryLoans = [];
+  db.libraryLoans.unshift(loan);
+  fileWrite(db);
+  return loan;
+}
+
+// Mark a loan returned. Idempotent — returning an already-returned loan is
+// a no-op and returns the existing row.
+export async function returnBook(loanId, returnedBy) {
+  if (!loanId) throw new Error("loanId required");
+  const returnedAt = new Date().toISOString();
+  const by = returnedBy || "Librarian";
+  if (supabaseEnabled) {
+    // Set returned_at + returned_by; only flip rows that aren't already
+    // returned so the call stays idempotent.
+    const upd = await supabase
+      .from("library_loans")
+      .update({ returned_at: returnedAt, returned_by: by })
+      .eq("id", loanId)
+      .is("returned_at", null)
+      .select()
+      .maybeSingle();
+    if (!upd.error && upd.data) {
+      // Mirror the update into the file copy so the dev fallback shows it.
+      const db = fileRead();
+      const idx = (db.libraryLoans || []).findIndex((l) => l.id === loanId);
+      if (idx !== -1) {
+        db.libraryLoans[idx] = { ...db.libraryLoans[idx], returnedAt, returnedBy: by };
+        fileWrite(db);
+      }
+      return fromLoan(upd.data);
+    }
+    if (upd.error && !isSchemaMissError(upd.error)) {
+      console.warn(`[library_loans] return fell back: ${upd.error.message}`);
+    }
+  }
+  const db = fileRead();
+  const idx = (db.libraryLoans || []).findIndex((l) => l.id === loanId);
+  if (idx === -1) return null;
+  if (db.libraryLoans[idx].returnedAt) return db.libraryLoans[idx];
+  db.libraryLoans[idx] = {
+    ...db.libraryLoans[idx],
+    returnedAt,
+    returnedBy: by,
+  };
+  fileWrite(db);
+  return db.libraryLoans[idx];
+}
+
+// ---------- subjects ----------
+// Manageable subject list used by the Timetable dropdown and Exams.
+// Falls back to a default set when the table doesn't exist yet OR there
+// are no rows so the dropdown is never empty.
+
+const DEFAULT_SUBJECTS = [
+  { id: "SUB-ENG", name: "English",        category: "language" },
+  { id: "SUB-TAM", name: "Tamil",          category: "language" },
+  { id: "SUB-HIN", name: "Hindi",          category: "language" },
+  { id: "SUB-MAT", name: "Maths",          category: "core" },
+  { id: "SUB-SCI", name: "Science",        category: "core" },
+  { id: "SUB-SST", name: "Social Science", category: "core" },
+  { id: "SUB-PT",  name: "PT",             category: "activity" },
+];
+
+export async function listSubjects() {
+  // Dedup by lowercased name so the defaults are never hidden by a single
+  // user-added subject — and so a default that's also in Supabase doesn't
+  // appear twice. Insertion order: Supabase first, then file, then bundled
+  // defaults; the first one wins per name.
+  const byName = new Map();
+  const upsert = (s) => {
+    if (!s?.name) return;
+    const key = String(s.name).toLowerCase();
+    if (!byName.has(key)) {
+      byName.set(key, {
+        id: s.id, name: s.name,
+        code: s.code || null,
+        category: s.category || "core",
+      });
+    }
+  };
+
+  if (supabaseEnabled) {
+    const r = await supabase.from("subjects").select("*").order("name");
+    if (!r.error && Array.isArray(r.data)) {
+      for (const s of r.data) upsert(s);
+    } else if (r.error && !isSchemaMissError(r.error)) {
+      console.warn(`[db] subjects fell back: ${r.error.message}`);
+    }
+  }
+  try {
+    const db = fileRead();
+    for (const s of (db.subjects || [])) upsert(s);
+  } catch {}
+  // ALWAYS merge in the bundled defaults so a Computer Science added
+  // yesterday doesn't make English / Tamil / Maths disappear.
+  for (const s of DEFAULT_SUBJECTS) upsert(s);
+
+  return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function addSubject({ name, code, category }) {
+  const clean = String(name || "").trim();
+  if (!clean) throw new Error("Subject name is required");
+  if (clean.length > 40) throw new Error("Name is too long");
+
+  // Reject duplicates (case-insensitive).
+  const existing = await listSubjects();
+  const lower = clean.toLowerCase();
+  if (existing.find((s) => s.name.toLowerCase() === lower)) {
+    throw new Error(`"${clean}" already exists`);
+  }
+
+  // Build a stable id from the first 6 letters so the same name typed twice
+  // in different cases produces the same id.
+  const slug = clean.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 6) || "SUB";
+  const row = {
+    id: `SUB-${slug}-${Math.floor(Math.random() * 999).toString().padStart(3, "0")}`,
+    name: clean,
+    code: code ? String(code).trim().toUpperCase().slice(0, 6) : null,
+    category: ["core", "language", "activity", "optional"].includes(category) ? category : "core",
+  };
+
+  if (supabaseEnabled) {
+    const ins = await supabase.from("subjects").insert(row).select().maybeSingle();
+    if (!ins.error && ins.data) return ins.data;
+    if (!isSchemaMissError(ins.error)) {
+      console.warn(`[db] subjects insert fell back to file: ${ins.error.message}`);
+    }
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.subjects)) db.subjects = [];
+  db.subjects.push(row);
+  fileWrite(db);
+  return row;
+}
+
+export async function removeSubject(id) {
+  if (!id) return null;
+  let removed = null;
+  if (supabaseEnabled) {
+    const sel = await supabase.from("subjects").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      await supabase.from("subjects").delete().eq("id", id);
+      removed = sel.data;
+    }
+  }
+  if (!removed) {
+    const db = fileRead();
+    const idx = (db.subjects || []).findIndex((s) => s.id === id);
+    if (idx !== -1) {
+      removed = db.subjects[idx];
+      db.subjects.splice(idx, 1);
+      fileWrite(db);
+    }
+  }
+  return removed;
+}
+
+// ---------- timetable ----------
+// Each entry pins a (class, day, period) slot to a subject + teacher. The
+// id is composite so adding the same slot twice replaces (upserts) — the
+// editor can post a new value without first deleting the old one.
+
+export async function setTimetableEntry({ cls, day, period, subject, teacherId, teacherName, room }) {
+  if (!cls)     throw new Error("cls required");
+  if (!day)     throw new Error("day required");
+  if (period == null) throw new Error("period required");
+  if (!subject) throw new Error("subject required");
+  const id = `TT-${cls}-${day}-${period}`.replace(/[^A-Za-z0-9_-]/g, "_");
+  const row = {
+    id, cls, day, period: Number(period),
+    subject: String(subject).trim(),
+    teacherId: teacherId || null,
+    teacherName: teacherName || null,
+    room: room ? String(room).trim() : null,
+    updatedAt: new Date().toISOString(),
+  };
+  // Supabase first via upsert on the composite id, so re-saving the same
+  // (cls, day, period) just overwrites the assignment.
+  if (supabaseEnabled) {
+    const up = await supabase.from("timetable").upsert(toTimetable(row), { onConflict: "id" });
+    if (up.error && !isSchemaMissError(up.error)) {
+      console.warn(`[timetable] upsert fell back: ${up.error.message}`);
+    }
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.timetable)) db.timetable = [];
+  const idx = db.timetable.findIndex((t) => t.id === id);
+  if (idx === -1) db.timetable.unshift(row);
+  else db.timetable[idx] = { ...db.timetable[idx], ...row };
+  fileWrite(db);
+  return row;
+}
+
+export async function removeTimetableEntry(id) {
+  if (!id) return null;
+  let removed = null;
+  if (supabaseEnabled) {
+    const sel = await supabase.from("timetable").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      const del = await supabase.from("timetable").delete().eq("id", id);
+      if (!del.error) removed = fromTimetable(sel.data);
+    }
+  }
+  const db = fileRead();
+  const idx = (db.timetable || []).findIndex((t) => t.id === id);
+  if (idx !== -1) {
+    if (!removed) removed = db.timetable[idx];
+    db.timetable.splice(idx, 1);
+    fileWrite(db);
+  }
+  return removed;
+}
+
+// Auto-compute a staff member's performance from real signals:
+//   own attendance · students' performance · contribution to school
+//
+// Composite formula:
+//   30% own attendance % (from teacher_attendance over the last 30 days)
+//   50% student performance (mean of student attendance % + exam % +
+//        daily log completion across the teacher's linkedClasses)
+//   20% contribution (awards × 15 + tasks done × 5 + logs posted × 2,
+//        capped at 100)
+//
+// Returns the updated staff row with attendance / tasks / score / status
+// fields overwritten by the computed values, plus a non-persisted
+// `breakdown` object describing exactly what fed the score (for the UI).
+export async function recomputeStaffPerformance(staffId) {
+  if (!staffId) return null;
+
+  // Pull current staff + everything we need in one big read. Cheap enough
+  // for an on-demand recompute; we don't need to do this on every page load.
+  let staff = null;
+  if (supabaseEnabled) {
+    const sel = await supabase.from("staff").select("*").eq("id", staffId).maybeSingle();
+    if (sel.data) staff = fromStaff(sel.data);
+  }
+  if (!staff) {
+    const db = fileRead();
+    staff = (db.staff || []).find((s) => s.id === staffId) || null;
+  }
+  if (!staff) return null;
+
+  // Resolve the teacher's user id + assigned classes via email match.
+  // teacher_attendance and tasks are keyed off the user.id, not the
+  // staff.id, so we need this hop.
+  let userId = null;
+  let linkedClasses = [];
+  let teacherEmail = (staff.email || "").toLowerCase();
+  try {
+    const users = await listUsers();
+    const u = users.find((x) => (x.email || "").toLowerCase() === teacherEmail && x.role === "teacher");
+    if (u) {
+      userId = u.id;
+      linkedClasses = Array.isArray(u.linkedClasses) ? u.linkedClasses : [];
+    }
+  } catch {}
+
+  const today = new Date();
+  const thirtyDaysAgo = new Date(today.getTime() - 30 * 86400000).toISOString().slice(0, 10);
+
+  // ------ A. own attendance ------
+  let attendanceScore = Number(staff.attendance) || 0; // fallback to whatever's on the row
+  let attendancePresent = 0, attendanceTotal = 0;
+  if (userId) {
+    try {
+      const recs = await listTeacherAttendance({
+        teacherId: userId, fromDate: thirtyDaysAgo,
+      });
+      attendanceTotal = recs.length;
+      attendancePresent = recs.filter((r) => r.status === "present").length;
+      if (attendanceTotal > 0) {
+        attendanceScore = Math.round((attendancePresent / attendanceTotal) * 100);
+      }
+    } catch {}
+  }
+
+  // ------ B. students' performance ------
+  let studentScore = Number(staff.tasks) || 0; // fallback
+  let studentBreakdown = { studentCount: 0, attendance: null, examPct: null, homeworkPct: null };
+  if (linkedClasses.length > 0) {
+    const classSet = new Set(linkedClasses.map((c) => String(c).toUpperCase()));
+    let students = [];
+    try {
+      const data = await readAllData();
+      students = (data.addedStudents || []).filter(
+        (s) => classSet.has(String(s.cls || "").toUpperCase())
+      );
+    } catch {}
+    studentBreakdown.studentCount = students.length;
+
+    if (students.length > 0) {
+      // 1. Avg attendance % across the teacher's students.
+      const avgStudentAtt = Math.round(
+        students.reduce((a, s) => a + (Number(s.attendance) || 0), 0) / students.length
+      );
+      studentBreakdown.attendance = avgStudentAtt;
+
+      // 2. Avg exam score % across the teacher's classes (if any exams exist).
+      let examPct = null;
+      try {
+        const examsAll = await listExams();
+        const classExams = (examsAll || []).filter(
+          (e) => classSet.has(String(e.cls || "").toUpperCase())
+        );
+        if (classExams.length > 0) {
+          const examIds = new Set(classExams.map((e) => e.id));
+          const studentIds = new Set(students.map((s) => s.id));
+          const marks = await listMarks();
+          const relevant = (marks || []).filter(
+            (m) => examIds.has(m.examId) && studentIds.has(m.studentId)
+          );
+          if (relevant.length > 0) {
+            const total = relevant.reduce(
+              (a, m) => a + ((Number(m.score) || 0) / Math.max(1, Number(m.maxMarks) || 100)) * 100,
+              0
+            );
+            examPct = Math.round(total / relevant.length);
+          }
+        }
+      } catch {}
+      studentBreakdown.examPct = examPct;
+
+      // 3. Daily-log completion % across the teacher's students (last 30 days).
+      let hwPct = null;
+      try {
+        const data = await readAllData();
+        const logs = (data.dailyLogs || []).filter(
+          (l) => students.find((s) => s.id === l.studentId) && l.date >= thirtyDaysAgo
+        );
+        if (logs.length > 0) {
+          const completed = logs.filter(
+            (l) => l.homeworkStatus === "completed" && l.classworkStatus === "completed"
+          ).length;
+          hwPct = Math.round((completed / logs.length) * 100);
+        }
+      } catch {}
+      studentBreakdown.homeworkPct = hwPct;
+
+      // Mean of whatever signals we have.
+      const parts = [avgStudentAtt, examPct, hwPct].filter((v) => v != null);
+      if (parts.length > 0) {
+        studentScore = Math.round(parts.reduce((a, b) => a + b, 0) / parts.length);
+      }
+    }
+  }
+
+  // ------ C. contribution to school ------
+  let awardsCount = 0, logsPostedCount = 0, tasksDoneCount = 0;
+  try {
+    const awards = await listStaffAwards(staffId);
+    awardsCount = awards.length;
+  } catch {}
+  if (userId || teacherEmail) {
+    try {
+      const data = await readAllData();
+      // Daily logs posted by this teacher in the last 30 days.
+      logsPostedCount = (data.dailyLogs || []).filter(
+        (l) => (l.postedBy === staff.name || l.postedBy === teacherEmail) && l.date >= thirtyDaysAgo
+      ).length;
+      // Tasks completed (assigned_to matches user id OR email; status === 'done').
+      tasksDoneCount = (data.tasks || []).filter(
+        (t) => t.status === "done" &&
+          (t.assignedTo === userId || t.assignedToEmail === teacherEmail || t.assignedToName === staff.name)
+      ).length;
+    } catch {}
+  }
+  const contributionScore = Math.min(
+    100,
+    awardsCount * 15 + tasksDoneCount * 5 + logsPostedCount * 2
+  );
+
+  // ------ Composite ------
+  const score = Math.round(
+    attendanceScore * 0.30 +
+    studentScore    * 0.50 +
+    contributionScore * 0.20
+  );
+  const status = score >= 85 ? "top" : score >= 65 ? "ok" : "low";
+
+  const next = {
+    attendance: attendanceScore,
+    tasks: studentScore,    // repurposed: now stores the student-perf component
+    score, status,
+  };
+
+  if (supabaseEnabled) {
+    const upd = await supabase.from("staff").update(next).eq("id", staffId).select().maybeSingle();
+    if (!upd.error && upd.data) {
+      const out = fromStaff(upd.data);
+      out.breakdown = {
+        attendance: { score: attendanceScore, present: attendancePresent, total: attendanceTotal },
+        student:    { score: studentScore, ...studentBreakdown, classes: linkedClasses },
+        contribution: { score: contributionScore, awards: awardsCount, tasksDone: tasksDoneCount, logsPosted: logsPostedCount },
+      };
+      return out;
+    }
+  }
+  const db = fileRead();
+  const idx = (db.staff || []).findIndex((s) => s.id === staffId);
+  if (idx !== -1) {
+    db.staff[idx] = { ...db.staff[idx], ...next };
+    fileWrite(db);
+  }
+  return {
+    ...staff, ...next,
+    breakdown: {
+      attendance: { score: attendanceScore, present: attendancePresent, total: attendanceTotal },
+      student:    { score: studentScore, ...studentBreakdown, classes: linkedClasses },
+      contribution: { score: contributionScore, awards: awardsCount, tasksDone: tasksDoneCount, logsPosted: logsPostedCount },
+    },
+  };
+}
+
+// Manual override for the rare case where the principal needs to nudge the
+// numbers (e.g. a one-off correction). Returns the staff row after writing
+// the patch but does NOT recompute — the next recompute will overwrite.
+export async function updateStaffPerformance(id, patch = {}) {
+  if (!id) return null;
+  // No fields to patch → treat as a recompute request.
+  if (!("attendance" in patch) && !("tasks" in patch) && !("salary" in patch)) {
+    return recomputeStaffPerformance(id);
+  }
+  const clamp = (n) => Math.min(100, Math.max(0, Math.floor(Number(n) || 0)));
+  const next = {};
+  if ("attendance" in patch) next.attendance = clamp(patch.attendance);
+  if ("tasks" in patch)      next.tasks      = clamp(patch.tasks);
+  if ("salary" in patch)     next.salary     = Math.max(0, Math.floor(Number(patch.salary) || 0));
+
+  let current = null;
+  if (supabaseEnabled) {
+    const sel = await supabase.from("staff").select("*").eq("id", id).maybeSingle();
+    if (sel.data) current = fromStaff(sel.data);
+  }
+  if (!current) {
+    const db = fileRead();
+    current = (db.staff || []).find((s) => s.id === id) || null;
+  }
+  if (!current) return null;
+
+  const merged = { ...current, ...next };
+  const a = Number(merged.attendance) || 0;
+  const t = Number(merged.tasks) || 0;
+  let activity = 0;
+  try {
+    const awards = await listStaffAwards(id);
+    activity = Math.min(100, awards.length * 20);
+  } catch {}
+  merged.score = Math.round(a * 0.4 + t * 0.4 + activity * 0.2);
+  merged.status = merged.score >= 85 ? "top" : merged.score >= 65 ? "ok" : "low";
+  next.score = merged.score;
+  next.status = merged.status;
+
+  if (supabaseEnabled) {
+    const upd = await supabase.from("staff").update(next).eq("id", id).select().maybeSingle();
+    if (!upd.error && upd.data) return fromStaff(upd.data);
+  }
+  const db = fileRead();
+  const idx = (db.staff || []).findIndex((s) => s.id === id);
+  if (idx === -1) return null;
+  db.staff[idx] = { ...db.staff[idx], ...next };
+  fileWrite(db);
+  return db.staff[idx];
+}
+
+// ---------- staff awards ----------
+export async function listStaffAwards(staffId = null) {
+  let all = [];
+  if (supabaseEnabled) {
+    const q = supabase.from("staff_awards").select("*").order("created_at", { ascending: false });
+    const r = staffId ? await q.eq("staff_id", staffId) : await q;
+    if (!r.error && r.data) all = r.data.map(fromStaffAward);
+    else if (r.error && !isSchemaMissError(r.error)) {
+      console.warn(`[db] staff_awards select fell back to file: ${r.error.message}`);
+    }
+  }
+  if (all.length === 0) {
+    const db = fileRead();
+    const fileAwards = Array.isArray(db.staffAwards) ? db.staffAwards : [];
+    all = staffId ? fileAwards.filter((a) => a.staffId === staffId) : fileAwards;
+  }
+  return all;
+}
+
+export async function addStaffAward({ staffId, title, citation, category, awardedAt, awardedBy }) {
+  if (!staffId) throw new Error("staffId required");
+  if (!title || !String(title).trim()) throw new Error("Award title is required");
+
+  // Stamp a friendly month-year if caller didn't supply one.
+  const friendly = awardedAt && String(awardedAt).trim()
+    ? String(awardedAt).trim()
+    : new Date().toLocaleDateString("en-IN", { month: "short", year: "numeric" });
+
+  // Resolve staff name once so the award is self-contained for display
+  // (so deleting/renaming a staff row later doesn't blank out the citation).
+  let staffName = null;
+  if (supabaseEnabled) {
+    const sel = await supabase.from("staff").select("name").eq("id", staffId).maybeSingle();
+    if (sel.data?.name) staffName = sel.data.name;
+  }
+  if (!staffName) {
+    const db = fileRead();
+    staffName = (db.staff || []).find((s) => s.id === staffId)?.name || null;
+  }
+
+  const award = {
+    id: `AWD-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 999)}`,
+    staffId,
+    staffName,
+    title: String(title).trim(),
+    citation: citation ? String(citation).trim() : null,
+    category: ["recognition", "attendance", "academic", "service"].includes(category) ? category : "recognition",
+    awardedAt: friendly,
+    awardedBy: awardedBy || null,
+  };
+
+  if (supabaseEnabled) {
+    const ins = await supabase.from("staff_awards").insert(toStaffAward(award)).select().maybeSingle();
+    if (!ins.error && ins.data) {
+      // Recompute the staff member's score so the new award lifts their activity.
+      try { await updateStaffPerformance(staffId, {}); } catch {}
+      return fromStaffAward(ins.data);
+    }
+    if (!isSchemaMissError(ins.error)) {
+      console.warn(`[db] staff_awards insert fell back to file: ${ins.error.message}`);
+    }
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.staffAwards)) db.staffAwards = [];
+  db.staffAwards.unshift(award);
+  fileWrite(db);
+  try { await updateStaffPerformance(staffId, {}); } catch {}
+  return award;
+}
+
+export async function removeStaffAward(awardId) {
+  if (!awardId) return null;
+  let removed = null;
+  if (supabaseEnabled) {
+    const sel = await supabase.from("staff_awards").select("*").eq("id", awardId).maybeSingle();
+    if (sel.data) {
+      await supabase.from("staff_awards").delete().eq("id", awardId);
+      removed = fromStaffAward(sel.data);
+    }
+  }
+  if (!removed) {
+    const db = fileRead();
+    const idx = (db.staffAwards || []).findIndex((a) => a.id === awardId);
+    if (idx !== -1) {
+      removed = db.staffAwards[idx];
+      db.staffAwards.splice(idx, 1);
+      fileWrite(db);
+    }
+  }
+  if (removed?.staffId) {
+    try { await updateStaffPerformance(removed.staffId, {}); } catch {}
+  }
   return removed;
 }
 
@@ -2261,7 +4395,21 @@ export async function listUsers() {
   }
   const db = fileRead();
   for (const u of (db.authUsers || [])) {
-    if (!out.has(u.id)) out.set(u.id, u);
+    if (out.has(u.id)) continue;
+    // File users are stored camelCase; normalise through fromUser (which
+    // expects snake_case) so callers reliably get linkedClasses computed
+    // from linkedId. Without this, /api/chat couldn't tell whether a
+    // teacher was assigned to the child's class and rejected sends.
+    const normalised = fromUser({
+      id: u.id,
+      email: u.email,
+      role: u.role,
+      name: u.name,
+      password_hash: u.passwordHash,
+      linked_id: u.linkedId,
+      created_at: u.createdAt,
+    });
+    if (normalised) out.set(u.id, normalised);
   }
   return Array.from(out.values());
 }
@@ -2276,6 +4424,168 @@ export async function listUsers() {
 //   { removeClass: "2-A" }         — remove just this class from the list
 //
 // Returns the updated user, or null if not found.
+// Self-service profile update. Used by /api/auth/profile so a signed-in
+// user can rename themselves and change their password without admin help.
+//
+// Phone is still read-only here (lives on the staff or student record and
+// is admin-managed). Email IS editable — the new value cascades to the
+// linked staff row so a teacher's account stays in sync with their staff
+// record. Parent users link to students by linked_id, so changing a
+// parent's email leaves the student's parent contact phone untouched.
+// The caller is expected to have already verified the currentPassword if
+// `newPassword` is set.
+//
+// Cascades:
+//   - users.name (source of truth)
+//   - staff.name  where staff.email === user.email
+//   - users.email
+//   - staff.email where staff.email === user.oldEmail
+//
+// Returns the updated user. Throws if the requested email is malformed
+// or already taken by another account.
+export async function updateMyProfile(userId, { name, email, newPassword } = {}) {
+  if (!userId) return null;
+
+  const fields = {};
+  const cleanName = typeof name === "string" ? name.trim() : null;
+  if (cleanName) fields.name = cleanName;
+
+  // Email — basic format check + uniqueness against any *other* user.
+  // We need the previous email to cascade to the staff row, so resolve
+  // the current user before applying the update.
+  let oldEmail = null;
+  const cleanEmail = typeof email === "string" ? email.trim().toLowerCase() : null;
+  if (cleanEmail) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      throw new Error("Email format is invalid");
+    }
+    const current = await getUserById(userId);
+    if (!current) return null;
+    oldEmail = String(current.email || "").toLowerCase();
+    if (cleanEmail !== oldEmail) {
+      const conflict = await getUserByEmail(cleanEmail);
+      if (conflict && conflict.id !== userId) {
+        throw new Error("That email is already in use by another account");
+      }
+      fields.email = cleanEmail;
+    }
+  }
+
+  if (newPassword) {
+    const { hashPassword } = require("./auth.js");
+    fields.passwordHash = await hashPassword(newPassword);
+  }
+
+  if (Object.keys(fields).length === 0) {
+    // Nothing to do — return current row.
+    return getUserById(userId);
+  }
+
+  // 1. Update users row (Supabase first, then file fallback).
+  let updated = null;
+  if (supabaseEnabled) {
+    const dbFields = {};
+    if (fields.name)         dbFields.name = fields.name;
+    if (fields.email)        dbFields.email = fields.email;
+    if (fields.passwordHash) dbFields.password_hash = fields.passwordHash;
+    const r = await supabase.from("users").update(dbFields).eq("id", userId).select().maybeSingle();
+    if (!r.error && r.data) updated = fromUser(r.data);
+    else if (r.error && /duplicate|unique/i.test(r.error.message || "")) {
+      throw new Error("That email is already in use by another account");
+    }
+  }
+  if (!updated) {
+    const db = fileRead();
+    if (!Array.isArray(db.authUsers)) db.authUsers = [];
+    let idx = db.authUsers.findIndex((u) => u.id === userId);
+    // Lazy-seed from DEMO_ACCOUNTS on first edit.
+    if (idx === -1) {
+      try {
+        const seed = require("./seed-users.js");
+        const demo = (seed.DEMO_ACCOUNTS || []).find((a) => a.id === userId);
+        if (demo) {
+          db.authUsers.push({
+            id: demo.id, email: demo.email, role: demo.role, name: demo.name,
+            linkedId: demo.linkedId || null,
+            createdAt: new Date().toISOString(),
+          });
+          idx = db.authUsers.length - 1;
+        }
+      } catch {}
+    }
+    if (idx === -1) return null;
+    // File-side uniqueness check (Supabase already enforces the index).
+    if (fields.email) {
+      const taken = db.authUsers.some((u, i) => i !== idx && (u.email || "").toLowerCase() === fields.email);
+      if (taken) throw new Error("That email is already in use by another account");
+    }
+    const merged = {
+      ...db.authUsers[idx],
+      ...(fields.name  ? { name: fields.name }   : {}),
+      ...(fields.email ? { email: fields.email } : {}),
+      ...(fields.passwordHash ? { passwordHash: fields.passwordHash } : {}),
+    };
+    db.authUsers[idx] = merged;
+    fileWrite(db);
+    updated = fromUser({
+      id: merged.id, email: merged.email, role: merged.role, name: merged.name,
+      password_hash: merged.passwordHash, linked_id: merged.linkedId,
+      created_at: merged.createdAt,
+    });
+  }
+
+  // 2. Cascade name to staff record (if any). When the email itself is
+  // changing we have to match against the *previous* email — otherwise
+  // it'd be the same email either way.
+  const matchEmail = (oldEmail || updated?.email || "").toLowerCase();
+  if (fields.name && matchEmail) {
+    if (supabaseEnabled) {
+      try {
+        await supabase.from("staff").update({ name: fields.name }).eq("email", matchEmail);
+      } catch {}
+    }
+    try {
+      const db = fileRead();
+      if (Array.isArray(db.staff)) {
+        let touched = false;
+        for (let i = 0; i < db.staff.length; i++) {
+          if ((db.staff[i].email || "").toLowerCase() === matchEmail) {
+            db.staff[i] = { ...db.staff[i], name: fields.name };
+            touched = true;
+          }
+        }
+        if (touched) fileWrite(db);
+      }
+    } catch {}
+  }
+
+  // 3. Cascade email to the linked staff row. Parents link to students
+  // by linked_id (student id), not email — so no student-side change is
+  // needed; the parent contact phone on the student row is unaffected.
+  if (fields.email && oldEmail && oldEmail !== fields.email) {
+    if (supabaseEnabled) {
+      try {
+        await supabase.from("staff").update({ email: fields.email }).eq("email", oldEmail);
+      } catch {}
+    }
+    try {
+      const db = fileRead();
+      if (Array.isArray(db.staff)) {
+        let touched = false;
+        for (let i = 0; i < db.staff.length; i++) {
+          if ((db.staff[i].email || "").toLowerCase() === oldEmail) {
+            db.staff[i] = { ...db.staff[i], email: fields.email };
+            touched = true;
+          }
+        }
+        if (touched) fileWrite(db);
+      }
+    } catch {}
+  }
+
+  return updated;
+}
+
 export async function updateUser(id, patch) {
   if (!id) return null;
 
@@ -2503,6 +4813,11 @@ export async function markAttendanceBulk({ date, cls, postedBy, marks }) {
 export async function addComplaint(row) {
   const id = "CMP-" + String(Math.floor(Math.random() * 1e5)).padStart(5, "0");
   const today = new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
+  // Whitelist: only the three buckets parents see in the picker. Anything
+  // else (or null) drops to undefined so older complaints don't get a
+  // bogus category back-filled.
+  const ALLOWED_CATS = new Set(["academic", "non_academic", "transport"]);
+  const cat = ALLOWED_CATS.has(row.category) ? row.category : null;
   const newRow = {
     id,
     student: row.student || "",
@@ -2511,6 +4826,10 @@ export async function addComplaint(row) {
     parent: row.parent || "",
     issue: (row.issue || "").trim(),
     type: row.type === "leave_request" ? "leave_request" : "general",
+    // Stored on the row so the staff filter strip and CSV export can use it.
+    // Only set for general complaints — leave requests go straight to the
+    // class teacher and don't need a bucket.
+    category: row.type === "leave_request" ? null : cat,
     date: today,
     status: "Open",
     assigned: row.assigned || "Admin Desk",
@@ -2553,4 +4872,1099 @@ function fileAddComplaint(newRow) {
   });
   fileWrite(db);
   return db.complaints[0];
+}
+
+// =====================================================================
+// v2: expense categories, donor-form submissions, notifications.
+// All cloud + file dual-write so the app keeps working through outages.
+// =====================================================================
+
+// ---------- expense_categories ------------------------------------------
+const fromExpenseCategory = (r) => r ? ({
+  id: r.id, name: r.category_name, type: r.category_type,
+  createdBy: r.created_by, createdAt: r.created_at,
+}) : null;
+
+export async function listExpenseCategories({ type } = {}) {
+  if (supabaseEnabled) {
+    let q = supabase.from("expense_categories").select("*").order("created_at", { ascending: false });
+    if (type) q = q.eq("category_type", type);
+    const sel = await q;
+    if (!sel.error) return (sel.data || []).map(fromExpenseCategory);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] expense_categories fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  const all = Array.isArray(db.expenseCategories) ? db.expenseCategories : [];
+  return type ? all.filter((c) => c.type === type) : all;
+}
+
+export async function addExpenseCategory({ name, type = "school", createdBy = null } = {}) {
+  const trimmed = String(name || "").trim();
+  if (!trimmed) throw new Error("Category name is required");
+  if (trimmed.length > 60) throw new Error("Category name is too long");
+  const t = type === "trust" ? "trust" : "school";
+  const id = `EC-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 999)}`;
+  const row = { id, category_name: trimmed, category_type: t, created_by: createdBy };
+  if (supabaseEnabled) {
+    const ins = await supabase.from("expense_categories").insert(row).select().single();
+    if (!ins.error) return fromExpenseCategory(ins.data);
+    if (!isSchemaMissError(ins.error)) throw new Error(ins.error.message);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.expenseCategories)) db.expenseCategories = [];
+  // Reject duplicate (name, type) combo.
+  const exists = db.expenseCategories.find((c) => c.name.toLowerCase() === trimmed.toLowerCase() && c.type === t);
+  if (exists) return exists;
+  const local = { id, name: trimmed, type: t, createdBy, createdAt: new Date().toISOString() };
+  db.expenseCategories.unshift(local);
+  fileWrite(db);
+  return local;
+}
+
+export async function removeExpenseCategory(id) {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("expense_categories").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      await supabase.from("expense_categories").delete().eq("id", id);
+      return fromExpenseCategory(sel.data);
+    }
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.expenseCategories)) db.expenseCategories = [];
+  const idx = db.expenseCategories.findIndex((c) => c.id === id);
+  if (idx === -1) return null;
+  const removed = db.expenseCategories[idx];
+  db.expenseCategories.splice(idx, 1);
+  fileWrite(db);
+  return removed;
+}
+
+// ---------- donor_form_submissions (public /donorform) ------------------
+const fromDonorFormSubmission = (r) => r ? ({
+  id: r.id, donorName: r.donor_name, phone: r.phone, email: r.email,
+  donationType: r.donation_type,
+  donationAmount: r.donation_amount != null ? Number(r.donation_amount) : null,
+  message: r.message, status: r.status, submittedAt: r.submitted_at,
+}) : null;
+
+export async function addDonorFormSubmission({ donorName, phone, email, donationType, donationAmount, message } = {}) {
+  const name = String(donorName || "").trim();
+  if (!name) throw new Error("Donor name is required");
+  const amt = Number(donationAmount);
+  const row = {
+    id: `DFS-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 9999)}`,
+    donor_name: name,
+    phone: phone ? String(phone).trim() : null,
+    email: email ? String(email).trim().toLowerCase() : null,
+    donation_type: donationType || "one_time",
+    donation_amount: Number.isFinite(amt) && amt > 0 ? amt : null,
+    message: message ? String(message).trim() : null,
+    status: "pending",
+  };
+  if (supabaseEnabled) {
+    const ins = await supabase.from("donor_form_submissions").insert(row).select().single();
+    if (!ins.error) return fromDonorFormSubmission(ins.data);
+    if (!isSchemaMissError(ins.error)) throw new Error(ins.error.message);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.donorFormSubmissions)) db.donorFormSubmissions = [];
+  const local = {
+    id: row.id, donorName: row.donor_name, phone: row.phone, email: row.email,
+    donationType: row.donation_type, donationAmount: row.donation_amount,
+    message: row.message, status: "pending", submittedAt: new Date().toISOString(),
+  };
+  db.donorFormSubmissions.unshift(local);
+  fileWrite(db);
+  return local;
+}
+
+export async function listDonorFormSubmissions({ status, limit = 200 } = {}) {
+  if (supabaseEnabled) {
+    let q = supabase.from("donor_form_submissions").select("*").order("submitted_at", { ascending: false }).limit(limit);
+    if (status) q = q.eq("status", status);
+    const sel = await q;
+    if (!sel.error) return (sel.data || []).map(fromDonorFormSubmission);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] donor_form_submissions fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  let all = Array.isArray(db.donorFormSubmissions) ? db.donorFormSubmissions : [];
+  if (status) all = all.filter((s) => s.status === status);
+  return all.slice(0, limit);
+}
+
+export async function updateDonorFormSubmissionStatus(id, status) {
+  if (!["pending", "accepted", "rejected"].includes(status)) {
+    throw new Error("Invalid status");
+  }
+  if (supabaseEnabled) {
+    const upd = await supabase.from("donor_form_submissions").update({ status }).eq("id", id).select().maybeSingle();
+    if (!upd.error && upd.data) return fromDonorFormSubmission(upd.data);
+    if (upd.error && !isSchemaMissError(upd.error)) console.warn(`[db] donor_form_submissions update fell back: ${upd.error.message}`);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.donorFormSubmissions)) db.donorFormSubmissions = [];
+  const idx = db.donorFormSubmissions.findIndex((s) => s.id === id);
+  if (idx === -1) return null;
+  db.donorFormSubmissions[idx] = { ...db.donorFormSubmissions[idx], status };
+  fileWrite(db);
+  return db.donorFormSubmissions[idx];
+}
+
+// ---------- notifications -----------------------------------------------
+const fromNotification = (r) => r ? ({
+  id: r.id, userId: r.user_id, type: r.notification_type,
+  title: r.title, description: r.description, redirectUrl: r.redirect_url,
+  isRead: !!r.is_read, createdAt: r.created_at,
+}) : null;
+
+export async function addNotification({ userId, type, title, description = null, redirectUrl = null } = {}) {
+  if (!userId || !type || !title) throw new Error("userId, type, title required");
+  const id = `NTF-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 9999)}`;
+  const row = {
+    id, user_id: userId, notification_type: type, title,
+    description, redirect_url: redirectUrl, is_read: false,
+  };
+  if (supabaseEnabled) {
+    const ins = await supabase.from("notifications").insert(row).select().single();
+    if (!ins.error) return fromNotification(ins.data);
+    if (!isSchemaMissError(ins.error)) console.warn(`[db] notifications insert fell back: ${ins.error.message}`);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.notifications)) db.notifications = [];
+  const local = { id, userId, type, title, description, redirectUrl, isRead: false, createdAt: new Date().toISOString() };
+  db.notifications.unshift(local);
+  fileWrite(db);
+  return local;
+}
+
+// Broadcast to every user with the given role(s). Used when a parent
+// messages admin, a donor submits the public form, etc.
+export async function notifyRole(roles, { type, title, description = null, redirectUrl = null } = {}) {
+  const target = Array.isArray(roles) ? roles : [roles];
+  const users = await listUsers();
+  const recipients = users.filter((u) => target.includes(u.role));
+  const out = [];
+  for (const u of recipients) {
+    try { out.push(await addNotification({ userId: u.id, type, title, description, redirectUrl })); }
+    catch (e) { console.warn(`[db] notify failed for ${u.id}: ${e.message}`); }
+  }
+  return out;
+}
+
+export async function listNotifications(userId, { unreadOnly = false, limit = 50 } = {}) {
+  if (!userId) return [];
+  if (supabaseEnabled) {
+    let q = supabase.from("notifications").select("*").eq("user_id", userId).order("created_at", { ascending: false }).limit(limit);
+    if (unreadOnly) q = q.eq("is_read", false);
+    const sel = await q;
+    if (!sel.error) return (sel.data || []).map(fromNotification);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] notifications fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  let all = (Array.isArray(db.notifications) ? db.notifications : []).filter((n) => n.userId === userId);
+  if (unreadOnly) all = all.filter((n) => !n.isRead);
+  return all.slice(0, limit);
+}
+
+export async function markNotificationRead(id, userId) {
+  if (supabaseEnabled) {
+    const upd = await supabase.from("notifications").update({ is_read: true }).eq("id", id).eq("user_id", userId).select().maybeSingle();
+    if (!upd.error && upd.data) return fromNotification(upd.data);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.notifications)) db.notifications = [];
+  const idx = db.notifications.findIndex((n) => n.id === id && n.userId === userId);
+  if (idx === -1) return null;
+  db.notifications[idx] = { ...db.notifications[idx], isRead: true };
+  fileWrite(db);
+  return db.notifications[idx];
+}
+
+export async function markAllNotificationsRead(userId) {
+  if (supabaseEnabled) {
+    await supabase.from("notifications").update({ is_read: true }).eq("user_id", userId).eq("is_read", false);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.notifications)) db.notifications = [];
+  let touched = 0;
+  for (let i = 0; i < db.notifications.length; i++) {
+    if (db.notifications[i].userId === userId && !db.notifications[i].isRead) {
+      db.notifications[i] = { ...db.notifications[i], isRead: true };
+      touched++;
+    }
+  }
+  if (touched) fileWrite(db);
+  return touched;
+}
+
+// ---------- leave_requests (students + teachers) ------------------------
+const fromLeaveRequest = (r) => r ? ({
+  id: r.id,
+  requesterType: r.requester_type,
+  requesterId: r.requester_id,
+  leaveType: r.leave_type,
+  reason: r.reason,
+  fromDate: r.from_date,
+  toDate: r.to_date,
+  approvalStatus: r.approval_status,
+  approvedBy: r.approved_by,
+  approvedAt: r.approved_at,
+  createdAt: r.created_at,
+}) : null;
+
+export async function addLeaveRequest({
+  requesterType, requesterId,
+  leaveType = "casual", reason = "",
+  fromDate, toDate,
+  requesterName, requesterCls,
+} = {}) {
+  if (!["student", "teacher"].includes(requesterType)) {
+    throw new Error("requesterType must be 'student' or 'teacher'");
+  }
+  if (!requesterId) throw new Error("requesterId required");
+  if (!fromDate || !toDate) throw new Error("fromDate and toDate required");
+  if (new Date(toDate) < new Date(fromDate)) throw new Error("toDate must be on/after fromDate");
+
+  const id = `LR-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 9999)}`;
+  const row = {
+    id,
+    requester_type: requesterType,
+    requester_id: requesterId,
+    leave_type: leaveType,
+    reason: String(reason || ""),
+    from_date: fromDate,
+    to_date: toDate,
+    approval_status: "pending",
+  };
+  if (supabaseEnabled) {
+    const ins = await supabase.from("leave_requests").insert(row).select().single();
+    if (!ins.error) return { ...fromLeaveRequest(ins.data), requesterName, requesterCls };
+    if (!isSchemaMissError(ins.error)) throw new Error(ins.error.message);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.leaveRequests)) db.leaveRequests = [];
+  const local = {
+    id, requesterType, requesterId, leaveType,
+    reason: row.reason, fromDate, toDate,
+    approvalStatus: "pending", approvedBy: null, approvedAt: null,
+    createdAt: new Date().toISOString(),
+    requesterName, requesterCls,
+  };
+  db.leaveRequests.unshift(local);
+  fileWrite(db);
+  return local;
+}
+
+export async function listLeaveRequests({ status, requesterType, requesterId, limit = 200 } = {}) {
+  if (supabaseEnabled) {
+    let q = supabase.from("leave_requests").select("*").order("created_at", { ascending: false }).limit(limit);
+    if (status)        q = q.eq("approval_status", status);
+    if (requesterType) q = q.eq("requester_type", requesterType);
+    if (requesterId)   q = q.eq("requester_id", requesterId);
+    const sel = await q;
+    if (!sel.error) return (sel.data || []).map(fromLeaveRequest);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] leave_requests fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  let all = Array.isArray(db.leaveRequests) ? db.leaveRequests : [];
+  if (status)        all = all.filter((r) => r.approvalStatus === status);
+  if (requesterType) all = all.filter((r) => r.requesterType === requesterType);
+  if (requesterId)   all = all.filter((r) => r.requesterId === requesterId);
+  return all.slice(0, limit);
+}
+
+export async function updateLeaveRequestStatus(id, { status, approvedBy } = {}) {
+  if (!["pending", "approved", "rejected", "cancelled"].includes(status)) {
+    throw new Error("Invalid status");
+  }
+  const patch = {
+    approval_status: status,
+    approved_by: approvedBy || null,
+    approved_at: status === "pending" ? null : new Date().toISOString(),
+  };
+  if (supabaseEnabled) {
+    const upd = await supabase.from("leave_requests").update(patch).eq("id", id).select().maybeSingle();
+    if (!upd.error && upd.data) return fromLeaveRequest(upd.data);
+    if (upd.error && !isSchemaMissError(upd.error)) console.warn(`[db] leave_requests update fell back: ${upd.error.message}`);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.leaveRequests)) db.leaveRequests = [];
+  const idx = db.leaveRequests.findIndex((r) => r.id === id);
+  if (idx === -1) return null;
+  db.leaveRequests[idx] = {
+    ...db.leaveRequests[idx],
+    approvalStatus: status,
+    approvedBy: approvedBy || null,
+    approvedAt: status === "pending" ? null : new Date().toISOString(),
+  };
+  fileWrite(db);
+  return db.leaveRequests[idx];
+}
+
+// ---------- remarks_rewards (admin notes on students/teachers) ----------
+const fromRemarkReward = (r) => r ? ({
+  id: r.id,
+  targetType: r.target_type,
+  targetId: r.target_id,
+  type: r.type,
+  category: r.category,
+  description: r.description,
+  actionTaken: r.action_taken,
+  createdBy: r.created_by,
+  createdAt: r.created_at,
+}) : null;
+
+export async function addRemarkReward({
+  targetType, targetId,
+  type, category = null,
+  description, actionTaken = null,
+  createdBy = null,
+} = {}) {
+  if (!["student", "teacher"].includes(targetType)) {
+    throw new Error("targetType must be 'student' or 'teacher'");
+  }
+  if (!targetId)  throw new Error("targetId required");
+  if (!["reward", "remark"].includes(type)) {
+    throw new Error("type must be 'reward' or 'remark'");
+  }
+  if (!description || !String(description).trim()) {
+    throw new Error("description required");
+  }
+  const id = `RR-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 9999)}`;
+  const row = {
+    id,
+    target_type: targetType,
+    target_id: targetId,
+    type, category,
+    description: String(description).trim(),
+    action_taken: actionTaken ? String(actionTaken).trim() : null,
+    created_by: createdBy,
+  };
+  if (supabaseEnabled) {
+    const ins = await supabase.from("remarks_rewards").insert(row).select().single();
+    if (!ins.error) return fromRemarkReward(ins.data);
+    if (!isSchemaMissError(ins.error)) throw new Error(ins.error.message);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.remarksRewards)) db.remarksRewards = [];
+  const local = {
+    id, targetType, targetId, type, category,
+    description: row.description, actionTaken: row.action_taken,
+    createdBy, createdAt: new Date().toISOString(),
+  };
+  db.remarksRewards.unshift(local);
+  fileWrite(db);
+  return local;
+}
+
+export async function listRemarksRewards({ targetType, targetId, type, limit = 200 } = {}) {
+  if (supabaseEnabled) {
+    let q = supabase.from("remarks_rewards").select("*").order("created_at", { ascending: false }).limit(limit);
+    if (targetType) q = q.eq("target_type", targetType);
+    if (targetId)   q = q.eq("target_id", targetId);
+    if (type)       q = q.eq("type", type);
+    const sel = await q;
+    if (!sel.error) return (sel.data || []).map(fromRemarkReward);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] remarks_rewards fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  let all = Array.isArray(db.remarksRewards) ? db.remarksRewards : [];
+  if (targetType) all = all.filter((r) => r.targetType === targetType);
+  if (targetId)   all = all.filter((r) => r.targetId === targetId);
+  if (type)       all = all.filter((r) => r.type === type);
+  return all.slice(0, limit);
+}
+
+export async function removeRemarkReward(id) {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("remarks_rewards").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      await supabase.from("remarks_rewards").delete().eq("id", id);
+      return fromRemarkReward(sel.data);
+    }
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.remarksRewards)) db.remarksRewards = [];
+  const idx = db.remarksRewards.findIndex((r) => r.id === id);
+  if (idx === -1) return null;
+  const removed = db.remarksRewards[idx];
+  db.remarksRewards.splice(idx, 1);
+  fileWrite(db);
+  return removed;
+}
+
+// ---------- government_documents (admin-only vault) ---------------------
+const fromGovernmentDocument = (r) => r ? ({
+  id: r.id,
+  title: r.title,
+  documentType: r.document_type,
+  fileUrl: r.file_url,
+  expiryDate: r.expiry_date,
+  uploadedBy: r.uploaded_by,
+  notes: r.notes,
+  createdAt: r.created_at,
+}) : null;
+
+export async function addGovernmentDocument({
+  title, documentType = null, fileUrl = null,
+  expiryDate = null, uploadedBy = null, notes = null,
+} = {}) {
+  if (!title || !String(title).trim()) throw new Error("title required");
+  const id = `GOV-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 9999)}`;
+  const row = {
+    id,
+    title: String(title).trim(),
+    document_type: documentType || null,
+    file_url: fileUrl || null,
+    expiry_date: expiryDate || null,
+    uploaded_by: uploadedBy || null,
+    notes: notes ? String(notes).trim() : null,
+  };
+  if (supabaseEnabled) {
+    const ins = await supabase.from("government_documents").insert(row).select().single();
+    if (!ins.error) return fromGovernmentDocument(ins.data);
+    if (!isSchemaMissError(ins.error)) throw new Error(ins.error.message);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.governmentDocuments)) db.governmentDocuments = [];
+  const local = {
+    id, title: row.title, documentType: row.document_type,
+    fileUrl: row.file_url, expiryDate: row.expiry_date,
+    uploadedBy, notes: row.notes, createdAt: new Date().toISOString(),
+  };
+  db.governmentDocuments.unshift(local);
+  fileWrite(db);
+  return local;
+}
+
+export async function listGovernmentDocuments({ limit = 200 } = {}) {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("government_documents").select("*").order("created_at", { ascending: false }).limit(limit);
+    if (!sel.error) return (sel.data || []).map(fromGovernmentDocument);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] government_documents fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  return (Array.isArray(db.governmentDocuments) ? db.governmentDocuments : []).slice(0, limit);
+}
+
+export async function updateGovernmentDocument(id, patch = {}) {
+  const dbPatch = {};
+  if ("title"        in patch) dbPatch.title        = patch.title;
+  if ("documentType" in patch) dbPatch.document_type = patch.documentType;
+  if ("fileUrl"      in patch) dbPatch.file_url     = patch.fileUrl;
+  if ("expiryDate"   in patch) dbPatch.expiry_date  = patch.expiryDate;
+  if ("notes"        in patch) dbPatch.notes        = patch.notes;
+  if (supabaseEnabled) {
+    const upd = await supabase.from("government_documents").update(dbPatch).eq("id", id).select().maybeSingle();
+    if (!upd.error && upd.data) return fromGovernmentDocument(upd.data);
+    if (upd.error && !isSchemaMissError(upd.error)) console.warn(`[db] gov_docs update fell back: ${upd.error.message}`);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.governmentDocuments)) db.governmentDocuments = [];
+  const idx = db.governmentDocuments.findIndex((d) => d.id === id);
+  if (idx === -1) return null;
+  db.governmentDocuments[idx] = { ...db.governmentDocuments[idx], ...patch };
+  fileWrite(db);
+  return db.governmentDocuments[idx];
+}
+
+export async function removeGovernmentDocument(id) {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("government_documents").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      await supabase.from("government_documents").delete().eq("id", id);
+      return fromGovernmentDocument(sel.data);
+    }
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.governmentDocuments)) db.governmentDocuments = [];
+  const idx = db.governmentDocuments.findIndex((d) => d.id === id);
+  if (idx === -1) return null;
+  const removed = db.governmentDocuments[idx];
+  db.governmentDocuments.splice(idx, 1);
+  fileWrite(db);
+  return removed;
+}
+
+// ---------- student_activities (extra-curricular ledger) ----------------
+const fromStudentActivity = (r) => r ? ({
+  id: r.id,
+  studentId: r.student_id,
+  activityName: r.activity_name,
+  eventName: r.event_name,
+  achievementLevel: r.achievement_level,
+  externalCompetition: !!r.external_competition,
+  activityLink: r.activity_link,
+  certificateDocument: r.certificate_document,
+  activityDate: r.activity_date,
+  createdBy: r.created_by,
+  createdAt: r.created_at,
+}) : null;
+
+export async function addStudentActivity({
+  studentId, activityName, eventName = null,
+  achievementLevel = "participation", externalCompetition = false,
+  activityLink = null, certificateDocument = null,
+  activityDate = null, createdBy = null,
+} = {}) {
+  if (!studentId)    throw new Error("studentId required");
+  if (!activityName || !String(activityName).trim()) throw new Error("activityName required");
+  const id = `SA-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 9999)}`;
+  const row = {
+    id,
+    student_id: studentId,
+    activity_name: String(activityName).trim(),
+    event_name: eventName ? String(eventName).trim() : null,
+    achievement_level: achievementLevel || "participation",
+    external_competition: !!externalCompetition,
+    activity_link: activityLink || null,
+    certificate_document: certificateDocument || null,
+    activity_date: activityDate || null,
+    created_by: createdBy,
+  };
+  if (supabaseEnabled) {
+    const ins = await supabase.from("student_activities").insert(row).select().single();
+    if (!ins.error) return fromStudentActivity(ins.data);
+    if (!isSchemaMissError(ins.error)) throw new Error(ins.error.message);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.studentActivities)) db.studentActivities = [];
+  const local = {
+    id, studentId, activityName: row.activity_name, eventName: row.event_name,
+    achievementLevel: row.achievement_level,
+    externalCompetition: row.external_competition,
+    activityLink: row.activity_link, certificateDocument: row.certificate_document,
+    activityDate: row.activity_date, createdBy, createdAt: new Date().toISOString(),
+  };
+  db.studentActivities.unshift(local);
+  fileWrite(db);
+  return local;
+}
+
+export async function listStudentActivities({ studentId, achievementLevel, externalCompetition, limit = 500 } = {}) {
+  if (supabaseEnabled) {
+    let q = supabase.from("student_activities").select("*").order("activity_date", { ascending: false, nullsFirst: false }).limit(limit);
+    if (studentId)        q = q.eq("student_id", studentId);
+    if (achievementLevel) q = q.eq("achievement_level", achievementLevel);
+    if (typeof externalCompetition === "boolean") q = q.eq("external_competition", externalCompetition);
+    const sel = await q;
+    if (!sel.error) return (sel.data || []).map(fromStudentActivity);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] student_activities fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  let all = Array.isArray(db.studentActivities) ? db.studentActivities : [];
+  if (studentId)        all = all.filter((a) => a.studentId === studentId);
+  if (achievementLevel) all = all.filter((a) => a.achievementLevel === achievementLevel);
+  if (typeof externalCompetition === "boolean") all = all.filter((a) => !!a.externalCompetition === externalCompetition);
+  return all.slice(0, limit);
+}
+
+export async function removeStudentActivity(id) {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("student_activities").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      await supabase.from("student_activities").delete().eq("id", id);
+      return fromStudentActivity(sel.data);
+    }
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.studentActivities)) db.studentActivities = [];
+  const idx = db.studentActivities.findIndex((a) => a.id === id);
+  if (idx === -1) return null;
+  const removed = db.studentActivities[idx];
+  db.studentActivities.splice(idx, 1);
+  fileWrite(db);
+  return removed;
+}
+
+// ---------- custom_roles + role_feature_access --------------------------
+const fromCustomRole = (r) => r ? ({
+  id: r.id, roleName: r.role_name,
+  createdBy: r.created_by, createdAt: r.created_at,
+}) : null;
+const fromRoleFeature = (r) => r ? ({
+  id: r.id, roleId: r.role_id, featureName: r.feature_name,
+  canView: !!r.can_view, canEdit: !!r.can_edit, canDelete: !!r.can_delete,
+}) : null;
+
+function slugifyRoleName(name) {
+  return String(name || "")
+    .toLowerCase().trim()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 40);
+}
+
+export async function listCustomRoles() {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("custom_roles").select("*").order("created_at", { ascending: false });
+    if (!sel.error) return (sel.data || []).map(fromCustomRole);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] custom_roles fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  return Array.isArray(db.customRoles) ? db.customRoles : [];
+}
+
+export async function addCustomRole({ roleName, createdBy = null } = {}) {
+  const name = String(roleName || "").trim();
+  if (!name) throw new Error("Role name required");
+  if (name.length > 60) throw new Error("Role name is too long");
+  const slug = slugifyRoleName(name);
+  if (!slug) throw new Error("Role name must contain letters or numbers");
+  const id = `role-${slug}-${Date.now().toString(36).slice(-4)}`;
+  const row = { id, role_name: name, created_by: createdBy };
+  if (supabaseEnabled) {
+    const ins = await supabase.from("custom_roles").insert(row).select().single();
+    if (!ins.error) return fromCustomRole(ins.data);
+    if (!isSchemaMissError(ins.error)) throw new Error(ins.error.message);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.customRoles)) db.customRoles = [];
+  // Reject same role name (case-insensitive).
+  const dup = db.customRoles.find((r) => r.roleName.toLowerCase() === name.toLowerCase());
+  if (dup) return dup;
+  const local = { id, roleName: name, createdBy, createdAt: new Date().toISOString() };
+  db.customRoles.unshift(local);
+  fileWrite(db);
+  return local;
+}
+
+export async function removeCustomRole(id) {
+  if (supabaseEnabled) {
+    // Children cascade via FK on role_feature_access.
+    const sel = await supabase.from("custom_roles").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      await supabase.from("custom_roles").delete().eq("id", id);
+      return fromCustomRole(sel.data);
+    }
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.customRoles)) db.customRoles = [];
+  const idx = db.customRoles.findIndex((r) => r.id === id);
+  if (idx === -1) return null;
+  const removed = db.customRoles[idx];
+  db.customRoles.splice(idx, 1);
+  // Cascade in file fallback.
+  if (Array.isArray(db.roleFeatureAccess)) {
+    db.roleFeatureAccess = db.roleFeatureAccess.filter((rf) => rf.roleId !== id);
+  }
+  fileWrite(db);
+  return removed;
+}
+
+export async function listRoleFeatureAccess(roleId) {
+  if (supabaseEnabled) {
+    const sel = await supabase.from("role_feature_access").select("*").eq("role_id", roleId);
+    if (!sel.error) return (sel.data || []).map(fromRoleFeature);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] role_feature_access fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  return (Array.isArray(db.roleFeatureAccess) ? db.roleFeatureAccess : []).filter((rf) => rf.roleId === roleId);
+}
+
+export async function setRoleFeatureAccess(roleId, featureName, { canView = true, canEdit = false, canDelete = false } = {}) {
+  if (!roleId)      throw new Error("roleId required");
+  if (!featureName) throw new Error("featureName required");
+  const id = `${roleId}::${featureName}`;
+  const row = {
+    id, role_id: roleId, feature_name: featureName,
+    can_view: !!canView, can_edit: !!canEdit, can_delete: !!canDelete,
+  };
+  if (supabaseEnabled) {
+    const up = await supabase.from("role_feature_access").upsert(row, { onConflict: "role_id,feature_name" }).select().maybeSingle();
+    if (!up.error && up.data) return fromRoleFeature(up.data);
+    if (up.error && !isSchemaMissError(up.error)) console.warn(`[db] role_feature_access upsert fell back: ${up.error.message}`);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.roleFeatureAccess)) db.roleFeatureAccess = [];
+  const idx = db.roleFeatureAccess.findIndex((rf) => rf.roleId === roleId && rf.featureName === featureName);
+  const local = { id, roleId, featureName, canView: row.can_view, canEdit: row.can_edit, canDelete: row.can_delete };
+  if (idx === -1) db.roleFeatureAccess.unshift(local);
+  else            db.roleFeatureAccess[idx] = local;
+  fileWrite(db);
+  return local;
+}
+
+// ---------- messages (parent ↔ admin direct chat) -----------------------
+const fromMessage = (r) => r ? ({
+  id: r.id,
+  senderId: r.sender_id, receiverId: r.receiver_id,
+  senderRole: r.sender_role, receiverRole: r.receiver_role,
+  message: r.message,
+  isRead: !!r.is_read,
+  createdAt: r.created_at,
+}) : null;
+
+export async function addMessage({ senderId, receiverId, senderRole, receiverRole, message } = {}) {
+  if (!senderId || !receiverId) throw new Error("senderId and receiverId required");
+  if (!message || !String(message).trim()) throw new Error("message required");
+  const id = `MSG-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 9999)}`;
+  const row = {
+    id, sender_id: senderId, receiver_id: receiverId,
+    sender_role: senderRole || "", receiver_role: receiverRole || "",
+    message: String(message).trim().slice(0, 4000),
+    is_read: false,
+  };
+  if (supabaseEnabled) {
+    const ins = await supabase.from("messages").insert(row).select().single();
+    if (!ins.error) return fromMessage(ins.data);
+    if (!isSchemaMissError(ins.error)) throw new Error(ins.error.message);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.messages)) db.messages = [];
+  const local = {
+    id, senderId, receiverId,
+    senderRole: row.sender_role, receiverRole: row.receiver_role,
+    message: row.message, isRead: false,
+    createdAt: new Date().toISOString(),
+  };
+  db.messages.unshift(local);
+  fileWrite(db);
+  return local;
+}
+
+// Fetch every message between two specific users (both directions),
+// chronological. Used by the chat panel.
+export async function listMessagesBetween(userA, userB, { limit = 200 } = {}) {
+  if (!userA || !userB) return [];
+  if (supabaseEnabled) {
+    const sel = await supabase
+      .from("messages").select("*")
+      .or(`and(sender_id.eq.${userA},receiver_id.eq.${userB}),and(sender_id.eq.${userB},receiver_id.eq.${userA})`)
+      .order("created_at", { ascending: true })
+      .limit(limit);
+    if (!sel.error) return (sel.data || []).map(fromMessage);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] messages fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  const all = Array.isArray(db.messages) ? db.messages : [];
+  return all
+    .filter((m) =>
+      (m.senderId === userA && m.receiverId === userB) ||
+      (m.senderId === userB && m.receiverId === userA))
+    .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))
+    .slice(0, limit);
+}
+
+// Inbox view for the receiver — distinct conversation partners with the
+// last message + unread count. Used by the admin "Parent messages"
+// screen and by the parent's "Message admin" thread picker.
+export async function listMessageThreads(userId) {
+  if (!userId) return [];
+  let messages = [];
+  if (supabaseEnabled) {
+    const sel = await supabase.from("messages").select("*")
+      .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`)
+      .order("created_at", { ascending: false })
+      .limit(500);
+    if (!sel.error) messages = (sel.data || []).map(fromMessage);
+    else if (!isSchemaMissError(sel.error)) console.warn(`[db] messages threads fell back: ${sel.error.message}`);
+  }
+  if (!messages.length) {
+    const db = fileRead();
+    messages = (Array.isArray(db.messages) ? db.messages : [])
+      .filter((m) => m.senderId === userId || m.receiverId === userId)
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  }
+  const threads = new Map();
+  for (const m of messages) {
+    const other = m.senderId === userId ? m.receiverId : m.senderId;
+    const otherRole = m.senderId === userId ? m.receiverRole : m.senderRole;
+    if (!threads.has(other)) {
+      threads.set(other, {
+        otherId: other, otherRole,
+        lastMessage: m.message, lastAt: m.createdAt,
+        unread: 0,
+      });
+    }
+    if (!m.isRead && m.receiverId === userId) {
+      threads.get(other).unread++;
+    }
+  }
+  return Array.from(threads.values()).sort((a, b) => new Date(b.lastAt) - new Date(a.lastAt));
+}
+
+// Mark every message from `fromUser` to `toUser` as read.
+export async function markMessagesReadBetween(fromUser, toUser) {
+  if (supabaseEnabled) {
+    await supabase.from("messages").update({ is_read: true })
+      .eq("sender_id", fromUser).eq("receiver_id", toUser).eq("is_read", false);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.messages)) db.messages = [];
+  let touched = 0;
+  for (let i = 0; i < db.messages.length; i++) {
+    const m = db.messages[i];
+    if (m.senderId === fromUser && m.receiverId === toUser && !m.isRead) {
+      db.messages[i] = { ...m, isRead: true };
+      touched++;
+    }
+  }
+  if (touched) fileWrite(db);
+  return touched;
+}
+
+// =====================================================================
+// SCALE — sessions + entries persistence (cloud + file dual write).
+// Indicator catalogue + score math live in backend/lib/scale.js.
+// =====================================================================
+
+const fromScaleSession = (r) => r ? ({
+  id: r.id, teacherId: r.teacher_id, cls: r.cls, subject: r.subject,
+  sessionDate: r.session_date, sessionType: r.session_type,
+  studentsPresent: r.students_present || 0,
+  preChecklist:  r.pre_checklist  || {},
+  duringRatings: r.during_ratings || {},
+  postRatings:   r.post_ratings   || {},
+  workedWell: r.worked_well, toChange: r.to_change,
+  signoff: r.signoff || {}, notes: r.notes,
+  createdAt: r.created_at,
+}) : null;
+
+const fromScaleEntry = (r) => r ? ({
+  id: r.id, sessionId: r.session_id, studentId: r.student_id,
+  indicatorKey: r.indicator_key, score: r.score, note: r.note,
+  createdAt: r.created_at,
+}) : null;
+
+export async function addScaleSession({
+  teacherId, cls = null, subject = null,
+  sessionDate, sessionType = "regular", studentsPresent = 0,
+  preChecklist = {}, duringRatings = {}, postRatings = {},
+  workedWell = null, toChange = null, signoff = {}, notes = null,
+} = {}) {
+  if (!sessionDate) throw new Error("sessionDate required");
+  const id = `SCS-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 9999)}`;
+  const row = {
+    id, teacher_id: teacherId || null,
+    cls, subject,
+    session_date: sessionDate,
+    session_type: sessionType,
+    students_present: Math.max(0, Number(studentsPresent) || 0),
+    pre_checklist:  preChecklist  || {},
+    during_ratings: duringRatings || {},
+    post_ratings:   postRatings   || {},
+    worked_well: workedWell ? String(workedWell).slice(0, 500) : null,
+    to_change:   toChange   ? String(toChange).slice(0, 500)   : null,
+    signoff: signoff || {},
+    notes:   notes ? String(notes).slice(0, 1000) : null,
+  };
+  if (supabaseEnabled) {
+    const ins = await supabase.from("scale_sessions").insert(row).select().single();
+    if (!ins.error) return fromScaleSession(ins.data);
+    if (!isSchemaMissError(ins.error)) throw new Error(ins.error.message);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.scaleSessions)) db.scaleSessions = [];
+  const local = {
+    id, teacherId, cls, subject,
+    sessionDate, sessionType, studentsPresent: row.students_present,
+    preChecklist: row.pre_checklist, duringRatings: row.during_ratings,
+    postRatings: row.post_ratings, workedWell: row.worked_well,
+    toChange: row.to_change, signoff, notes: row.notes,
+    createdAt: new Date().toISOString(),
+  };
+  db.scaleSessions.unshift(local);
+  fileWrite(db);
+  return local;
+}
+
+export async function listScaleSessions({ teacherId, cls, dateFrom, dateTo, limit = 200 } = {}) {
+  if (supabaseEnabled) {
+    let q = supabase.from("scale_sessions").select("*").order("session_date", { ascending: false }).limit(limit);
+    if (teacherId) q = q.eq("teacher_id", teacherId);
+    if (cls)       q = q.eq("cls", cls);
+    if (dateFrom)  q = q.gte("session_date", dateFrom);
+    if (dateTo)    q = q.lte("session_date", dateTo);
+    const sel = await q;
+    if (!sel.error) return (sel.data || []).map(fromScaleSession);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] scale_sessions fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  let all = Array.isArray(db.scaleSessions) ? db.scaleSessions : [];
+  if (teacherId) all = all.filter((s) => s.teacherId === teacherId);
+  if (cls)       all = all.filter((s) => s.cls === cls);
+  if (dateFrom)  all = all.filter((s) => (s.sessionDate || "") >= dateFrom);
+  if (dateTo)    all = all.filter((s) => (s.sessionDate || "") <= dateTo);
+  return all.slice(0, limit);
+}
+
+// Bulk insert. `entries` is [{ studentId, indicatorKey, score, note? }].
+export async function addScaleEntries(sessionId, entries) {
+  if (!sessionId) throw new Error("sessionId required");
+  if (!Array.isArray(entries) || entries.length === 0) return [];
+  const rows = entries
+    .filter((e) => e && e.studentId && e.indicatorKey && Number.isFinite(e.score))
+    .map((e) => ({
+      id: `SCE-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 999999)}`,
+      session_id: sessionId,
+      student_id: e.studentId,
+      indicator_key: e.indicatorKey,
+      score: Math.max(1, Math.min(4, Math.round(Number(e.score)))),
+      note: e.note ? String(e.note).slice(0, 240) : null,
+    }));
+  if (rows.length === 0) return [];
+  if (supabaseEnabled) {
+    const ins = await supabase.from("scale_entries").insert(rows).select();
+    if (!ins.error) return (ins.data || []).map(fromScaleEntry);
+    if (!isSchemaMissError(ins.error)) console.warn(`[db] scale_entries insert fell back: ${ins.error.message}`);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.scaleEntries)) db.scaleEntries = [];
+  const local = rows.map((r) => ({
+    id: r.id, sessionId: r.session_id, studentId: r.student_id,
+    indicatorKey: r.indicator_key, score: r.score, note: r.note,
+    createdAt: new Date().toISOString(),
+  }));
+  db.scaleEntries.unshift(...local);
+  fileWrite(db);
+  return local;
+}
+
+export async function listScaleEntries({ studentId, sessionId, dateFrom, dateTo, limit = 1000 } = {}) {
+  if (supabaseEnabled) {
+    let q = supabase.from("scale_entries").select("*").order("created_at", { ascending: false }).limit(limit);
+    if (studentId) q = q.eq("student_id", studentId);
+    if (sessionId) q = q.eq("session_id", sessionId);
+    if (dateFrom)  q = q.gte("created_at", dateFrom);
+    if (dateTo)    q = q.lte("created_at", dateTo);
+    const sel = await q;
+    if (!sel.error) return (sel.data || []).map(fromScaleEntry);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] scale_entries fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  let all = Array.isArray(db.scaleEntries) ? db.scaleEntries : [];
+  if (studentId) all = all.filter((e) => e.studentId === studentId);
+  if (sessionId) all = all.filter((e) => e.sessionId === sessionId);
+  if (dateFrom)  all = all.filter((e) => (e.createdAt || "") >= dateFrom);
+  if (dateTo)    all = all.filter((e) => (e.createdAt || "") <= dateTo);
+  return all.slice(0, limit);
+}
+
+// =====================================================================
+// SCALE Phase 4 — weaker-student support plans (sequenced workflow).
+// =====================================================================
+
+const fromSupportPlan = (r) => r ? ({
+  id: r.id, studentId: r.student_id, term: r.term,
+  currentStep: r.current_step || 1,
+  rootCause:      r.root_cause      || {},
+  domainAdvisory: r.domain_advisory || {},
+  strengthPlan:   r.strength_plan   || {},
+  referral:       r.referral        || {},
+  status: r.status || "active",
+  createdBy: r.created_by, createdAt: r.created_at, updatedAt: r.updated_at,
+}) : null;
+
+export async function listSupportPlans({ studentId, status, limit = 200 } = {}) {
+  if (supabaseEnabled) {
+    let q = supabase.from("scale_support_plans").select("*").order("updated_at", { ascending: false }).limit(limit);
+    if (studentId) q = q.eq("student_id", studentId);
+    if (status)    q = q.eq("status", status);
+    const sel = await q;
+    if (!sel.error) return (sel.data || []).map(fromSupportPlan);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] scale_support_plans fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  let all = Array.isArray(db.scaleSupportPlans) ? db.scaleSupportPlans : [];
+  if (studentId) all = all.filter((p) => p.studentId === studentId);
+  if (status)    all = all.filter((p) => p.status === status);
+  return all.slice(0, limit);
+}
+
+export async function upsertSupportPlan(plan = {}) {
+  if (!plan.studentId) throw new Error("studentId required");
+  const term = plan.term || "all";
+  const id = plan.id || `SSP-${plan.studentId}-${term}`;
+  const now = new Date().toISOString();
+  const row = {
+    id, student_id: plan.studentId, term,
+    current_step: Math.max(1, Math.min(5, Number(plan.currentStep) || 1)),
+    root_cause:      plan.rootCause      || {},
+    domain_advisory: plan.domainAdvisory || {},
+    strength_plan:   plan.strengthPlan   || {},
+    referral:        plan.referral       || {},
+    status: plan.status || "active",
+    created_by: plan.createdBy || null,
+    updated_at: now,
+  };
+  if (supabaseEnabled) {
+    const up = await supabase.from("scale_support_plans").upsert(row, { onConflict: "id" }).select().maybeSingle();
+    if (!up.error && up.data) return fromSupportPlan(up.data);
+    if (up.error && !isSchemaMissError(up.error)) console.warn(`[db] scale_support_plans upsert fell back: ${up.error.message}`);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.scaleSupportPlans)) db.scaleSupportPlans = [];
+  const idx = db.scaleSupportPlans.findIndex((p) => p.id === id);
+  const local = {
+    id, studentId: plan.studentId, term,
+    currentStep: row.current_step,
+    rootCause: row.root_cause, domainAdvisory: row.domain_advisory,
+    strengthPlan: row.strength_plan, referral: row.referral,
+    status: row.status, createdBy: row.created_by,
+    createdAt: idx >= 0 ? db.scaleSupportPlans[idx].createdAt : now,
+    updatedAt: now,
+  };
+  if (idx === -1) db.scaleSupportPlans.unshift(local);
+  else            db.scaleSupportPlans[idx] = local;
+  fileWrite(db);
+  return local;
+}
+
+// =====================================================================
+// SCALE Phase 5 — student daily 3-question ritual.
+// =====================================================================
+
+const fromDailyRitual = (r) => r ? ({
+  id: r.id, studentId: r.student_id, ritualDate: r.ritual_date,
+  q1Learned: r.q1_learned, q2DidWell: r.q2_did_well, q3Tomorrow: r.q3_tomorrow,
+  recordedBy: r.recorded_by, createdAt: r.created_at,
+}) : null;
+
+export async function listDailyRituals({ studentId, dateFrom, dateTo, limit = 60 } = {}) {
+  if (supabaseEnabled) {
+    let q = supabase.from("scale_daily_rituals").select("*").order("ritual_date", { ascending: false }).limit(limit);
+    if (studentId) q = q.eq("student_id", studentId);
+    if (dateFrom)  q = q.gte("ritual_date", dateFrom);
+    if (dateTo)    q = q.lte("ritual_date", dateTo);
+    const sel = await q;
+    if (!sel.error) return (sel.data || []).map(fromDailyRitual);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] scale_daily_rituals fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  let all = Array.isArray(db.scaleDailyRituals) ? db.scaleDailyRituals : [];
+  if (studentId) all = all.filter((r) => r.studentId === studentId);
+  if (dateFrom)  all = all.filter((r) => (r.ritualDate || "") >= dateFrom);
+  if (dateTo)    all = all.filter((r) => (r.ritualDate || "") <= dateTo);
+  return all.slice(0, limit);
+}
+
+export async function upsertDailyRitual({ studentId, ritualDate, q1Learned, q2DidWell, q3Tomorrow, recordedBy } = {}) {
+  if (!studentId)  throw new Error("studentId required");
+  if (!ritualDate) throw new Error("ritualDate required");
+  const id = `SDR-${studentId}-${ritualDate}`;
+  const row = {
+    id, student_id: studentId, ritual_date: ritualDate,
+    q1_learned: q1Learned ? String(q1Learned).slice(0, 500) : null,
+    q2_did_well: q2DidWell ? String(q2DidWell).slice(0, 500) : null,
+    q3_tomorrow: q3Tomorrow ? String(q3Tomorrow).slice(0, 500) : null,
+    recorded_by: recordedBy || null,
+  };
+  if (supabaseEnabled) {
+    const up = await supabase.from("scale_daily_rituals").upsert(row, { onConflict: "id" }).select().maybeSingle();
+    if (!up.error && up.data) return fromDailyRitual(up.data);
+    if (up.error && !isSchemaMissError(up.error)) console.warn(`[db] scale_daily_rituals upsert fell back: ${up.error.message}`);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.scaleDailyRituals)) db.scaleDailyRituals = [];
+  const idx = db.scaleDailyRituals.findIndex((r) => r.id === id);
+  const local = {
+    id, studentId, ritualDate,
+    q1Learned: row.q1_learned, q2DidWell: row.q2_did_well, q3Tomorrow: row.q3_tomorrow,
+    recordedBy, createdAt: idx >= 0 ? db.scaleDailyRituals[idx].createdAt : new Date().toISOString(),
+  };
+  if (idx === -1) db.scaleDailyRituals.unshift(local);
+  else            db.scaleDailyRituals[idx] = local;
+  fileWrite(db);
+  return local;
 }

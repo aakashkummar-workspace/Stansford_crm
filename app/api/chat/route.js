@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { listChatThreads, getOrCreateThread, appendChatMessage, listUsers, logAudit } from "@/lib/db";
+import { listChatThreads, getOrCreateThread, appendChatMessage, listUsers, logAudit, readAllData } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -32,6 +32,35 @@ export async function POST(req) {
     const users = await listUsers();
     const teacher = users.find((u) => (u.email || "").toLowerCase() === body.teacherEmail.toLowerCase() && u.role === "teacher");
     if (!teacher) return NextResponse.json({ ok: false, error: "Teacher not found" }, { status: 404 });
+
+    // Parents may only chat *about their own child* and only with a teacher
+    // who is the class teacher of that child's class. Anyone bypassing the UI
+    // is rejected here.
+    if (session.role === "parent") {
+      if (session.linkedId && body.studentId !== session.linkedId) {
+        return NextResponse.json({ ok: false, error: "You can only message about your own child" }, { status: 403 });
+      }
+      // Resolve the child's current class so we can verify the teacher.
+      const data = await readAllData();
+      const child = (data.addedStudents || []).find((s) => s.id === body.studentId);
+      if (!child) {
+        return NextResponse.json({ ok: false, error: "Child record not found" }, { status: 404 });
+      }
+      const teacherClasses = Array.isArray(teacher.linkedClasses) ? teacher.linkedClasses : [];
+      const childClassUpper = String(child.cls || "").toUpperCase();
+      const teacherCovers = teacherClasses.some((c) => String(c).toUpperCase() === childClassUpper);
+      if (!teacherCovers) {
+        return NextResponse.json(
+          { ok: false, error: `${teacher.name} isn't a class teacher for ${child.cls}. Pick the assigned class teacher.` },
+          { status: 403 }
+        );
+      }
+      // Force the trusted child class onto the thread row regardless of
+      // whatever cls the client posted.
+      body.studentName = child.name;
+      body.cls = child.cls;
+    }
+
     // Parent is the signed-in user (security: never trust client-supplied parent email).
     const thread = await getOrCreateThread({
       parentEmail: session.email,

@@ -1,10 +1,28 @@
 import { NextResponse } from "next/server";
-import { addExpense, listExpenses, removeExpense, logAudit, __EXPENSE_META } from "@/lib/db";
+import { addExpense, listExpenses, removeExpense, logAudit, listRoleFeatureAccess, __EXPENSE_META } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
-const CAN_RECORD = new Set(["admin", "principal"]);
+// Hard-coded canonical roles allowed to write expenses. School Accountant and
+// Trust Accountant are added because finance is literally their job.
+const CAN_RECORD = new Set(["admin", "principal", "school_accountant", "trust_accountant"]);
+
+// Defence-in-depth: also accept any custom role whose admin granted Edit on
+// the "money" feature (the Custom Roles screen toggles).
+async function canWriteExpense(role) {
+  if (CAN_RECORD.has(role)) return true;
+  if (!role || typeof role !== "string") return false;
+  // Custom-role ids look like "role-foo-xxxx" — anything else we can ignore.
+  if (!role.startsWith("role-")) return false;
+  try {
+    const feats = await listRoleFeatureAccess(role);
+    const money = feats.find((f) => f.featureName === "money");
+    return !!(money && money.canEdit);
+  } catch {
+    return false;
+  }
+}
 
 // GET /api/expenses?scope=school|trust
 export async function GET(req) {
@@ -19,8 +37,8 @@ export async function GET(req) {
 // POST /api/expenses { scope, category, amount, vendor?, memo?, date?, paymentMethod? }
 export async function POST(req) {
   const session = await getSession();
-  if (!session || !CAN_RECORD.has(session.role)) {
-    return NextResponse.json({ ok: false, error: "Only admin / principal can log expenses" }, { status: 403 });
+  if (!session || !(await canWriteExpense(session.role))) {
+    return NextResponse.json({ ok: false, error: "Your role isn't authorised to log expenses" }, { status: 403 });
   }
   let body; try { body = await req.json(); } catch { body = null; }
   if (!body?.amount) return NextResponse.json({ ok: false, error: "amount required" }, { status: 400 });
@@ -36,7 +54,7 @@ export async function POST(req) {
 // DELETE /api/expenses { id }
 export async function DELETE(req) {
   const session = await getSession();
-  if (!session || !CAN_RECORD.has(session.role)) {
+  if (!session || !(await canWriteExpense(session.role))) {
     return NextResponse.json({ ok: false, error: "Not authorised" }, { status: 403 });
   }
   let body; try { body = await req.json(); } catch { body = null; }

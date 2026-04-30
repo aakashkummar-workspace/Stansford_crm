@@ -186,10 +186,56 @@ export default function ScreenTasks({ E, refresh, role, session }) {
       </div>
 
       <div className="grid g-4" style={{ marginBottom: 14 }}>
-        <KPI label={isAdmin ? "Total tasks" : "All tasks"} value={counts.total} sub="across roles" puck="mint" puckIcon="check" />
-        <KPI label="Pending" value={counts.pending} sub={counts.pending ? "needs to be picked up" : "nothing waiting"} puck="cream" puckIcon="clock" />
-        <KPI label="In progress" value={counts.in_progress} sub="being worked on" puck="peach" puckIcon="refresh" />
-        <KPI label="Done" value={counts.done} sub="closed" puck="sky" puckIcon="check" />
+        {(() => {
+          const byStatus = (s) => tasks.filter((t) => t.status === s);
+          const itemFor = (t, tone) => ({
+            label: t.title || "—",
+            value: t.priority || "normal",
+            sub: `${t.assignedToName || "—"}${t.dueDate ? ` · due ${t.dueDate}` : ""}`,
+            tone,
+          });
+          return (
+            <>
+              <KPI
+                label={isAdmin ? "Total tasks" : "All tasks"} value={counts.total} sub="across roles"
+                puck="mint" puckIcon="check"
+                details={{
+                  title: `Tasks · ${counts.total}`,
+                  sub: `${counts.pending} pending · ${counts.in_progress} in progress · ${counts.done} done`,
+                  items: tasks.slice(0, 12).map((t) => itemFor(t, t.status === "done" ? "ok" : t.status === "in_progress" ? "warn" : "")),
+                }}
+              />
+              <KPI
+                label="Pending" value={counts.pending}
+                sub={counts.pending ? "needs to be picked up" : "nothing waiting"}
+                puck="cream" puckIcon="clock"
+                details={{
+                  title: `Pending · ${counts.pending}`,
+                  sub: counts.pending === 0 ? "Nothing waiting" : "Hasn't been started yet",
+                  items: byStatus("pending").map((t) => itemFor(t, "warn")),
+                }}
+              />
+              <KPI
+                label="In progress" value={counts.in_progress} sub="being worked on"
+                puck="peach" puckIcon="refresh"
+                details={{
+                  title: `In progress · ${counts.in_progress}`,
+                  sub: counts.in_progress === 0 ? "Nothing currently in progress" : "Being worked on",
+                  items: byStatus("in_progress").map((t) => itemFor(t, "")),
+                }}
+              />
+              <KPI
+                label="Done" value={counts.done} sub="closed"
+                puck="sky" puckIcon="check"
+                details={{
+                  title: `Done · ${counts.done}`,
+                  sub: counts.done === 0 ? "Nothing completed yet" : "Recently completed",
+                  items: byStatus("done").slice(0, 12).map((t) => itemFor(t, "ok")),
+                }}
+              />
+            </>
+          );
+        })()}
       </div>
 
       <div className="card">

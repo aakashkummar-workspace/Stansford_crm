@@ -95,10 +95,56 @@ export default function ScreenMeetings({ E, refresh, role, session }) {
       </div>
 
       <div className="grid g-4" style={{ marginBottom: 14 }}>
-        <KPI label="Upcoming" value={counts.upcoming} sub="needs attention" puck="mint" puckIcon="clock" />
-        <KPI label="Past" value={counts.past} sub="completed" puck="cream" puckIcon="check" />
-        <KPI label="Total scheduled" value={meetings.length} sub="all-time" puck="peach" puckIcon="reports" />
-        <KPI label="Visible to you" value={filtered.length} sub={filter} puck="sky" puckIcon="users" />
+        {(() => {
+          const upcoming = meetings.filter((m) => new Date(m.scheduledAt).getTime() >= now - 60 * 60 * 1000);
+          const past = meetings.filter((m) => new Date(m.scheduledAt).getTime() < now - 60 * 60 * 1000);
+          const itemFor = (m, tone) => ({
+            label: m.title,
+            value: m.scheduledAt ? new Date(m.scheduledAt).toLocaleDateString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—",
+            sub: m.audienceLabel || m.audience || "—",
+            tone,
+          });
+          return (
+            <>
+              <KPI
+                label="Upcoming" value={counts.upcoming} sub="needs attention"
+                puck="mint" puckIcon="clock"
+                details={{
+                  title: `Upcoming · ${counts.upcoming}`,
+                  sub: counts.upcoming === 0 ? "No upcoming meetings" : "Earliest first",
+                  items: upcoming.slice().sort((a, b) => new Date(a.scheduledAt) - new Date(b.scheduledAt)).map((m) => itemFor(m, "")),
+                }}
+              />
+              <KPI
+                label="Past" value={counts.past} sub="completed"
+                puck="cream" puckIcon="check"
+                details={{
+                  title: `Past · ${counts.past}`,
+                  sub: "Most recent first",
+                  items: past.slice().sort((a, b) => new Date(b.scheduledAt) - new Date(a.scheduledAt)).slice(0, 12).map((m) => itemFor(m, "ok")),
+                }}
+              />
+              <KPI
+                label="Total scheduled" value={meetings.length} sub="all-time"
+                puck="peach" puckIcon="reports"
+                details={{
+                  title: `Total · ${meetings.length}`,
+                  sub: `${counts.upcoming} upcoming · ${counts.past} past`,
+                  items: meetings.slice().sort((a, b) => new Date(b.scheduledAt) - new Date(a.scheduledAt)).slice(0, 12).map((m) => itemFor(m, "")),
+                }}
+              />
+              <KPI
+                label="Visible to you" value={filtered.length} sub={filter}
+                puck="sky" puckIcon="users"
+                details={{
+                  title: `Visible · ${filtered.length} (${filter})`,
+                  sub: "Filtered to your view",
+                  items: filtered.slice(0, 12).map((m) => itemFor(m, "")),
+                }}
+              />
+            </>
+          );
+        })()}
       </div>
 
       <div className="card">
@@ -191,18 +237,32 @@ function AddMeetingModal({ classes, onClose, onSubmit }) {
     date: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
     time: "10:00",
     location: "School auditorium",
-    audienceKind: "all", // all | class | user
-    audienceClass: "",
-    audienceUser: "",
+    audienceKind: "all",          // all | classes
+    audienceClasses: [],           // array of "1-A", "2-B", ...
   });
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const toggleClass = (c) => setForm((f) => ({
+    ...f,
+    audienceClasses: f.audienceClasses.includes(c)
+      ? f.audienceClasses.filter((x) => x !== c)
+      : [...f.audienceClasses, c],
+  }));
 
-  // Build flat list of classes for the picker
+  // Flat list of class-sections for the picker. Sort numerically by class
+  // number, then section letter — a plain string sort puts "12-C" between
+  // "1-B" and "2-A".
   const classList = useMemo(() => {
     const out = [];
     classes.forEach((c) => (c.sections || ["A"]).forEach((s) => out.push(`${c.n}-${s}`)));
-    return out;
+    return out.sort((a, b) => {
+      const [an, as] = String(a).split("-");
+      const [bn, bs] = String(b).split("-");
+      const dn = (Number(an) || 0) - (Number(bn) || 0);
+      return dn !== 0 ? dn : String(as || "").localeCompare(String(bs || ""));
+    });
   }, [classes]);
+
+  const setAllClasses = (on) => setForm((f) => ({ ...f, audienceClasses: on ? [...classList] : [] }));
 
   async function submit(e) {
     e.preventDefault();
@@ -213,14 +273,26 @@ function AddMeetingModal({ classes, onClose, onSubmit }) {
       if (!form.date || !form.time) throw new Error("Date & time required");
       let audience = "all";
       let audienceLabel = "All parents";
-      if (form.audienceKind === "class") {
-        if (!form.audienceClass) throw new Error("Pick a class");
-        audience = `class:${form.audienceClass}`;
-        audienceLabel = `Class ${form.audienceClass}`;
-      } else if (form.audienceKind === "user") {
-        if (!form.audienceUser.trim()) throw new Error("Email required");
-        audience = `user:${form.audienceUser.trim().toLowerCase()}`;
-        audienceLabel = form.audienceUser.trim();
+      if (form.audienceKind === "classes") {
+        if (form.audienceClasses.length === 0) throw new Error("Pick at least one class");
+        // Sort the picked list before encoding so the audience label reads
+        // naturally ("Classes 1-A, 2-B, 5-A" instead of insertion order).
+        const sorted = [...form.audienceClasses].sort((a, b) => {
+          const [an, as] = String(a).split("-");
+          const [bn, bs] = String(b).split("-");
+          const dn = (Number(an) || 0) - (Number(bn) || 0);
+          return dn !== 0 ? dn : String(as || "").localeCompare(String(bs || ""));
+        });
+        // Encoding stays compatible with the existing `class:1-A` shape when
+        // exactly one class is picked, so older meetings still render the
+        // same way. Multiple classes use `classes:` (plural).
+        if (sorted.length === 1) {
+          audience = `class:${sorted[0]}`;
+          audienceLabel = `Class ${sorted[0]}`;
+        } else {
+          audience = `classes:${sorted.join(",")}`;
+          audienceLabel = `Classes ${sorted.join(", ")}`;
+        }
       }
       const scheduledAt = new Date(`${form.date}T${form.time}:00`).toISOString();
       await onSubmit({
@@ -262,17 +334,42 @@ function AddMeetingModal({ classes, onClose, onSubmit }) {
           <Field label="Audience *">
             <div className="segmented">
               <button type="button" className={form.audienceKind === "all" ? "active" : ""} onClick={() => set("audienceKind", "all")}>All parents</button>
-              <button type="button" className={form.audienceKind === "class" ? "active" : ""} onClick={() => set("audienceKind", "class")}>One class</button>
-              <button type="button" className={form.audienceKind === "user" ? "active" : ""} onClick={() => set("audienceKind", "user")}>One user</button>
+              <button type="button" className={form.audienceKind === "classes" ? "active" : ""} onClick={() => set("audienceKind", "classes")}>Pick classes</button>
             </div>
-            {form.audienceKind === "class" && (
-              <select className="select" style={{ marginTop: 6 }} value={form.audienceClass} onChange={(e) => set("audienceClass", e.target.value)}>
-                <option value="">— pick a class —</option>
-                {classList.map((c) => <option key={c} value={c}>Class {c}</option>)}
-              </select>
-            )}
-            {form.audienceKind === "user" && (
-              <input className="input" style={{ marginTop: 6 }} value={form.audienceUser} onChange={(e) => set("audienceUser", e.target.value)} placeholder="parent@email.com" />
+            {form.audienceKind === "classes" && (
+              <div style={{ marginTop: 8, background: "var(--bg-2)", border: "1px solid var(--rule)", borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ display: "flex", gap: 6, fontSize: 11, color: "var(--ink-3)" }}>
+                  <button type="button" className="btn sm ghost" onClick={() => setAllClasses(true)}>Select all</button>
+                  <button type="button" className="btn sm ghost" onClick={() => setAllClasses(false)}>Clear</button>
+                  <span style={{ marginLeft: "auto", alignSelf: "center" }}>
+                    {form.audienceClasses.length === 0
+                      ? <em style={{ color: "var(--ink-4)" }}>nothing picked</em>
+                      : `${form.audienceClasses.length} picked`}
+                  </span>
+                </div>
+                <div style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fill, minmax(64px, 1fr))",
+                  gap: 6,
+                  maxHeight: 180,
+                  overflowY: "auto",
+                }}>
+                  {classList.map((c) => {
+                    const on = form.audienceClasses.includes(c);
+                    return (
+                      <button
+                        key={c}
+                        type="button"
+                        onClick={() => toggleClass(c)}
+                        className={on ? "btn sm accent" : "btn sm"}
+                        style={{ justifyContent: "center" }}
+                      >
+                        {on && <Icon name="check" size={10} />}{c}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             )}
           </Field>
           {err && <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "9px 12px", borderRadius: 7, fontSize: 12 }}>{err}</div>}

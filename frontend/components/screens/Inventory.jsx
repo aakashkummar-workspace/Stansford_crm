@@ -4,13 +4,23 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI } from "../ui";
 
-const FILTERS = [
-  { k: "all",     label: "All" },
+// Built-in category buckets. Schools can also add their own — those show up
+// alongside these in the filter strip via `extraCatsFromItems` below.
+const BUILTIN_CATS = [
   { k: "book",    label: "Books" },
   { k: "uniform", label: "Uniforms" },
   { k: "asset",   label: "Assets" },
-  { k: "out",     label: "Out of stock" },
 ];
+const BASE_FILTERS = [{ k: "all", label: "All" }];
+const TAIL_FILTERS = [{ k: "out", label: "Out of stock" }];
+
+// Pretty-print a category id ("lab_equipment" → "Lab equipment") for chips,
+// the filter strip, and the table.
+function prettyCat(c) {
+  if (!c) return "—";
+  const s = String(c).replace(/[_-]+/g, " ").trim();
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
 
 function Toast({ msg, tone, onClose }) {
   if (!msg) return null;
@@ -75,8 +85,30 @@ export default function ScreenInventory({ E, refresh, role }) {
   const items = E.INVENTORY || [];
   const movements = E.MOVEMENTS || [];
   const classes = E.CLASSES || [];
+  // Categories the user explicitly saved via the "Save category" button.
+  // Persisted server-side so they show up even before any item uses them.
+  const savedCats = E.INVENTORY_CATEGORIES || [];
 
   const isOut = (it) => (it.onHand ?? 0) === 0;
+
+  // Merge: built-in buckets + explicitly-saved + categories derived from
+  // existing items (back-compat — older items had categories that were never
+  // saved separately). Dedupe by id, preserving order.
+  const allCats = useMemo(() => {
+    const seen = new Set(BUILTIN_CATS.map((c) => c.k));
+    const extras = [];
+    const addOne = (k) => {
+      if (!k || seen.has(k)) return;
+      seen.add(k); extras.push(k);
+    };
+    savedCats.forEach(addOne);
+    for (const i of items) addOne(i.category);
+    return [...BUILTIN_CATS, ...extras.map((k) => ({ k, label: prettyCat(k) }))];
+  }, [items, savedCats]);
+  const FILTERS = useMemo(
+    () => [...BASE_FILTERS, ...allCats, ...TAIL_FILTERS],
+    [allCats]
+  );
 
   // Dropdown options: every distinct cls seen on items. "all" is filtered out
   // because it's offered as a dedicated "All-class items only" entry; actual
@@ -135,6 +167,21 @@ export default function ScreenInventory({ E, refresh, role }) {
     setShowAdd(false);
     showToast(`${json.item.name} added (${json.item.id})`, "ok");
     await refresh?.();
+  }
+
+  // Persist a new category id (without needing to add an item). Returns the
+  // canonical slug the server stored, so the modal can preselect it.
+  async function handleSaveCategory(rawCategory) {
+    const r = await fetch("/api/inventory/categories", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ category: rawCategory }),
+    });
+    const json = await r.json().catch(() => ({}));
+    if (!r.ok || !json.ok) throw new Error(json.error || "Failed to save category");
+    showToast(`Category "${prettyCat(json.category)}" saved`, "ok");
+    await refresh?.();
+    return json.category;
   }
 
   async function handleMove(type, payload) {
@@ -309,7 +356,7 @@ export default function ScreenInventory({ E, refresh, role }) {
                           </div>
                         </div>
                       </td>
-                      <td><span className="chip" style={{ textTransform: "capitalize" }}>{it.category}</span></td>
+                      <td><span className="chip">{prettyCat(it.category)}</span></td>
                       <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{it.cls || "—"}</td>
                       <td className="num" style={{ color: out ? "var(--err, #b13c1c)" : "inherit", fontWeight: out ? 500 : 400 }}>{it.onHand ?? 0}</td>
                       <td className="num" style={{ color: "var(--ink-3)" }}>{it.min ?? 0}</td>
@@ -402,7 +449,13 @@ export default function ScreenInventory({ E, refresh, role }) {
       </div>
 
       {showAdd && canEdit && (
-        <AddItemModal classes={classes} onClose={() => setShowAdd(false)} onSubmit={handleAdd} />
+        <AddItemModal
+          classes={classes}
+          existingCats={allCats}
+          onClose={() => setShowAdd(false)}
+          onSubmit={handleAdd}
+          onSaveCategory={handleSaveCategory}
+        />
       )}
       {showMove && canEdit && (
         <MoveModal
@@ -419,13 +472,18 @@ export default function ScreenInventory({ E, refresh, role }) {
   );
 }
 
-function AddItemModal({ classes, onClose, onSubmit }) {
+function AddItemModal({ classes, existingCats, onClose, onSubmit, onSaveCategory }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [form, setForm] = useState({
     name: "", category: "book", cls: "all",
     onHand: "", min: "", unitPrice: "", supplier: "",
   });
+  // When the user picks "Add new…" from the category dropdown we flip into a
+  // text-entry mode so they can type whatever bucket they want.
+  const [customCat, setCustomCat] = useState(false);
+  const [customCatVal, setCustomCatVal] = useState("");
+  const [savingCat, setSavingCat] = useState(false);
   const nameRef = useRef(null);
   useEffect(() => { nameRef.current?.focus(); }, []);
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
@@ -436,9 +494,11 @@ function AddItemModal({ classes, onClose, onSubmit }) {
     setBusy(true); setErr("");
     try {
       if (!form.name.trim()) throw new Error("Name is required");
+      const cat = customCat ? customCatVal.trim() : form.category;
+      if (!cat) throw new Error("Category is required");
       await onSubmit({
         name: form.name.trim(),
-        category: form.category,
+        category: cat,
         cls: form.cls === "all" ? "all" : form.cls,
         onHand: Number(form.onHand) || 0,
         min: Number(form.min) || 0,
@@ -460,12 +520,63 @@ function AddItemModal({ classes, onClose, onSubmit }) {
           <input className="input" ref={nameRef} value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. Class 5 maths textbook" />
         </Field>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <Field label="Category">
-            <select className="select" value={form.category} onChange={(e) => set("category", e.target.value)}>
-              <option value="book">Book</option>
-              <option value="uniform">Uniform</option>
-              <option value="asset">Asset</option>
-            </select>
+          <Field label="Category" hint={customCat ? "Letters, numbers, _ and - · Save to keep this option for next time" : undefined}>
+            {customCat ? (
+              <div style={{ display: "flex", gap: 6, alignItems: "stretch" }}>
+                <input
+                  className="input"
+                  autoFocus
+                  value={customCatVal}
+                  onChange={(e) => setCustomCatVal(e.target.value)}
+                  placeholder="e.g. stationery, lab, sports"
+                  style={{ flex: 1 }}
+                />
+                <button
+                  type="button"
+                  className="btn sm"
+                  disabled={!customCatVal.trim() || savingCat}
+                  onClick={async () => {
+                    if (!onSaveCategory) return;
+                    setErr(""); setSavingCat(true);
+                    try {
+                      const slug = await onSaveCategory(customCatVal);
+                      // Switch back to dropdown with the new category preselected
+                      // — the parent's refresh will surface it via existingCats.
+                      setForm((f) => ({ ...f, category: slug }));
+                      setCustomCat(false);
+                      setCustomCatVal("");
+                    } catch (ex) { setErr(ex.message || String(ex)); }
+                    finally { setSavingCat(false); }
+                  }}
+                  title="Save this category as a permanent option"
+                >
+                  <Icon name="check" size={11} />{savingCat ? "Saving…" : "Save"}
+                </button>
+                <button
+                  type="button"
+                  className="btn ghost sm"
+                  onClick={() => { setCustomCat(false); setCustomCatVal(""); }}
+                  title="Pick from existing categories"
+                >
+                  <Icon name="x" size={11} />
+                </button>
+              </div>
+            ) : (
+              <select
+                className="select"
+                value={form.category}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === "__new__") { setCustomCat(true); setCustomCatVal(""); }
+                  else set("category", v);
+                }}
+              >
+                {(existingCats || []).map((c) => (
+                  <option key={c.k} value={c.k}>{c.label}</option>
+                ))}
+                <option value="__new__">+ Add new category…</option>
+              </select>
+            )}
           </Field>
           <Field label="Class">
             <select className="select" value={form.cls} onChange={(e) => set("cls", e.target.value)}>

@@ -41,10 +41,19 @@ export const toStudent = (r) => ({
 export const fromPendingFee = (r) => r && {
   id: r.id, name: r.name, cls: r.cls, amount: r.amount,
   due: r.due, overdue: r.overdue,
+  // student_id links this row back to the owning student (required when the
+  // composite id is used, e.g. "STN-9001__kit"). Older rows without this
+  // column fall back to the row id itself.
+  studentId: r.student_id ?? r.studentId ?? r.id,
+  // Fee category (one of FEE_TYPES keys). Older rows without this default to
+  // "term1" downstream via feeTypeLabel().
+  feeType: r.fee_type ?? r.feeType ?? null,
 };
 export const toPendingFee = (r) => ({
   id: r.id, name: r.name, cls: r.cls, amount: r.amount,
   due: r.due ?? "in 7 days", overdue: !!r.overdue,
+  student_id: r.studentId ?? r.student_id ?? r.id,
+  fee_type: r.feeType ?? r.fee_type ?? "term1",
 });
 
 export const fromRecentFee = (r) => r && {
@@ -54,6 +63,13 @@ export const fromRecentFee = (r) => r && {
   // For older receipts that pre-date the column, fall back to using the
   // receipt id itself (those used student id as the primary key).
   studentId: r.student_id ?? r.studentId ?? r.id,
+  // ISO timestamp added so Reports / Money screens can date-filter receipts.
+  // Older rows (before this column existed) come back null — callers should
+  // treat null as "unknown date" and decide whether to include or exclude.
+  paidAt: r.paid_at ?? r.paidAt ?? null,
+  // Which fee bucket this receipt covers (FEE_TYPES key). Older rows lack
+  // this and render as Term I via feeTypeLabel().
+  feeType: r.fee_type ?? r.feeType ?? null,
 };
 
 export const fromDailyLog = (r) => r && {
@@ -69,6 +85,37 @@ export const fromDailyLog = (r) => r && {
   postedBy: r.posted_by, postedAt: r.posted_at,
 };
 
+export const fromStaffAward = (r) => r && {
+  id: r.id, staffId: r.staff_id, staffName: r.staff_name,
+  title: r.title, citation: r.citation,
+  category: r.category || "recognition",
+  awardedAt: r.awarded_at, awardedBy: r.awarded_by,
+  createdAt: r.created_at,
+};
+export const toStaffAward = (r) => ({
+  id: r.id, staff_id: r.staffId, staff_name: r.staffName || null,
+  title: r.title, citation: r.citation || null,
+  category: r.category || "recognition",
+  awarded_at: r.awardedAt || null, awarded_by: r.awardedBy || null,
+});
+
+export const fromTransportAttendance = (r) => r && {
+  studentId: r.student_id, date: r.date,
+  direction: r.direction || "morning",
+  routeCode: r.route_code, stopName: r.stop_name,
+  status: r.status || "boarded",
+  studentName: r.student_name, cls: r.cls,
+  markedBy: r.marked_by, markedAt: r.marked_at,
+};
+export const toTransportAttendance = (r) => ({
+  student_id: r.studentId, date: r.date,
+  direction: r.direction || "morning",
+  route_code: r.routeCode || null, stop_name: r.stopName || null,
+  status: r.status || "boarded",
+  student_name: r.studentName || null, cls: r.cls || null,
+  marked_by: r.markedBy || null,
+});
+
 export const fromAudit = (r) => r && {
   id: r.id, who: r.who, action: r.action, entity: r.entity,
   when: r.when_label, ip: r.ip,
@@ -83,6 +130,9 @@ export const fromComplaint = (r) => r && {
   issue: r.issue, date: r.date, status: r.status, assigned: r.assigned,
   studentId:   r.student_id ?? null,
   type:        r.type ?? "general",
+  // Three buckets parents file under: academic / non_academic / transport.
+  // Older rows (before this column existed) come back null.
+  category:    r.category ?? null,
   submittedBy: r.submitted_by ?? "parent",
 };
 export const fromDonor = (r) => r && {
@@ -173,3 +223,256 @@ export const fromRoute = (r) => r && {
   code: r.code, name: r.name, driver: r.driver, attendant: r.attendant || "—", bus: r.bus,
   status: r.status, eta: r.eta, stops: r.stops || [],
 };
+
+// ---------- new mappers ----------
+
+export const fromTask = (r) => r && {
+  id: r.id, title: r.title, description: r.description,
+  assignedTo: r.assigned_to, assignedToName: r.assigned_to_name, assignedToRole: r.assigned_to_role,
+  assignedBy: r.assigned_by, assignedByName: r.assigned_by_name,
+  status: r.status ?? "pending", priority: r.priority ?? "normal",
+  dueDate: r.due_date, createdAt: r.created_at, updatedAt: r.updated_at,
+};
+export const toTask = (r) => ({
+  id: r.id, title: r.title, description: r.description ?? null,
+  assigned_to: r.assignedTo ?? null, assigned_to_name: r.assignedToName ?? null,
+  assigned_to_role: r.assignedToRole ?? null,
+  assigned_by: r.assignedBy ?? null, assigned_by_name: r.assignedByName ?? null,
+  status: r.status ?? "pending", priority: r.priority ?? "normal",
+  due_date: r.dueDate ?? null,
+});
+
+export const fromMeeting = (r) => r && {
+  id: r.id, title: r.title, description: r.description,
+  scheduledAt: r.scheduled_at, location: r.location,
+  audience: r.audience, audienceLabel: r.audience_label,
+  createdByEmail: r.created_by_email, createdByName: r.created_by_name,
+  createdAt: r.created_at,
+};
+export const toMeeting = (r) => ({
+  id: r.id, title: r.title, description: r.description ?? null,
+  scheduled_at: r.scheduledAt, location: r.location ?? "School premises",
+  audience: r.audience, audience_label: r.audienceLabel ?? r.audience,
+  created_by_email: r.createdByEmail ?? null,
+  created_by_name: r.createdByName ?? "Admin",
+});
+
+export const fromMeetingRsvp = (r) => r && {
+  meetingId: r.meeting_id, fromEmail: r.from_email, fromName: r.from_name,
+  response: r.response, respondedAt: r.responded_at,
+};
+
+export const fromVolunteer = (r) => r && {
+  id: r.id, name: r.name, email: r.email, phone: r.phone,
+  skills: Array.isArray(r.skills) ? r.skills : [],
+  availability: r.availability ?? "weekends", notes: r.notes,
+  hours: r.hours ?? 0, archivedAt: r.archived_at ?? null,
+  createdAt: r.created_at,
+};
+export const toVolunteer = (r) => ({
+  id: r.id, name: r.name, email: r.email ?? null, phone: r.phone ?? null,
+  skills: Array.isArray(r.skills) ? r.skills : [],
+  availability: r.availability ?? "weekends", notes: r.notes ?? null,
+  hours: r.hours ?? 0,
+});
+
+export const fromVolunteerHours = (r) => r && {
+  id: r.id, volunteerId: r.volunteer_id, hours: r.hours ?? 0,
+  activity: r.activity ?? "—", date: r.date, createdAt: r.created_at,
+};
+
+export const fromChatThread = (r) => r && {
+  id: r.id, parentEmail: r.parent_email, parentName: r.parent_name,
+  teacherEmail: r.teacher_email, teacherName: r.teacher_name,
+  studentId: r.student_id, studentName: r.student_name, cls: r.cls,
+  createdAt: r.created_at, lastMessageAt: r.last_message_at,
+};
+export const toChatThread = (r) => ({
+  id: r.id, parent_email: r.parentEmail, parent_name: r.parentName,
+  teacher_email: r.teacherEmail, teacher_name: r.teacherName,
+  student_id: r.studentId, student_name: r.studentName ?? "—",
+  cls: r.cls ?? "—",
+});
+
+export const fromChatMessage = (r) => r && {
+  id: r.id, threadId: r.thread_id,
+  fromEmail: r.from_email, fromName: r.from_name, fromRole: r.from_role,
+  body: r.body, sentAt: r.sent_at,
+};
+
+export const fromTcRequest = (r) => r && {
+  id: r.id, studentId: r.student_id, studentName: r.student_name, cls: r.cls,
+  reason: r.reason, status: r.status ?? "requested",
+  requestedBy: r.requested_by, requestedAt: r.requested_at,
+  issuedAt: r.issued_at, issuedBy: r.issued_by, serialNo: r.serial_no,
+};
+export const toTcRequest = (r) => ({
+  id: r.id, student_id: r.studentId, student_name: r.studentName ?? "—",
+  cls: r.cls ?? "—", reason: r.reason ?? null,
+  status: r.status ?? "requested",
+  requested_by: r.requestedBy ?? "Admin",
+  issued_at: r.issuedAt ?? null, issued_by: r.issuedBy ?? null,
+  serial_no: r.serialNo ?? null,
+});
+
+export const fromTeacherAttendance = (r) => r && {
+  id: r.id, teacherId: r.teacher_id, teacherName: r.teacher_name,
+  date: r.date, status: r.status ?? "present",
+  leaveReason: r.leave_reason, markedBy: r.marked_by, markedAt: r.marked_at,
+};
+
+export const fromExam = (r) => r && {
+  id: r.id, name: r.name, type: r.type ?? "unit_test",
+  cls: r.cls, subject: r.subject, maxMarks: r.max_marks ?? 100,
+  date: r.date, createdBy: r.created_by, createdAt: r.created_at,
+};
+export const toExam = (r) => ({
+  id: r.id, name: r.name, type: r.type ?? "unit_test",
+  cls: r.cls, subject: r.subject, max_marks: r.maxMarks ?? 100,
+  date: r.date ?? null, created_by: r.createdBy ?? "Teacher",
+});
+
+export const fromExamMark = (r) => r && {
+  id: r.id, examId: r.exam_id, studentId: r.student_id,
+  studentName: r.student_name, score: r.score ?? 0,
+  maxMarks: r.max_marks ?? 100, remarks: r.remarks,
+  recordedBy: r.recorded_by, recordedAt: r.recorded_at,
+};
+
+export const fromMaintenance = (r) => r && {
+  id: r.id, busNumber: r.bus_number, routeCode: r.route_code,
+  type: r.type ?? "service", date: r.date, odometer: r.odometer,
+  vendor: r.vendor, cost: r.cost ?? 0, notes: r.notes,
+  nextDueDate: r.next_due_date, recordedBy: r.recorded_by,
+  createdAt: r.created_at,
+};
+export const toMaintenance = (r) => ({
+  id: r.id, bus_number: r.busNumber, route_code: r.routeCode ?? null,
+  type: r.type ?? "service", date: r.date,
+  odometer: r.odometer ?? null, vendor: r.vendor ?? null,
+  cost: r.cost ?? 0, notes: r.notes ?? null,
+  next_due_date: r.nextDueDate ?? null,
+  recorded_by: r.recordedBy ?? "unknown",
+});
+
+export const fromExpense = (r) => r && {
+  id: r.id, scope: r.scope ?? "school", category: r.category ?? "Misc",
+  amount: r.amount ?? 0, vendor: r.vendor, memo: r.memo, date: r.date,
+  paymentMethod: r.payment_method ?? "Bank transfer",
+  recordedBy: r.recorded_by, createdAt: r.created_at,
+  inventoryId: r.inventory_id ?? null,
+};
+export const toExpense = (r) => ({
+  id: r.id, scope: r.scope ?? "school", category: r.category ?? "Misc",
+  amount: r.amount ?? 0, vendor: r.vendor ?? null, memo: r.memo ?? null,
+  date: r.date, payment_method: r.paymentMethod ?? "Bank transfer",
+  recorded_by: r.recordedBy ?? "unknown",
+  inventory_id: r.inventoryId ?? null,
+});
+
+export const fromDocument = (r) => r && {
+  id: r.id, entityType: r.entity_type, entityId: r.entity_id,
+  label: r.label, fileName: r.file_name, mimeType: r.mime_type,
+  dataUrl: r.data_url, sizeBytes: r.size_bytes ?? 0,
+  uploadedBy: r.uploaded_by, uploadedAt: r.uploaded_at,
+};
+export const toDocument = (r) => ({
+  id: r.id, entity_type: r.entityType, entity_id: r.entityId,
+  label: r.label ?? r.fileName, file_name: r.fileName,
+  mime_type: r.mimeType ?? "application/octet-stream",
+  data_url: r.dataUrl, size_bytes: r.sizeBytes ?? (r.dataUrl?.length || 0),
+  uploaded_by: r.uploadedBy ?? "unknown",
+});
+
+export const fromDonorReceipt = (r) => r && {
+  id: r.id, donorId: r.donor_id, donorName: r.donor_name, donorType: r.donor_type,
+  amount: r.amount ?? 0, method: r.method, memo: r.memo,
+  campaignId: r.campaign_id, issuedAt: r.issued_at, issuedAtLabel: r.issued_at_label,
+};
+export const toDonorReceipt = (r) => ({
+  id: r.id, donor_id: r.donorId, donor_name: r.donorName, donor_type: r.donorType,
+  amount: r.amount ?? 0, method: r.method ?? "Bank transfer",
+  memo: r.memo ?? null, campaign_id: r.campaignId ?? null,
+  issued_at: r.issuedAt ?? new Date().toISOString(),
+  issued_at_label: r.issuedAtLabel ?? null,
+});
+
+export const fromSchool = (r) => r && {
+  id: r.id, name: r.name, city: r.city, status: r.status ?? "Active",
+  students: r.students ?? 0, fees: r.fees ?? 0, wellness: r.wellness,
+  puck: r.puck, archivedAt: r.archived_at ?? null,
+};
+export const toSchool = (r) => ({
+  id: r.id, name: r.name, city: r.city ?? null, status: r.status ?? "Active",
+  students: r.students ?? 0, fees: r.fees ?? 0,
+  wellness: r.wellness ?? null, puck: r.puck ?? "ink",
+});
+
+// ---------- timetable ----------
+export const fromTimetable = (r) => r && {
+  id: r.id, cls: r.cls, day: r.day, period: r.period,
+  subject: r.subject,
+  teacherId: r.teacher_id ?? null,
+  teacherName: r.teacher_name ?? null,
+  room: r.room ?? null,
+  updatedAt: r.updated_at ?? null,
+};
+export const toTimetable = (r) => ({
+  id: r.id, cls: r.cls, day: r.day, period: Number(r.period),
+  subject: r.subject,
+  teacher_id: r.teacherId ?? null,
+  teacher_name: r.teacherName ?? null,
+  room: r.room ?? null,
+  updated_at: r.updatedAt ?? new Date().toISOString(),
+});
+
+// ---------- library: books ----------
+export const fromBook = (r) => r && {
+  id: r.id,
+  title: r.title,
+  author: r.author ?? "",
+  category: r.category ?? "general",
+  isbn: r.isbn ?? null,
+  shelf: r.shelf ?? null,
+  totalCopies: r.total_copies ?? 1,
+  addedAt: r.added_at ?? null,
+};
+export const toBook = (r) => ({
+  id: r.id,
+  title: r.title,
+  author: r.author ?? "",
+  category: r.category ?? "general",
+  isbn: r.isbn ?? null,
+  shelf: r.shelf ?? null,
+  total_copies: Math.max(0, Math.floor(Number(r.totalCopies) || 0)),
+  added_at: r.addedAt ?? new Date().toISOString(),
+});
+
+// ---------- library: loans ----------
+export const fromLoan = (r) => r && {
+  id: r.id,
+  bookId: r.book_id,
+  bookTitle: r.book_title ?? null,
+  borrowerType: r.borrower_type,
+  borrowerId: r.borrower_id,
+  borrowerName: r.borrower_name ?? null,
+  borrowedAt: r.borrowed_at ?? null,
+  dueAt: r.due_at ?? null,
+  returnedAt: r.returned_at ?? null,
+  issuedBy: r.issued_by ?? null,
+  returnedBy: r.returned_by ?? null,
+};
+export const toLoan = (r) => ({
+  id: r.id,
+  book_id: r.bookId,
+  book_title: r.bookTitle ?? null,
+  borrower_type: r.borrowerType,
+  borrower_id: r.borrowerId,
+  borrower_name: r.borrowerName ?? null,
+  borrowed_at: r.borrowedAt ?? new Date().toISOString(),
+  due_at: r.dueAt ?? null,
+  returned_at: r.returnedAt ?? null,
+  issued_by: r.issuedBy ?? null,
+  returned_by: r.returnedBy ?? null,
+});
+

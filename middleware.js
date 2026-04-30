@@ -14,13 +14,21 @@ const PUBLIC_PATHS = [
   "/api/auth/logout",
   "/api/auth/me",
   "/api/auth/seed",
+  // Public donor form — anyone with the link can submit.
+  "/donorform",
+  "/api/donor-form",
 ];
 
 function isPublic(pathname) {
   if (PUBLIC_PATHS.includes(pathname)) return true;
   // Next.js internals + static assets
   if (pathname.startsWith("/_next/")) return true;
-  if (pathname === "/favicon.ico") return true;
+  // Anything served from /public — whitelist by extension so static images
+  // (school logo, favicons, fonts) load on the login page too. Without
+  // this, /logo.png was getting bounced to /login → broken image.
+  if (/\.(png|jpe?g|svg|gif|webp|ico|avif|bmp|woff2?|ttf|otf|eot|map)$/i.test(pathname)) {
+    return true;
+  }
   return false;
 }
 

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { patchEnquiryStatus, addEnquiry, logAudit } from "@/lib/db";
+import { patchEnquiryStatus, addEnquiry, logAudit, convertEnquiryToAdmission } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 
 const VALID_STATUSES = ["New", "Contacted", "Converted", "Rejected"];
@@ -22,6 +22,32 @@ export async function PATCH(req) {
   if (!id || !VALID_STATUSES.includes(status)) {
     return NextResponse.json({ ok: false, error: "id + valid status required" }, { status: 400 });
   }
+  // Special-case: moving to "Converted" promotes the enquiry into a real
+  // admission AND provisions a parent login. Other status transitions are
+  // simple flips through patchEnquiryStatus.
+  if (status === "Converted") {
+    let result;
+    try {
+      result = await convertEnquiryToAdmission(id);
+    } catch (e) {
+      return NextResponse.json({ ok: false, error: e.message || "Conversion failed" }, { status: 500 });
+    }
+    if (!result) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 });
+    try {
+      await logAudit(
+        actor,
+        result.parentLogin.alreadyExisted ? "Enquiry → Converted (re-confirm)" : "Enquiry → Admitted + parent provisioned",
+        `${result.enquiry.id} ${result.enquiry.name} · student ${result.student.id}`,
+      );
+    } catch {}
+    return NextResponse.json({
+      ok: true,
+      enquiry: result.enquiry,
+      student: result.student,
+      parentLogin: result.parentLogin,
+    });
+  }
+
   const updated = await patchEnquiryStatus(id, status);
   if (!updated) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 });
   try { await logAudit(actor, `Enquiry → ${status}`, `${updated.id} ${updated.name}`); } catch {}
@@ -49,6 +75,10 @@ export async function POST(req) {
   }
   const id = `ENQ-${1124 + Math.floor(Math.random() * 8999)}`;
   const today = new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
+  // Address comes through as a nested object from the new admission form,
+  // but older API callers may still send a flat string. Normalise both shapes
+  // so the file store gets a consistent record.
+  const addr = body.address && typeof body.address === "object" ? body.address : null;
   const row = {
     id,
     name: body.name.trim(),
@@ -58,6 +88,14 @@ export async function POST(req) {
     source: body.source || "Website",
     date: today,
     status: "New",
+    // New fields from the Sanfort admission template — all optional so older
+    // callers don't break. PIN is kept as a string to preserve the leading
+    // zeros some PIN codes have.
+    dob:    body.dob || null,
+    age:    body.age == null ? null : Number(body.age),
+    street: addr ? (addr.street || null) : (body.street || null),
+    city:   addr ? (addr.city   || null) : (body.city   || null),
+    pin:    addr ? (addr.pin    || null) : (body.pin    || null),
   };
   try {
     const created = await addEnquiry(row);

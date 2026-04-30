@@ -9,6 +9,8 @@ const ROLE_LABEL = {
   principal: "Principal",
   teacher: "Teacher",
   parent: "Parent",
+  school_accountant: "School Accountant",
+  trust_accountant: "Trust Accountant",
 };
 
 // Locked features admin can never disable for themselves — kept in sync with

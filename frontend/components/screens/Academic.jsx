@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
+import { resolveSchool, downloadPdf } from "@/lib/export";
 import { KPI, AvatarChip } from "../ui";
 
 // Build the last 8 week-start dates relative to today. Computed lazily on
@@ -46,6 +47,8 @@ const EMPTY_LOG = {
 };
 
 export default function ScreenAcademic({ E, refresh, role, session }) {
+  const school = resolveSchool(E?.SETTINGS);
+  const actor  = session?.name || null;
   const classes = E.CLASSES;
 
   // For teachers, build the list of assigned class-sections (e.g. ["2-A","5-B"]).
@@ -220,35 +223,83 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
     }
   };
 
-  const downloadMonthlyReport = () => {
-    const monthName = "April 2026";
-    const header = "Class,Roll,Student ID,Name,Attendance %,Homework %,Classwork %,Handwriting,Behaviour,Has Daily Log";
-    const lines = [header];
-    roster.forEach((s) => {
-      const has = (E.DAILY_LOGS || []).some((l) => l.studentId === s.id);
-      lines.push(
-        `${cls}-${sec},${s.roll},${s.id},"${s.name}",${s.attendance},${s.homework},${s.classwork},${s.handwriting},${s.behavior},${has ? "Yes" : "No"}`
-      );
+  // Quick inline patch — used by the per-row pills (CW / HW / HG). Posts a
+  // partial daily log that preserves any other fields the teacher already
+  // saved. Server-side upsert merges by (studentId, date).
+  const quickUpdate = async (s, patch) => {
+    const existing = (E.DAILY_LOGS || []).find((l) => l.studentId === s.id && l.date === TODAY_ISO) || {};
+    const r = await fetch("/api/academic/log", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        studentId: s.id,
+        studentName: s.name,
+        cls: `${cls}-${sec}`,
+        date: TODAY_ISO,
+        // Preserve everything that's already there, then layer on the patch.
+        attendance: existing.attendance || "present",
+        leaveReason: existing.leaveReason || null,
+        classwork: existing.classwork || "",
+        classworkStatus: existing.classworkStatus || null,
+        homework: existing.homework || "",
+        homeworkStatus: existing.homeworkStatus || null,
+        topics: existing.topics || "",
+        handwritingNote: existing.handwritingNote || "",
+        handwritingGrade: existing.handwritingGrade || "",
+        behaviour: existing.behaviour || "",
+        extra: existing.extra || "",
+        postedBy: session?.name || "Teacher",
+        ...patch,
+      }),
     });
-    // Class-level summary at the bottom
-    lines.push("");
-    lines.push(`Summary,Class ${cls}-${sec},${monthName}`);
-    lines.push(`Avg attendance,${Math.round(roster.reduce((a, r) => a + r.attendance, 0) / roster.length)}%`);
-    lines.push(`Avg homework,${Math.round(roster.reduce((a, r) => a + r.homework, 0) / roster.length)}%`);
-    lines.push(`Avg classwork,${Math.round(roster.reduce((a, r) => a + r.classwork, 0) / roster.length)}%`);
-    lines.push(`Logs posted,${(E.DAILY_LOGS || []).filter((l) => l.cls === `${cls}-${sec}`).length}`);
+    const json = await r.json().catch(() => ({}));
+    if (json.ok) {
+      await refresh?.();
+    } else {
+      flash(json.error || "Could not save", "bad");
+    }
+  };
 
-    const csv = lines.join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `academic-class-${cls}-${sec}-${monthName.replace(" ", "-").toLowerCase()}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    flash(`Exported monthly report · class ${cls}-${sec}`);
+  const downloadMonthlyReport = () => {
+    const monthName = new Date().toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+    const avgAtt = roster.length ? Math.round(roster.reduce((a, r) => a + r.attendance, 0) / roster.length) : 0;
+    const avgHw  = roster.length ? Math.round(roster.reduce((a, r) => a + r.homework,   0) / roster.length) : 0;
+    const avgCw  = roster.length ? Math.round(roster.reduce((a, r) => a + r.classwork,  0) / roster.length) : 0;
+    const logsPosted = (E.DAILY_LOGS || []).filter((l) => l.cls === `${cls}-${sec}`).length;
+
+    downloadPdf({
+      title: `Academic Monthly Report · Class ${cls}-${sec}`,
+      subtitle: `${roster.length} student${roster.length === 1 ? "" : "s"} · ${monthName}`,
+      school, actor,
+      dateRange: monthName,
+      orientation: "landscape",
+      summary: [
+        { label: "Students",       value: roster.length },
+        { label: "Avg attendance", value: `${avgAtt}%` },
+        { label: "Avg homework",   value: `${avgHw}%` },
+        { label: "Logs posted",    value: logsPosted },
+      ],
+      columns: [
+        { key: "i",          label: "#",          align: "right",  width: "32px" },
+        { key: "roll",       label: "Roll",       align: "center", width: "60px" },
+        { key: "id",         label: "Student ID", width: "100px" },
+        { key: "name",       label: "Name" },
+        { key: "attendance", label: "Att %",      align: "right",  width: "60px" },
+        { key: "homework",   label: "HW %",       align: "right",  width: "60px" },
+        { key: "classwork",  label: "CW %",       align: "right",  width: "60px" },
+        { key: "handwriting",label: "Handwriting",align: "center", width: "100px" },
+        { key: "behavior",   label: "Behaviour",  align: "center", width: "100px" },
+        { key: "log",        label: "Daily log",  align: "center", width: "80px" },
+      ],
+      rows: roster.map((s, i) => ({
+        i: i + 1, roll: s.roll, id: s.id, name: s.name,
+        attendance: `${s.attendance}%`, homework: `${s.homework}%`, classwork: `${s.classwork}%`,
+        handwriting: s.handwriting || "—", behavior: s.behavior || "—",
+        log: (E.DAILY_LOGS || []).some((l) => l.studentId === s.id) ? "Yes" : "No",
+      })),
+      filename: `${school.name.replace(/\s+/g, "-").toLowerCase()}-academic-class-${cls}-${sec}-${monthName.replace(" ", "-").toLowerCase()}`,
+    });
+    flash(`Opened PDF preview · class ${cls}-${sec}`);
   };
 
   return (
@@ -287,8 +338,8 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
                   <Icon name="megaphone" size={13} />Announce to class
                 </button>
               )}
-              <button className="btn" onClick={downloadMonthlyReport}>
-                <Icon name="download" size={13} />Monthly report
+              <button className="btn" onClick={downloadMonthlyReport} title="Open a printable, branded PDF report">
+                <Icon name="download" size={13} />Export PDF
               </button>
               <button className="btn accent" onClick={() => setShowLog(true)}>
                 <Icon name="plus" size={13} />Log today
@@ -370,11 +421,11 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
         </div>
         )}
 
-        <div className="card col-4">
+        <div className="card col-7">
           <div className="card-head">
             <div>
               <div className="card-title">Class {cls}-{sec} · {roster.length} students</div>
-              <div className="card-sub">{week.label}</div>
+              <div className="card-sub">Tap the pills to mark today inline · {week.label}</div>
             </div>
           </div>
           <div style={{ maxHeight: 620, overflowY: "auto" }}>
@@ -383,21 +434,52 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
             )}
             {roster.map((s, i) => {
               const act = i === selectedStudent;
-              const hasLog = (E.DAILY_LOGS || []).some((l) => l.studentId === s.id && l.date === TODAY_ISO);
+              const log = (E.DAILY_LOGS || []).find((l) => l.studentId === s.id && l.date === TODAY_ISO) || {};
+              const isAbsent = log.attendance === "absent";
               return (
-                <div key={s.id} onClick={() => setSelectedStudent(i)} className="lrow" style={{ cursor: "pointer", background: act ? "var(--accent-soft)" : undefined }}>
-                  <div style={{ width: 28, fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-3)" }}>{String(s.roll).padStart(2, "0")}</div>
+                <div
+                  key={s.id}
+                  className="lrow"
+                  style={{ cursor: "pointer", background: act ? "var(--accent-soft)" : undefined, gap: 10, paddingTop: 10, paddingBottom: 10 }}
+                  onClick={() => setSelectedStudent(i)}
+                >
+                  <div style={{ width: 24, fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-3)", flexShrink: 0 }}>{String(s.roll).padStart(2, "0")}</div>
                   <AvatarChip initials={s.name.split(" ").map((n) => n[0]).join("")} />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: act ? 500 : 400, display: "flex", alignItems: "center", gap: 6 }}>
-                      {s.name}
-                      {hasLog && <span className="chip ok" style={{ height: 16, fontSize: 9.5, padding: "0 6px" }}><span className="dot" />logged</span>}
-                    </div>
-                    <div className="s">{s.id}</div>
+                    <div style={{ fontSize: 13, fontWeight: 500, color: "var(--ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</div>
+                    <div className="s">{s.id} · {s.attendance}% term attendance</div>
                   </div>
-                  <div style={{ textAlign: "right" }}>
-                    <div className="mono" style={{ fontSize: 12, color: s.attendance < 85 ? "var(--bad)" : "var(--ink-2)" }}>{s.attendance}%</div>
-                    <div style={{ fontSize: 10, color: "var(--ink-4)" }}>attendance</div>
+                  {/* Inline per-task toggles — attendance is set elsewhere.
+                      Parents see the current state but can't change it: the
+                      controls render disabled, with an explanatory tooltip. */}
+                  <div style={{ display: "flex", gap: 4, alignItems: "center", flexShrink: 0 }} onClick={(e) => e.stopPropagation()}
+                    title={role === "parent" ? "Daily log is read-only for parents — only the class teacher can update this." : undefined}>
+                    <PlusMinusPair
+                      label="CW"
+                      title="Classwork"
+                      value={log.classworkStatus}
+                      disabled={isAbsent || role === "parent"}
+                      onMark={(next) => quickUpdate(s, { classworkStatus: next, classwork: log.classwork || "Classwork" })}
+                      doneVal="completed"
+                      pendingVal="not_completed"
+                    />
+                    <PlusMinusPair
+                      label="HW"
+                      title="Homework"
+                      value={log.homeworkStatus}
+                      disabled={isAbsent || role === "parent"}
+                      onMark={(next) => quickUpdate(s, { homeworkStatus: next, homework: log.homework || "Homework" })}
+                      doneVal="completed"
+                      pendingVal="pending"
+                    />
+                    <span style={{ width: 1, height: 16, background: "var(--rule)" }} />
+                    <GradePill
+                      label="HG"
+                      title="Click to pick a handwriting grade"
+                      value={log.handwritingGrade}
+                      disabled={isAbsent || role === "parent"}
+                      onPick={(g) => quickUpdate(s, { handwritingGrade: g, handwritingNote: log.handwritingNote || "" })}
+                    />
                   </div>
                 </div>
               );
@@ -406,7 +488,7 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
         </div>
 
         {!student && (
-          <div className="col-8">
+          <div className="col-5">
             <div className="card">
               <div className="empty" style={{ padding: 60 }}>
                 Pick a class with students to see daily logs and attendance here.
@@ -416,7 +498,7 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
         )}
 
         {student && (
-        <div className="col-8" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div className="col-5" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <div className="card">
             <div style={{ padding: "16px 18px", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
               <div style={{ width: 48, height: 48, borderRadius: 12, background: "linear-gradient(135deg, var(--accent), var(--accent-2))", color: "var(--accent-ink)", display: "grid", placeItems: "center", fontWeight: 600, fontSize: 18 }}>
@@ -433,9 +515,11 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
                 <button className="btn sm" onClick={() => flash(`TC requested for ${student.name}`)}>
                   <Icon name="book" size={12} />TC
                 </button>
-                <button className="btn sm accent" onClick={() => setShowLog(true)}>
-                  <Icon name="pencil" size={12} />{isUserSaved ? "Edit log" : "Today's log"}
-                </button>
+                {role !== "parent" && (
+                  <button className="btn sm accent" onClick={() => setShowLog(true)}>
+                    <Icon name="pencil" size={12} />{isUserSaved ? "Edit log" : "Today's log"}
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -852,6 +936,92 @@ function LogModal({ student, cls, existing, today, onClose, onSubmit }) {
           </div>
         </form>
       </div>
+    </div>
+  );
+}
+
+// Two-button pair: [LABEL] [+] [−]. Click + = completed; click − = pending.
+// The currently active button stays filled; the other goes grey.
+function PlusMinusPair({ label, title, value, disabled, onMark, doneVal, pendingVal }) {
+  const isDone    = value === doneVal;
+  const isPending = value === pendingVal;
+  const baseBtn = {
+    width: 22, height: 22, borderRadius: 6,
+    border: 0, cursor: disabled ? "not-allowed" : "pointer",
+    fontSize: 13, fontWeight: 700,
+    display: "grid", placeItems: "center",
+    transition: "background .12s",
+    opacity: disabled ? 0.4 : 1,
+  };
+  return (
+    <div style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+      <span style={{ fontSize: 10.5, fontWeight: 600, color: "var(--ink-3)", marginRight: 2 }}>{label}</span>
+      <button
+        type="button" disabled={disabled}
+        title={`${title} · mark completed`}
+        onClick={() => onMark(isDone ? null : doneVal)}
+        style={{ ...baseBtn, background: isDone ? "var(--ok)" : "var(--bg-2)", color: isDone ? "#fff" : "var(--ink-3)" }}
+      >+</button>
+      <button
+        type="button" disabled={disabled}
+        title={`${title} · mark pending`}
+        onClick={() => onMark(isPending ? null : pendingVal)}
+        style={{ ...baseBtn, background: isPending ? "var(--bad)" : "var(--bg-2)", color: isPending ? "#fff" : "var(--ink-3)" }}
+      >−</button>
+    </div>
+  );
+}
+
+// Handwriting grade dropdown — opens a tiny inline menu of letter grades.
+function GradePill({ label, title, value, disabled, onPick }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, [open]);
+  const has = !!value;
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button
+        type="button"
+        title={`${title}${has ? ` — ${value}` : ""}`}
+        disabled={disabled}
+        onClick={() => setOpen((s) => !s)}
+        style={{
+          height: 22, padding: "0 7px", borderRadius: 6,
+          background: has ? "var(--accent)" : "var(--bg-2)",
+          color: has ? "#fff" : "var(--ink-3)",
+          border: 0, cursor: disabled ? "not-allowed" : "pointer",
+          fontSize: 10.5, fontWeight: 600, opacity: disabled ? 0.4 : 1,
+          display: "inline-flex", alignItems: "center", gap: 4,
+        }}
+      >{label}<span style={{ fontSize: 10 }}>{value || "—"}</span></button>
+      {open && (
+        <div style={{
+          position: "absolute", right: 0, top: "calc(100% + 4px)",
+          background: "var(--card)", border: "1px solid var(--rule)",
+          borderRadius: 8, padding: 4, zIndex: 50,
+          display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 2,
+          boxShadow: "var(--shadow-lg)",
+          minWidth: 120,
+        }}>
+          {["A+", "A", "A-", "B+", "B", "B-", "C", "D"].map((g) => (
+            <button
+              key={g} type="button"
+              onClick={() => { onPick(g); setOpen(false); }}
+              style={{
+                padding: "4px 6px", borderRadius: 5,
+                background: g === value ? "var(--accent-soft)" : "transparent",
+                color: "var(--ink)", border: 0, cursor: "pointer",
+                fontSize: 11, fontWeight: 500,
+              }}
+            >{g}</button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
