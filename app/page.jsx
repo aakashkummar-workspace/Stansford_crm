@@ -25,6 +25,7 @@ function shapeForScreens(db) {
     LIBRARY: db.library || [],
     LOANS: db.libraryLoans || [],
     TIMETABLE: db.timetable || [],
+    SYLLABUS: db.syllabus || [],
     MOVEMENTS: db.movements || [],
     BROADCASTS: db.broadcasts || [],
     TEMPLATES: db.templates || [],

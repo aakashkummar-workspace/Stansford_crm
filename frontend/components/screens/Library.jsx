@@ -194,6 +194,8 @@ export default function ScreenLibrary({ E, refresh, role, session }) {
   const [editingBook, setEditingBook] = useState(null);
   const [borrowingBook, setBorrowingBook] = useState(null);
   const [showImport, setShowImport] = useState(false);
+  const [showRemoveAll, setShowRemoveAll] = useState(false);
+  const canWipe = role === "admin" || role === "principal";
 
   // ---------- actions --------------
   async function handleAddBook(payload) {
@@ -235,6 +237,20 @@ export default function ScreenLibrary({ E, refresh, role, session }) {
       showToast(`Removed "${book.title}"`, "ok");
       await refresh?.();
     } catch (e) { showToast(e.message, "err"); }
+  }
+
+  // Bulk wipe — admin / principal only. Always behind a typed-confirm
+  // dialog so a fat-finger can't take out the whole catalogue.
+  async function handleRemoveAllBooks() {
+    const r = await fetch("/api/library/books", {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ all: true, confirm: "REMOVE ALL BOOKS" }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
+    showToast(`Removed all ${j.removed || 0} books`, "ok");
+    await refresh?.();
   }
 
   async function handleBorrow(payload) {
@@ -308,6 +324,16 @@ export default function ScreenLibrary({ E, refresh, role, session }) {
             <button className="btn" onClick={() => setShowImport(true)} title="Bulk-import books from an Excel/CSV file">
               <Icon name="upload" size={13} />Import Excel
             </button>
+            {canWipe && (E.LIBRARY || []).length > 0 && (
+              <button
+                className="btn"
+                onClick={() => setShowRemoveAll(true)}
+                title="Wipe the entire library catalogue. Cannot be undone."
+                style={{ color: "var(--bad, #b13c1c)", borderColor: "var(--bad, #b13c1c)" }}
+              >
+                <Icon name="x" size={13} />Remove all books
+              </button>
+            )}
             <button className="btn accent" onClick={() => setShowAddBook(true)}>
               <Icon name="plus" size={13} />Add book
             </button>
@@ -545,6 +571,101 @@ export default function ScreenLibrary({ E, refresh, role, session }) {
           }}
         />
       )}
+      {showRemoveAll && canWipe && (
+        <RemoveAllBooksModal
+          totalBooks={(E.LIBRARY || []).length}
+          activeLoans={(E.LOANS || []).filter((l) => !l.returnedAt).length}
+          onClose={() => setShowRemoveAll(false)}
+          onConfirm={async () => {
+            await handleRemoveAllBooks();
+            setShowRemoveAll(false);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ---------- Remove-all confirm modal -----------------------------------
+// Destructive bulk action — typed-confirm pattern (user must type the
+// exact phrase) so it's almost impossible to fire by accident.
+function RemoveAllBooksModal({ totalBooks, activeLoans, onClose, onConfirm }) {
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const PHRASE = "REMOVE ALL BOOKS";
+  const blocked = activeLoans > 0;
+  const canFire = !blocked && typed === PHRASE && !busy;
+
+  async function fire() {
+    if (!canFire) return;
+    setBusy(true); setErr("");
+    try { await onConfirm(); }
+    catch (e) { setErr(e.message || "Failed"); setBusy(false); }
+  }
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(20,16,10,0.55)",
+      display: "grid", placeItems: "center", zIndex: 250, padding: 16,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{
+        width: "100%", maxWidth: 480,
+        borderTop: "3px solid var(--bad, #b13c1c)",
+      }}>
+        <div className="card-head">
+          <div>
+            <div className="card-title" style={{ color: "var(--bad, #b13c1c)" }}>
+              <Icon name="warning" size={14} style={{ marginRight: 6 }} />
+              Remove all library books?
+            </div>
+            <div className="card-sub">
+              {blocked
+                ? `Cannot proceed — ${activeLoans} active loan${activeLoans === 1 ? "" : "s"} still out. Return them first.`
+                : `This will permanently delete all ${totalBooks} book${totalBooks === 1 ? "" : "s"} from the catalogue. Loan history is preserved, but the books themselves cannot be recovered.`}
+            </div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
+        <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {!blocked && (
+            <>
+              <div style={{ fontSize: 12, color: "var(--ink-2)" }}>
+                To confirm, type <strong style={{ fontFamily: "var(--font-mono)", color: "var(--bad, #b13c1c)" }}>{PHRASE}</strong> below.
+              </div>
+              <input
+                className="input"
+                value={typed}
+                onChange={(e) => setTyped(e.target.value)}
+                placeholder={PHRASE}
+                autoFocus
+                style={{ fontFamily: "var(--font-mono)", letterSpacing: "0.04em" }}
+              />
+            </>
+          )}
+          {err && (
+            <div style={{ background: "var(--bad-soft, #fbe1d8)", color: "var(--bad, #b13c1c)", padding: "9px 12px", borderRadius: 7, fontSize: 12, fontWeight: 700 }}>
+              {err}
+            </div>
+          )}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, paddingTop: 4 }}>
+            <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button
+              type="button"
+              className="btn"
+              onClick={fire}
+              disabled={!canFire}
+              style={{
+                background: canFire ? "var(--bad, #b13c1c)" : "var(--bg-2)",
+                color: canFire ? "#fff" : "var(--ink-4)",
+                borderColor: canFire ? "var(--bad, #b13c1c)" : "var(--rule)",
+              }}
+            >
+              {busy ? "Removing…" : <><Icon name="x" size={13} />Remove all books</>}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -553,6 +674,8 @@ export default function ScreenLibrary({ E, refresh, role, session }) {
 function BooksTab({ books, activeByBook, canManage, onBorrow, onEdit, onRemove }) {
   const [q, setQ] = useState("");
   const [cat, setCat] = useState("all");
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 100;
 
   const cats = useMemo(() => {
     const set = new Set();
@@ -560,21 +683,43 @@ function BooksTab({ books, activeByBook, canManage, onBorrow, onEdit, onRemove }
     return ["all", ...[...set].sort()];
   }, [books]);
 
+  // Sort ascending — by title (numeric-aware) so 1, 2, 3 come before 10,
+  // 11. Falls back to id for books with the same title.
+  const sortedBooks = useMemo(() => {
+    return [...books].sort((a, b) => {
+      const t = String(a.title || "").localeCompare(String(b.title || ""), undefined, { numeric: true, sensitivity: "base" });
+      if (t !== 0) return t;
+      return String(a.id || "").localeCompare(String(b.id || ""));
+    });
+  }, [books]);
+
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    return books.filter((b) => {
+    return sortedBooks.filter((b) => {
       if (cat !== "all" && b.category !== cat) return false;
       if (!needle) return true;
       return `${b.title} ${b.author} ${b.id} ${b.isbn || ""}`.toLowerCase().includes(needle);
     });
-  }, [books, q, cat]);
+  }, [sortedBooks, q, cat]);
+
+  // Reset to page 1 whenever the search/category changes so the user
+  // doesn't end up on an out-of-range page after narrowing the list.
+  useEffect(() => { setPage(1); }, [q, cat]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pageStart = (safePage - 1) * PAGE_SIZE;
+  const paged = filtered.slice(pageStart, pageStart + PAGE_SIZE);
 
   return (
     <div className="card">
       <div className="card-head">
         <div>
           <div className="card-title">Catalog</div>
-          <div className="card-sub">{books.length} title{books.length === 1 ? "" : "s"} · {filtered.length} shown</div>
+          <div className="card-sub">
+            {books.length} title{books.length === 1 ? "" : "s"} · {filtered.length} shown
+            {totalPages > 1 && <> · page {safePage} of {totalPages}</>}
+          </div>
         </div>
         <div className="card-actions">
           <input
@@ -610,7 +755,7 @@ function BooksTab({ books, activeByBook, canManage, onBorrow, onEdit, onRemove }
                   : "No matches for the current filter."}
               </td></tr>
             )}
-            {filtered.map((b) => {
+            {paged.map((b) => {
               const active = activeByBook.get(b.id) || 0;
               const available = Math.max(0, (b.totalCopies || 0) - active);
               const out = available === 0;
@@ -651,6 +796,48 @@ function BooksTab({ books, activeByBook, canManage, onBorrow, onEdit, onRemove }
           </tbody>
         </table>
       </div>
+      {totalPages > 1 && (
+        <div style={{
+          display: "flex", justifyContent: "space-between", alignItems: "center",
+          padding: "12px 16px", borderTop: "1px solid var(--rule)", flexWrap: "wrap", gap: 8,
+        }}>
+          <div style={{ fontSize: 12, color: "var(--ink-3)" }}>
+            Showing <strong style={{ color: "var(--ink)" }}>{pageStart + 1}</strong>–<strong style={{ color: "var(--ink)" }}>{Math.min(pageStart + PAGE_SIZE, filtered.length)}</strong> of {filtered.length}
+          </div>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <button className="btn sm" onClick={() => setPage(1)} disabled={safePage === 1}>« First</button>
+            <button className="btn sm" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={safePage === 1}>← Prev</button>
+            {/* Compact page-number strip — always shows current ± 2, with
+                first/last and ellipses when needed. */}
+            {(() => {
+              const pages = new Set([1, totalPages, safePage, safePage - 1, safePage + 1, safePage - 2, safePage + 2]);
+              const list = [...pages].filter((n) => n >= 1 && n <= totalPages).sort((a, b) => a - b);
+              const out = [];
+              let prev = 0;
+              for (const n of list) {
+                if (prev && n - prev > 1) out.push(<span key={`gap-${n}`} style={{ padding: "0 4px", color: "var(--ink-4)" }}>…</span>);
+                out.push(
+                  <button
+                    key={n}
+                    className="btn sm"
+                    onClick={() => setPage(n)}
+                    style={{
+                      background: n === safePage ? "var(--accent)" : "var(--card)",
+                      color:      n === safePage ? "#fff" : "var(--ink-2)",
+                      borderColor: n === safePage ? "var(--accent)" : "var(--rule)",
+                      minWidth: 32,
+                    }}
+                  >{n}</button>
+                );
+                prev = n;
+              }
+              return out;
+            })()}
+            <button className="btn sm" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={safePage === totalPages}>Next →</button>
+            <button className="btn sm" onClick={() => setPage(totalPages)} disabled={safePage === totalPages}>Last »</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

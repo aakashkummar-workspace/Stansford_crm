@@ -50,6 +50,7 @@ export const ALL_FEATURES = [
   { id: "volunteers",    label: "Volunteers",                 group: "CRM" },
   { id: "reports",       label: "Reports & Financials",       group: "Governance" },
   { id: "exams",         label: "Exams & Marks",              group: "People" },
+  { id: "syllabus",      label: "Syllabus",                   group: "People" },
   { id: "my_attendance", label: "My attendance (self mark)",  group: "People" },
   // v2 additions
   { id: "leave",                label: "Leave requests",            group: "Workflow" },

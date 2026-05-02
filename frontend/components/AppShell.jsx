@@ -38,6 +38,7 @@ import ScreenMeetings from "./screens/Meetings";
 import ScreenVolunteers from "./screens/Volunteers";
 import ScreenLibrary from "./screens/Library";
 import ScreenTimetable from "./screens/Timetable";
+import ScreenSyllabus from "./screens/Syllabus";
 import ScreenAccount from "./screens/Account";
 import ScreenLeave from "./screens/Leave";
 import ScreenRemarksRewards from "./screens/RemarksRewards";
@@ -82,6 +83,7 @@ const SCREENS = {
   volunteers: ScreenVolunteers,
   library: ScreenLibrary,
   timetable: ScreenTimetable,
+  syllabus: ScreenSyllabus,
   account: ScreenAccount,
   leave: ScreenLeave,
   remarks_rewards: ScreenRemarksRewards,
@@ -270,6 +272,7 @@ export default function AppShell({ initialData, session }) {
         LIBRARY: json.library || [],
         LOANS: json.libraryLoans || [],
         TIMETABLE: json.timetable || [],
+        SYLLABUS: json.syllabus || [],
         MOVEMENTS: json.movements || [],
         BROADCASTS: json.broadcasts || [],
         TEMPLATES: json.templates || [],

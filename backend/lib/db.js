@@ -375,6 +375,9 @@ export async function readAllData() {
         const file = safeArr("timetable").filter((t) => !seen.has(t.id));
         return [...sb, ...file];
       })(),
+      // Per-class syllabus rows. Read via listSyllabus which itself unions
+      // Supabase + file store, so a fresh install (no migration) still works.
+      syllabus: await listSyllabus().catch(() => safeArr("syllabus")),
     };
   }
   const db = fileRead();
@@ -389,6 +392,7 @@ export async function readAllData() {
     library: Array.isArray(db.library) ? db.library : [],
     libraryLoans: Array.isArray(db.libraryLoans) ? db.libraryLoans : [],
     timetable: Array.isArray(db.timetable) ? db.timetable : [],
+    syllabus: Array.isArray(db.syllabus) ? db.syllabus : [],
     appSettings: db.appSettings && typeof db.appSettings === "object" ? db.appSettings : {},
   };
 }
@@ -3682,6 +3686,36 @@ export async function removeBook(id) {
   return removed;
 }
 
+// Bulk-remove every book in the library catalogue. Refuses to run if
+// any active loans exist — the loans table is the authoritative ledger
+// of who has what, and orphaning them would lose audit trail. Returns
+// the count removed.
+export async function removeAllBooks() {
+  const db = fileRead();
+  const activeLoans = (db.libraryLoans || []).filter((l) => !l.returnedAt);
+  if (activeLoans.length > 0) {
+    throw new Error(`Cannot remove all books — ${activeLoans.length} active loan${activeLoans.length === 1 ? "" : "s"} still out. Return them first.`);
+  }
+  let removedCount = 0;
+  if (supabaseEnabled) {
+    // Supabase requires a non-trivial filter on bulk delete; use a
+    // tautology on the primary key so every row matches.
+    const sel = await supabase.from("library").select("id");
+    if (!sel.error && sel.data) {
+      removedCount = sel.data.length;
+      if (removedCount > 0) {
+        await supabase.from("library").delete().neq("id", "__never__");
+      }
+    }
+  }
+  if (Array.isArray(db.library) && db.library.length > 0) {
+    if (!removedCount) removedCount = db.library.length;
+    db.library = [];
+    fileWrite(db);
+  }
+  return removedCount;
+}
+
 // Issue a book to a borrower (student or teacher). Decrements availability
 // implicitly via the loan log. Throws if no copies are free.
 export async function borrowBook({ bookId, borrowerType, borrowerId, borrowerName, dueDays, issuedBy }) {
@@ -3768,6 +3802,138 @@ export async function returnBook(loanId, returnedBy) {
   };
   fileWrite(db);
   return db.libraryLoans[idx];
+}
+
+// ---------- syllabus ----------
+// One row per topic/lesson within a class section. Stored file-first with
+// Supabase mirror so the dev fallback keeps working before the schema
+// migration is applied. Read path is union of cloud + file (deduped by id),
+// matching the library/timetable pattern.
+
+function normaliseSyllabusRow(row, who) {
+  // Coerce + clamp the inputs so a sloppy import (mixed-case class ids,
+  // text in the term column, etc.) still produces a clean row instead of
+  // bailing the whole spreadsheet.
+  const cls = String(row.cls || "").trim().toUpperCase().replace(/\s+/g, "");
+  const subject = String(row.subject || "").trim();
+  const topic   = String(row.topic   || "").trim();
+  if (!cls)     throw new Error("class is required");
+  if (!subject) throw new Error("subject is required");
+  if (!topic)   throw new Error("topic is required");
+  const termRaw = Number(row.term);
+  const weekRaw = Number(row.weekNo);
+  return {
+    id: row.id || `SYL-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 999)}`,
+    cls,
+    subject,
+    chapter: String(row.chapter || "").trim() || null,
+    topic,
+    term:   Number.isFinite(termRaw) && termRaw >= 1 && termRaw <= 4 ? Math.floor(termRaw) : null,
+    weekNo: Number.isFinite(weekRaw) && weekRaw >= 1 && weekRaw <= 60 ? Math.floor(weekRaw) : null,
+    notes:  String(row.notes || "").trim() || null,
+    addedAt: row.addedAt || new Date().toISOString(),
+    addedBy: row.addedBy || who || null,
+  };
+}
+
+export async function listSyllabus() {
+  const byId = new Map();
+  if (supabaseEnabled) {
+    const r = await supabase.from("syllabus").select("*").order("cls").order("term").order("week_no");
+    if (!r.error && Array.isArray(r.data)) {
+      for (const row of r.data) {
+        byId.set(row.id, {
+          id: row.id, cls: row.cls, subject: row.subject,
+          chapter: row.chapter, topic: row.topic,
+          term: row.term, weekNo: row.week_no,
+          notes: row.notes, addedAt: row.added_at, addedBy: row.added_by,
+        });
+      }
+    } else if (r.error && !isSchemaMissError(r.error)) {
+      console.warn(`[syllabus] read fell back: ${r.error.message}`);
+    }
+  }
+  // Layer the file copy on top so any rows written before the migration was
+  // applied (or while Supabase was unreachable) are still surfaced.
+  try {
+    const db = fileRead();
+    const file = Array.isArray(db.syllabus) ? db.syllabus : [];
+    for (const row of file) if (row?.id && !byId.has(row.id)) byId.set(row.id, row);
+  } catch {}
+  return [...byId.values()];
+}
+
+export async function addSyllabusEntry(payload, who) {
+  const filled = normaliseSyllabusRow(payload, who);
+  // Mirror to Supabase + file store. Supabase is best-effort: if the table
+  // hasn't been provisioned yet we still keep going via the file backend.
+  if (supabaseEnabled) {
+    const ins = await supabase.from("syllabus").insert({
+      id: filled.id, cls: filled.cls, subject: filled.subject,
+      chapter: filled.chapter, topic: filled.topic,
+      term: filled.term, week_no: filled.weekNo,
+      notes: filled.notes, added_at: filled.addedAt, added_by: filled.addedBy,
+    });
+    if (ins.error && !isSchemaMissError(ins.error)) {
+      console.warn(`[syllabus] insert fell back: ${ins.error.message}`);
+    }
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.syllabus)) db.syllabus = [];
+  db.syllabus.unshift(filled);
+  fileWrite(db);
+  return filled;
+}
+
+export async function removeSyllabusEntry(id) {
+  if (!id) throw new Error("id required");
+  let removed = null;
+  if (supabaseEnabled) {
+    const sel = await supabase.from("syllabus").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      const del = await supabase.from("syllabus").delete().eq("id", id);
+      if (!del.error) {
+        removed = {
+          id: sel.data.id, cls: sel.data.cls, subject: sel.data.subject,
+          chapter: sel.data.chapter, topic: sel.data.topic,
+          term: sel.data.term, weekNo: sel.data.week_no,
+          notes: sel.data.notes,
+        };
+      }
+    }
+  }
+  const db = fileRead();
+  const idx = (db.syllabus || []).findIndex((r) => r.id === id);
+  if (idx !== -1) {
+    if (!removed) removed = db.syllabus[idx];
+    db.syllabus.splice(idx, 1);
+    fileWrite(db);
+  }
+  return removed;
+}
+
+// Wipe every syllabus row for a single class (e.g. before re-importing the
+// year's full plan). Returns the count removed.
+export async function removeAllSyllabusForClass(cls) {
+  const target = String(cls || "").trim().toUpperCase();
+  if (!target) throw new Error("cls required");
+  let removed = 0;
+  if (supabaseEnabled) {
+    const sel = await supabase.from("syllabus").select("id").eq("cls", target);
+    if (!sel.error && sel.data) {
+      removed = sel.data.length;
+      if (removed > 0) await supabase.from("syllabus").delete().eq("cls", target);
+    }
+  }
+  const db = fileRead();
+  if (Array.isArray(db.syllabus)) {
+    const before = db.syllabus.length;
+    db.syllabus = db.syllabus.filter((r) => r.cls !== target);
+    const fileRemoved = before - db.syllabus.length;
+    if (!removed) removed = fileRemoved;
+    if (fileRemoved > 0) fileWrite(db);
+  }
+  return removed;
 }
 
 // ---------- subjects ----------

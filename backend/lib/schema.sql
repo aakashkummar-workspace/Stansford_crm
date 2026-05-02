@@ -794,6 +794,28 @@ create table if not exists inventory_categories (
 );
 alter table inventory_categories enable row level security;
 
+-- ---------- syllabus ----------
+-- One row per topic/lesson within a class section. Bulk-imported from an
+-- Excel file (Class | Subject | Chapter | Topic | Term | Week | Notes) on
+-- the Syllabus screen. cls is the composite '5-A' / '12-C' string used by
+-- timetable + attendance, so a class teacher can filter their own section
+-- without joining a classes table.
+create table if not exists syllabus (
+  id        text primary key,            -- 'SYL-<random>'
+  cls       text not null,               -- '1-A', '12-C'
+  subject   text not null,
+  chapter   text,
+  topic     text not null,
+  term      int,                         -- 1..4
+  week_no   int,                         -- 1..60 (school year weeks)
+  notes     text,
+  added_at  timestamptz default now(),
+  added_by  text
+);
+create index if not exists idx_syllabus_cls     on syllabus (cls);
+create index if not exists idx_syllabus_subject on syllabus (subject);
+alter table syllabus enable row level security;
+
 -- =====================================================================
 -- v2 expansion: roles, permissions, finance roles, parent↔admin chat,
 -- public donor form, student activities, remarks/rewards, government
