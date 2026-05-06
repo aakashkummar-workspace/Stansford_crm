@@ -65,10 +65,15 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
   useEffect(() => {
     if (!todayIso) return;
     const next = {};
+    const ATT_STATES = new Set(["present", "late", "absent", "leave"]);
     for (const stu of roster) {
       const log = (E.DAILY_LOGS || []).find((l) => l.studentId === stu.id && l.date === todayIso);
       next[stu.id] = log
-        ? { state: log.attendance === "absent" ? "absent" : "present", reason: log.leaveReason || "", saved: true }
+        ? {
+            state: ATT_STATES.has(log.attendance) ? log.attendance : "present",
+            reason: log.leaveReason || "",
+            saved: true,
+          }
         : { state: null, reason: "", saved: false };
     }
     setMarks(next);
@@ -78,8 +83,10 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
   const setReason = (id, reason) => setMarks((m) => ({ ...m, [id]: { ...(m[id] || {}), reason, saved: false } }));
 
   const presentCount = roster.filter((s) => marks[s.id]?.state === "present").length;
+  const lateCount    = roster.filter((s) => marks[s.id]?.state === "late").length;
   const absentCount  = roster.filter((s) => marks[s.id]?.state === "absent").length;
-  const unmarkedCount = roster.length - presentCount - absentCount;
+  const leaveCount   = roster.filter((s) => marks[s.id]?.state === "leave").length;
+  const unmarkedCount = roster.length - presentCount - lateCount - absentCount - leaveCount;
   const dirty = roster.some((s) => marks[s.id] && marks[s.id].saved === false && marks[s.id].state);
   // Once attendance is recorded for everyone in the class today, the screen
   // is locked until the system date changes — staff take attendance for each
@@ -107,7 +114,8 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
         studentId: s.id,
         studentName: s.name,
         attendance: marks[s.id].state,
-        leaveReason: marks[s.id].state === "absent" ? (marks[s.id].reason || "") : "",
+        // Reason persists for any non-present bucket — absent/late/leave.
+        leaveReason: marks[s.id].state === "present" ? "" : (marks[s.id].reason || ""),
       }));
     if (list.length === 0) { showToast("Mark at least one student", "err"); return; }
     setBusy(true);
@@ -119,7 +127,10 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
       });
       const json = await r.json().catch(() => ({}));
       if (!r.ok || !json.ok) throw new Error(json.error || "Failed");
-      showToast(`Saved · ${json.present} present, ${json.absent} absent`, "ok");
+      showToast(
+        `Saved · ${json.present || 0} present · ${json.late || 0} late · ${json.absent || 0} absent · ${json.leave || 0} on leave`,
+        "ok",
+      );
       // Mark all saved=true locally
       setMarks((m) => {
         const next = { ...m };
@@ -271,10 +282,10 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
       )}
 
       <div className="grid g-4" style={{ marginBottom: 14 }}>
-        <KPI label="On roll" value={roster.length} sub={`Class ${cls}-${sec}`} puck="mint" puckIcon="students" />
+        <KPI label="On roll" value={roster.length} sub={`Class ${cls}-${sec} · ${unmarkedCount} not marked`} puck="mint" puckIcon="students" />
         <KPI label="Present" value={presentCount} sub={roster.length ? `${Math.round((presentCount / roster.length) * 100)}%` : "—"} puck="cream" puckIcon="check" />
-        <KPI label="Absent" value={absentCount} sub={roster.length ? `${Math.round((absentCount / roster.length) * 100)}%` : "—"} puck="rose" puckIcon="x" />
-        <KPI label="Not marked" value={unmarkedCount} sub={dirty ? "unsaved changes" : "click Save"} puck="peach" puckIcon="warning" />
+        <KPI label="Late" value={lateCount} sub={lateCount ? "with reasons" : "—"} puck="peach" puckIcon="clock" />
+        <KPI label="Absent / leave" value={absentCount + leaveCount} sub={`${absentCount} absent · ${leaveCount} on leave`} puck="rose" puckIcon="x" />
       </div>
 
       {lockedForToday && (
@@ -311,8 +322,8 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
                 <th>Student</th>
                 <th>Roll · ID</th>
                 <th>Parent</th>
-                <th style={{ width: 220 }}>Status</th>
-                <th>Reason (if absent)</th>
+                <th style={{ width: 320 }}>Status</th>
+                <th>Reason (late · absent · leave)</th>
                 <th></th>
               </tr>
             </thead>
@@ -324,8 +335,13 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
               )}
               {roster.map((s, i) => {
                 const m = marks[s.id] || { state: null, reason: "" };
-                const isPresent = m.state === "present";
-                const isAbsent  = m.state === "absent";
+                const STATE_PILLS = [
+                  { k: "present", label: "Present", icon: "check", soft: "ok-soft",  fg: "ok" },
+                  { k: "late",    label: "Late",    icon: "clock", soft: "warn-soft", fg: "warn" },
+                  { k: "absent",  label: "Absent",  icon: "x",     soft: "bad-soft",  fg: "bad" },
+                  { k: "leave",   label: "Leave",   icon: "calendar", soft: "accent-soft", fg: "accent" },
+                ];
+                const needsReason = m.state && m.state !== "present";
                 return (
                   <tr key={s.id}>
                     <td style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-4)" }}>{String(i + 1).padStart(2, "0")}</td>
@@ -340,36 +356,37 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
                     </td>
                     <td style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{s.parent}</td>
                     <td>
-                      <div className="segmented" style={{ width: "fit-content", opacity: lockedForToday ? 0.7 : 1 }}>
-                        <button
-                          type="button"
-                          className={isPresent ? "active" : ""}
-                          onClick={() => setMark(s.id, "present")}
-                          disabled={lockedForToday}
-                          style={isPresent ? { background: "var(--ok-soft)", color: "var(--ok)" } : {}}
-                        >
-                          <Icon name="check" size={11} />Present
-                        </button>
-                        <button
-                          type="button"
-                          className={isAbsent ? "active" : ""}
-                          onClick={() => setMark(s.id, "absent")}
-                          disabled={lockedForToday}
-                          style={isAbsent ? { background: "var(--bad-soft)", color: "var(--bad, var(--err))" } : {}}
-                        >
-                          <Icon name="x" size={11} />Absent
-                        </button>
+                      <div className="segmented" style={{ width: "fit-content", opacity: lockedForToday ? 0.7 : 1, flexWrap: "wrap" }}>
+                        {STATE_PILLS.map((p) => {
+                          const active = m.state === p.k;
+                          return (
+                            <button
+                              key={p.k}
+                              type="button"
+                              className={active ? "active" : ""}
+                              onClick={() => setMark(s.id, p.k)}
+                              disabled={lockedForToday}
+                              style={active ? { background: `var(--${p.soft})`, color: `var(--${p.fg})` } : {}}
+                            >
+                              <Icon name={p.icon} size={11} />{p.label}
+                            </button>
+                          );
+                        })}
                       </div>
                     </td>
                     <td>
-                      {isAbsent ? (
+                      {needsReason ? (
                         <input
                           className="input"
                           style={{ height: 28, fontSize: 12 }}
                           value={m.reason}
                           disabled={lockedForToday}
                           onChange={(e) => setReason(s.id, e.target.value)}
-                          placeholder="Sick / family event / …"
+                          placeholder={
+                            m.state === "late"   ? "Traffic / late bus / overslept …" :
+                            m.state === "leave"  ? "Pre-approved leave reason …" :
+                                                   "Sick / family event …"
+                          }
                         />
                       ) : (
                         <span style={{ fontSize: 11, color: "var(--ink-4)" }}>—</span>
@@ -432,13 +449,14 @@ function TeacherAttendancePanel({ E, today, todayLabel, refresh, showToast }) {
   }, [today]);
 
   const counts = useMemo(() => {
-    const out = { present: 0, absent: 0, leave: 0, unmarked: 0 };
+    const out = { present: 0, late: 0, absent: 0, leave: 0, unmarked: 0 };
     for (const t of teachers) {
       const v = drafts[t.id];
-      if (v === "present") out.present++;
-      else if (v === "absent") out.absent++;
-      else if (v === "leave") out.leave++;
-      else out.unmarked++;
+      if (v === "present")      out.present++;
+      else if (v === "late")    out.late++;
+      else if (v === "absent")  out.absent++;
+      else if (v === "leave")   out.leave++;
+      else                      out.unmarked++;
     }
     return out;
   }, [drafts, teachers]);
@@ -487,10 +505,10 @@ function TeacherAttendancePanel({ E, today, todayLabel, refresh, showToast }) {
   return (
     <div>
       <div className="grid g-4" style={{ marginBottom: 14 }}>
-        <KPI label="Total teachers" value={teachers.length} sub="on roll" puck="mint" puckIcon="staff" />
-        <KPI label="Present today" value={counts.present} sub={`${todayLabel || today}`} puck="cream" puckIcon="check" />
+        <KPI label="Present today" value={counts.present} sub={`${todayLabel || today}`} puck="mint" puckIcon="check" />
+        <KPI label="Late arrivals" value={counts.late} sub={counts.late ? "with reasons" : "—"} puck="peach" puckIcon="clock" />
         <KPI label="Absent / leave" value={counts.absent + counts.leave} sub={`${counts.absent} absent · ${counts.leave} on leave`} puck="rose" puckIcon="warning" />
-        <KPI label="Unmarked" value={counts.unmarked} sub={counts.unmarked ? "needs marking" : "all done"} puck="peach" puckIcon="clock" />
+        <KPI label="Unmarked" value={counts.unmarked} sub={counts.unmarked ? "needs marking" : "all done"} puck="cream" puckIcon="audit" />
       </div>
 
       <div className="card">
@@ -526,10 +544,11 @@ function TeacherAttendancePanel({ E, today, todayLabel, refresh, showToast }) {
                   </td>
                   <td style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{t.email}</td>
                   <td style={{ textAlign: "right" }}>
-                    <div style={{ display: "inline-flex", gap: 4 }}>
+                    <div style={{ display: "inline-flex", gap: 4, flexWrap: "wrap", justifyContent: "flex-end" }}>
                       <MarkChip label="Present" tone="ok"   active={drafts[t.id] === "present"} onClick={() => setMark(t.id, "present")} />
+                      <MarkChip label="Late"    tone="warn" active={drafts[t.id] === "late"}    onClick={() => setMark(t.id, "late")} />
                       <MarkChip label="Absent"  tone="bad"  active={drafts[t.id] === "absent"}  onClick={() => setMark(t.id, "absent")} />
-                      <MarkChip label="Leave"   tone="warn" active={drafts[t.id] === "leave"}   onClick={() => setMark(t.id, "leave")} />
+                      <MarkChip label="Leave"   tone="info" active={drafts[t.id] === "leave"}   onClick={() => setMark(t.id, "leave")} />
                     </div>
                   </td>
                 </tr>
@@ -544,7 +563,10 @@ function TeacherAttendancePanel({ E, today, todayLabel, refresh, showToast }) {
 
 function MarkChip({ label, tone, active, onClick }) {
   const bg = active
-    ? (tone === "ok" ? "var(--ok)" : tone === "bad" ? "var(--err, #b13c1c)" : "var(--warn)")
+    ? (tone === "ok" ? "var(--ok)"
+     : tone === "bad" ? "var(--err, #b13c1c)"
+     : tone === "info" ? "var(--accent, #1f3f8b)"
+     : "var(--warn)")
     : "var(--bg-2)";
   return (
     <button

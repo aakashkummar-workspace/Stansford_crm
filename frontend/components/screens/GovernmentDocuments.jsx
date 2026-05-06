@@ -5,18 +5,56 @@ import Icon from "../Icon";
 import { KPI } from "../ui";
 import { resolveSchool, downloadPdf } from "@/lib/export";
 
-const DOC_TYPES = [
-  { k: "registration", label: "Trust registration" },
-  { k: "80g",          label: "80G certificate" },
-  { k: "12a",          label: "12A registration" },
-  { k: "noc",          label: "NOC / Building" },
-  { k: "fire",         label: "Fire safety" },
-  { k: "tax",          label: "Tax / GST" },
-  { k: "license",      label: "Licence" },
-  { k: "other",        label: "Other" },
+// Canonical category list — driven by the spec ("Registration · Affiliation
+// · Tax · Legal · Recognition · Trust Certificate · Safety Certificate").
+// The legacy keys (80g / 12a / noc / fire / license) are aliased to the
+// nearest canonical category below so existing rows keep their grouping.
+// Admins can add their own types on top of these via the "+ New type"
+// affordance in the form modal — those persist into app_settings.
+const BUILTIN_DOC_TYPES = [
+  { k: "registration",       label: "Registration",       icon: "shield" },
+  { k: "affiliation",        label: "Affiliation",        icon: "academic" },
+  { k: "tax",                label: "Tax",                icon: "money" },
+  { k: "legal",              label: "Legal",              icon: "audit" },
+  { k: "recognition",        label: "Recognition",        icon: "shield" },
+  { k: "trust_certificate",  label: "Trust certificate",  icon: "reports" },
+  { k: "safety_certificate", label: "Safety certificate", icon: "warning" },
+  { k: "other",              label: "Other",              icon: "audit" },
 ];
 
-const DOC_TYPE_LABEL = Object.fromEntries(DOC_TYPES.map((t) => [t.k, t.label]));
+// Legacy aliases — old rows used document_type = "80g" / "12a" / "noc" /
+// "fire" / "license". Map them onto the new canonical categories so the
+// filter chips, KPIs and expiry-alerts roll up correctly without a data
+// migration. New writes use the canonical keys above.
+const LEGACY_TYPE_ALIAS = {
+  "80g":          "tax",
+  "12a":          "registration",
+  "noc":          "legal",
+  "fire":         "safety_certificate",
+  "license":      "legal",
+};
+
+// Slugify a free-text label into a stable key so the same custom type
+// keeps its identity across reloads. Lowercase, alphanumeric, _ separators.
+function slugifyType(label) {
+  return String(label || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 40) || "type";
+}
+
+// Resolve `documentType` from a row → an object in the active list.
+// Falls back to "other" if the value matches neither a custom nor a
+// built-in nor a legacy alias.
+function canonicalDocTypeFor(raw, allTypes) {
+  if (!raw) return "other";
+  const k = String(raw).toLowerCase();
+  if (allTypes.find((t) => t.k === k)) return k;
+  if (LEGACY_TYPE_ALIAS[k]) return LEGACY_TYPE_ALIAS[k];
+  return "other";
+}
 
 // How an expiry date should be presented + flagged. Returns
 // { tone, label, days } where days is signed: negative = expired.
@@ -44,6 +82,10 @@ export default function ScreenGovernmentDocuments({ E, role, session, refresh })
   const [editing, setEditing] = useState(null);
   const [busy, setBusy] = useState(null);
   const [toast, setToast] = useState(null);
+  // Admin-defined extra types loaded from app_settings.governmentDocs.customTypes
+  // (a JSON-encoded array of { k, label }). Merged with the built-in list
+  // below so the dropdown / filter chips / category card pick them up.
+  const [customTypes, setCustomTypes] = useState([]);
   const flash = (msg, tone = "ok") => {
     setToast({ msg, tone });
     setTimeout(() => setToast(null), 2400);
@@ -56,12 +98,92 @@ export default function ScreenGovernmentDocuments({ E, role, session, refresh })
       if (j?.ok) setItems(j.items || []);
     } catch {}
   }
-  useEffect(() => { reload(); }, []);
+  async function loadCustomTypes() {
+    try {
+      const r = await fetch("/api/settings", { cache: "no-store" });
+      const j = await r.json().catch(() => ({}));
+      const raw = j?.settings?.governmentDocs?.customTypes;
+      if (!raw) { setCustomTypes([]); return; }
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) setCustomTypes(parsed.filter((t) => t && t.k && t.label));
+      } catch { setCustomTypes([]); }
+    } catch {}
+  }
+  useEffect(() => { reload(); loadCustomTypes(); }, []);
+
+  // Effective dropdown list = built-ins + custom. "Other" is always kept
+  // last so the catch-all stays at the bottom of the picker.
+  const allTypes = useMemo(() => {
+    const builtinByKey = new Set(BUILTIN_DOC_TYPES.map((t) => t.k));
+    const custom = customTypes
+      .filter((t) => !builtinByKey.has(t.k))
+      .map((t) => ({ k: t.k, label: t.label, icon: t.icon || "audit", custom: true }));
+    const otherIdx = BUILTIN_DOC_TYPES.findIndex((t) => t.k === "other");
+    const before = BUILTIN_DOC_TYPES.slice(0, otherIdx);
+    const other  = BUILTIN_DOC_TYPES[otherIdx];
+    return [...before, ...custom, other];
+  }, [customTypes]);
+
+  const labelMap = useMemo(
+    () => Object.fromEntries(allTypes.map((t) => [t.k, t.label])),
+    [allTypes],
+  );
+
+  // Persist a new custom type to app_settings. Resolves with the new
+  // entry; rejects if the API errored. Also updates local state so the
+  // UI is consistent without a full reload.
+  async function addCustomType(label) {
+    const trimmed = String(label || "").trim();
+    if (!trimmed) throw new Error("Type name required");
+    const k = slugifyType(trimmed);
+    if (BUILTIN_DOC_TYPES.find((t) => t.k === k)) {
+      throw new Error("That name conflicts with a built-in type");
+    }
+    if (customTypes.find((t) => t.k === k)) {
+      // Already exists — just return it (idempotent).
+      return customTypes.find((t) => t.k === k);
+    }
+    const next = [...customTypes, { k, label: trimmed }];
+    const r = await fetch("/api/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        settings: {
+          governmentDocs: { customTypes: JSON.stringify(next) },
+        },
+      }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.error || "Could not save type");
+    setCustomTypes(next);
+    return { k, label: trimmed };
+  }
+
+  // Remove a custom type (only custom — built-ins are protected). Existing
+  // documents that referenced the removed key fall through to "other" via
+  // the canonical resolver.
+  async function removeCustomType(k) {
+    const next = customTypes.filter((t) => t.k !== k);
+    const r = await fetch("/api/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        settings: {
+          governmentDocs: { customTypes: JSON.stringify(next) },
+        },
+      }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.error || "Could not remove type");
+    setCustomTypes(next);
+  }
 
   const filtered = useMemo(() => {
     const term = q.trim().toLowerCase();
     return items.filter((d) => {
-      if (filterType !== "all" && (d.documentType || "other") !== filterType) return false;
+      const cat = canonicalDocTypeFor(d.documentType, allTypes);
+      if (filterType !== "all" && cat !== filterType) return false;
       if (filterStatus !== "all") {
         const st = expiryStatus(d.expiryDate);
         if (filterStatus === "expired" && st.tone !== "bad") return false;
@@ -69,12 +191,30 @@ export default function ScreenGovernmentDocuments({ E, role, session, refresh })
         if (filterStatus === "valid"   && st.tone !== "ok")   return false;
       }
       if (term) {
-        const blob = `${d.title} ${d.notes || ""} ${d.documentType || ""}`.toLowerCase();
+        const blob = `${d.title} ${d.notes || ""} ${d.documentType || ""} ${labelMap[cat] || ""}`.toLowerCase();
         if (!blob.includes(term)) return false;
       }
       return true;
     });
-  }, [items, filterType, filterStatus, q]);
+  }, [items, filterType, filterStatus, q, allTypes, labelMap]);
+
+  // Per-category roll-up — used by the "Status by category" card so the
+  // admin can see at a glance which buckets need attention. Entry shape:
+  // { k, label, total, expired, soon, valid }.
+  const byCategory = useMemo(() => {
+    const m = {};
+    for (const t of allTypes) m[t.k] = { k: t.k, label: t.label, icon: t.icon, total: 0, expired: 0, soon: 0, valid: 0 };
+    for (const d of items) {
+      const cat = canonicalDocTypeFor(d.documentType, allTypes);
+      const bucket = m[cat] || m.other;
+      bucket.total++;
+      const st = expiryStatus(d.expiryDate);
+      if (st.tone === "bad")  bucket.expired++;
+      else if (st.tone === "warn") bucket.soon++;
+      else if (st.tone === "ok")   bucket.valid++;
+    }
+    return Object.values(m).filter((b) => b.total > 0);
+  }, [items]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
@@ -164,7 +304,7 @@ export default function ScreenGovernmentDocuments({ E, role, session, refresh })
       rows: filtered.map((d, i) => ({
         i: i + 1, id: d.id,
         title: d.title || "—",
-        type: DOC_TYPE_LABEL[d.documentType] || d.documentType || "—",
+        type: labelMap[canonicalDocTypeFor(d.documentType, allTypes)] || d.documentType || "—",
         expiry: d.expiryDate || "—",
         status: expiryStatus(d.expiryDate).label,
         notes: d.notes || "—",
@@ -213,6 +353,53 @@ export default function ScreenGovernmentDocuments({ E, role, session, refresh })
         <KPI label="No expiry on file" value={counts.missing} sub="add expiry date" puck="sky" puckIcon="settings" />
       </div>
 
+      {byCategory.length > 0 && (
+        <div className="card" style={{ marginBottom: 18 }}>
+          <div className="card-head">
+            <div>
+              <div className="card-title">Status by category</div>
+              <div className="card-sub">Click a category to filter the list below</div>
+            </div>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 10, padding: 14 }}>
+            {byCategory.map((b) => {
+              const active = filterType === b.k;
+              return (
+                <button
+                  key={b.k}
+                  type="button"
+                  onClick={() => setFilterType(active ? "all" : b.k)}
+                  style={{
+                    textAlign: "left",
+                    background: active ? "var(--accent-soft)" : "var(--bg-2)",
+                    border: `1px solid ${active ? "var(--accent)" : "var(--rule)"}`,
+                    borderRadius: 10,
+                    padding: "12px 14px",
+                    cursor: "pointer",
+                    display: "flex", flexDirection: "column", gap: 6,
+                    transition: "background .12s, border-color .12s",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <Icon name={b.icon} size={14} />
+                    <span style={{ fontSize: 12.5, fontWeight: 600 }}>{b.label}</span>
+                    <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--ink-3)", fontFamily: "var(--font-mono)" }}>{b.total}</span>
+                  </div>
+                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                    {b.expired > 0 && <span className="chip bad" style={{ fontSize: 10 }}><span className="dot" />{b.expired} expired</span>}
+                    {b.soon    > 0 && <span className="chip warn" style={{ fontSize: 10 }}><span className="dot" />{b.soon} due 30d</span>}
+                    {b.valid   > 0 && <span className="chip ok" style={{ fontSize: 10 }}><span className="dot" />{b.valid} valid</span>}
+                    {b.expired === 0 && b.soon === 0 && b.valid === 0 && (
+                      <span style={{ fontSize: 10.5, color: "var(--ink-4)" }}>No expiry on file</span>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       <div className="card" style={{ marginBottom: 14, padding: "10px 14px", display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
         <input
           className="input"
@@ -223,7 +410,7 @@ export default function ScreenGovernmentDocuments({ E, role, session, refresh })
         />
         <select className="select" value={filterType} onChange={(e) => setFilterType(e.target.value)}>
           <option value="all">All types</option>
-          {DOC_TYPES.map((t) => <option key={t.k} value={t.k}>{t.label}</option>)}
+          {allTypes.map((t) => <option key={t.k} value={t.k}>{t.label}{t.custom ? " · custom" : ""}</option>)}
         </select>
         <select className="select" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
           <option value="all">All statuses</option>
@@ -254,7 +441,11 @@ export default function ScreenGovernmentDocuments({ E, role, session, refresh })
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                       <span style={{ fontSize: 13, fontWeight: 700 }}>{d.title}</span>
-                      {d.documentType && <span className="chip">{DOC_TYPE_LABEL[d.documentType] || d.documentType}</span>}
+                      {d.documentType && (
+                        <span className="chip">
+                          {labelMap[canonicalDocTypeFor(d.documentType, allTypes)] || d.documentType}
+                        </span>
+                      )}
                       <span className={`chip ${st.tone}`}><span className="dot" />{st.label}</span>
                     </div>
                     {d.notes && (
@@ -307,6 +498,9 @@ export default function ScreenGovernmentDocuments({ E, role, session, refresh })
       {showForm && (
         <DocFormModal
           existing={editing}
+          allTypes={allTypes}
+          onAddCustomType={addCustomType}
+          onRemoveCustomType={removeCustomType}
           onClose={() => { setShowForm(false); setEditing(null); }}
           onSubmit={submitForm}
         />
@@ -315,14 +509,14 @@ export default function ScreenGovernmentDocuments({ E, role, session, refresh })
   );
 }
 
-function DocFormModal({ existing, onClose, onSubmit }) {
+function DocFormModal({ existing, allTypes = BUILTIN_DOC_TYPES, onAddCustomType, onRemoveCustomType, onClose, onSubmit }) {
   // Decide whether the existing fileUrl is an uploaded data URI or an
   // external link, so we can show the right preview.
   const existingIsUpload = !!existing?.fileUrl && /^data:/.test(existing.fileUrl);
   const [form, setForm] = useState({
     id: existing?.id || null,
     title: existing?.title || "",
-    documentType: existing?.documentType || "registration",
+    documentType: canonicalDocTypeFor(existing?.documentType, allTypes) || "registration",
     fileUrl: existing?.fileUrl || "",
     fileLink: existingIsUpload ? "" : (existing?.fileUrl || ""),
     fileName: existing?.fileName || (existingIsUpload ? "Uploaded file" : ""),
@@ -334,7 +528,39 @@ function DocFormModal({ existing, onClose, onSubmit }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [uploading, setUploading] = useState(false);
+  // Inline "+ New type" affordance state. Toggled open by a button next
+  // to the type dropdown; the input and Add/Cancel actions live below it.
+  const [adding, setAdding] = useState(false);
+  const [newTypeLabel, setNewTypeLabel] = useState("");
+  const [addingBusy, setAddingBusy] = useState(false);
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  async function submitNewType(e) {
+    e?.preventDefault?.();
+    if (!onAddCustomType || addingBusy) return;
+    const label = newTypeLabel.trim();
+    if (!label) return;
+    setAddingBusy(true); setErr("");
+    try {
+      const created = await onAddCustomType(label);
+      // Auto-select the new type so the admin can save the document
+      // without having to find it in the dropdown.
+      setForm((f) => ({ ...f, documentType: created.k }));
+      setNewTypeLabel("");
+      setAdding(false);
+    } catch (ex) { setErr(ex.message || "Could not add type"); }
+    finally { setAddingBusy(false); }
+  }
+
+  async function handleRemoveType(k) {
+    if (!onRemoveCustomType) return;
+    if (!confirm("Remove this custom type? Existing documents tagged with it will fall back to \"Other\".")) return;
+    try {
+      await onRemoveCustomType(k);
+      // If the form had this type selected, drop back to "other".
+      if (form.documentType === k) setForm((f) => ({ ...f, documentType: "other" }));
+    } catch (ex) { setErr(ex.message || "Could not remove type"); }
+  }
 
   // Read a chosen file as a base64 data URI. Hard 8 MB cap — anything bigger
   // bloats db.json / Supabase rows; ask the admin to host it on Drive instead.
@@ -421,10 +647,91 @@ function DocFormModal({ existing, onClose, onSubmit }) {
             <input className="input" required maxLength={120} value={form.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. 80G Certificate FY 2025-26" autoFocus />
           </Field>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-            <Field label="Type">
-              <select className="select" value={form.documentType} onChange={(e) => set("documentType", e.target.value)}>
-                {DOC_TYPES.map((t) => <option key={t.k} value={t.k}>{t.label}</option>)}
-              </select>
+            <Field label="Type" hint={onAddCustomType ? "Don't see your type? Click + New type below." : undefined}>
+              <div style={{ display: "flex", gap: 6, alignItems: "stretch" }}>
+                <select
+                  className="select"
+                  value={form.documentType}
+                  onChange={(e) => set("documentType", e.target.value)}
+                  style={{ flex: 1 }}
+                >
+                  {allTypes.map((t) => (
+                    <option key={t.k} value={t.k}>
+                      {t.label}{t.custom ? " · custom" : ""}
+                    </option>
+                  ))}
+                </select>
+                {onAddCustomType && !adding && (
+                  <button
+                    type="button"
+                    className="btn sm"
+                    onClick={() => { setAdding(true); setNewTypeLabel(""); }}
+                    title="Add a new document type"
+                    style={{ flexShrink: 0 }}
+                  >
+                    <Icon name="plus" size={11} />New
+                  </button>
+                )}
+              </div>
+              {adding && (
+                <div style={{
+                  marginTop: 6,
+                  display: "flex", gap: 6, alignItems: "stretch",
+                  background: "var(--bg-2)", padding: 6, borderRadius: 8,
+                  border: "1px dashed var(--rule)",
+                }}>
+                  <input
+                    className="input"
+                    value={newTypeLabel}
+                    onChange={(e) => setNewTypeLabel(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") { e.preventDefault(); submitNewType(e); }
+                      else if (e.key === "Escape") { setAdding(false); setNewTypeLabel(""); }
+                    }}
+                    placeholder="e.g. ISO certification"
+                    maxLength={40}
+                    autoFocus
+                    style={{ flex: 1 }}
+                  />
+                  <button
+                    type="button"
+                    className="btn sm accent"
+                    onClick={submitNewType}
+                    disabled={addingBusy || !newTypeLabel.trim()}
+                    style={{ flexShrink: 0 }}
+                  >
+                    {addingBusy ? "Adding…" : "Add"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn sm ghost"
+                    onClick={() => { setAdding(false); setNewTypeLabel(""); }}
+                    disabled={addingBusy}
+                    style={{ flexShrink: 0 }}
+                  >Cancel</button>
+                </div>
+              )}
+              {/* Show a tiny "remove" button when the currently-picked type is a custom one. */}
+              {(() => {
+                const picked = allTypes.find((t) => t.k === form.documentType);
+                if (!picked || !picked.custom || !onRemoveCustomType) return null;
+                return (
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveType(picked.k)}
+                    style={{
+                      marginTop: 6,
+                      background: "transparent", border: 0,
+                      color: "var(--err, #b13c1c)", cursor: "pointer",
+                      fontSize: 10.5, padding: "2px 0",
+                      textAlign: "left",
+                    }}
+                    title={`Remove "${picked.label}" from the type list`}
+                  >
+                    Remove "{picked.label}" custom type
+                  </button>
+                );
+              })()}
             </Field>
             <Field label="Expiry date">
               <input type="date" className="input" value={form.expiryDate} onChange={(e) => set("expiryDate", e.target.value)} />

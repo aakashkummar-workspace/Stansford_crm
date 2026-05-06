@@ -982,6 +982,13 @@ create table if not exists remarks_rewards (
 create index if not exists idx_remarks_rewards_target on remarks_rewards (target_type, target_id, created_at desc);
 alter table remarks_rewards enable row level security;
 
+-- Resolution metadata — added so a remark logged against a student or
+-- teacher can be marked "handled" by an admin/principal without
+-- destroying the audit trail. Idempotent so re-running this file is safe.
+alter table remarks_rewards add column if not exists resolved_at      timestamptz;
+alter table remarks_rewards add column if not exists resolved_by      text references users(id);
+alter table remarks_rewards add column if not exists resolution_note  text;
+
 -- ---------- government_documents (admin-only vault) ---------------------
 -- Trust registration certs, 80G, 12A, building NOC, fire safety, etc.
 -- expiry_date powers the "Government Document Alerts" dashboard widget;

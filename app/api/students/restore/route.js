@@ -9,18 +9,25 @@ function termFeeFor(cls) {
 // Bring an archived student back to active. Re-creates a pending fee for the
 // current term so they show up in Fees & UPI again.
 export async function POST(req) {
-  const { id } = await req.json();
+  let body; try { body = await req.json(); } catch { body = null; }
+  const id = body?.id;
   if (!id) return NextResponse.json({ ok: false, error: "id required" }, { status: 400 });
-  const restored = await restoreStudent(id);
-  if (!restored) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 });
-  await addPendingFee({
-    id: restored.id,
-    name: restored.name,
-    cls: restored.cls,
-    amount: termFeeFor(restored.cls),
-    due: "in 7 days",
-    overdue: false,
-  });
-  await logAudit("Rashmi Iyer", "Restored student", `${restored.id} ${restored.name}`);
-  return NextResponse.json({ ok: true, student: restored });
+  try {
+    const restored = await restoreStudent(id);
+    if (!restored) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 });
+    try {
+      await addPendingFee({
+        id: restored.id,
+        name: restored.name,
+        cls: restored.cls,
+        amount: termFeeFor(restored.cls),
+        due: "in 7 days",
+        overdue: false,
+      });
+    } catch {}
+    try { await logAudit("Rashmi Iyer", "Restored student", `${restored.id} ${restored.name}`); } catch {}
+    return NextResponse.json({ ok: true, student: restored });
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: e.message || "Failed" }, { status: 400 });
+  }
 }

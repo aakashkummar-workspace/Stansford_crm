@@ -63,7 +63,8 @@ export const NAV_BY_ROLE = {
     { id: "timetable",  label: "Timetable",    icon: "clock" },
     { section: "People" },
     { id: "complaints",label: "Complaints",   icon: "complaint" },
-    { id: "communication", label: "Messages", icon: "megaphone" },
+    { id: "communication", label: "Broadcasts", icon: "megaphone" },
+    { id: "messages",      label: "Parent messages", icon: "send" },
     { id: "scale",                label: "SCALE session",         icon: "academic" },
     { id: "scale_report",         label: "SCALE reports",         icon: "reports" },
     { id: "scale_admin",          label: "SCALE admin",           icon: "shield" },
@@ -128,6 +129,7 @@ export const NAV_BY_ROLE = {
     { id: "exams",      label: "Exams & Marks", icon: "reports" },
     { id: "students",   label: "My students",  icon: "students" },
     { id: "communication", label: "Broadcasts", icon: "megaphone" },
+    { id: "messages",      label: "Parent messages", icon: "send" },
     { id: "meetings",   label: "Meetings",     icon: "clock" },
     { id: "library",    label: "Library",      icon: "book" },
     { section: "Workflow" },
@@ -352,6 +354,11 @@ export default function Sidebar({ current, setCurrent, role, user, permissions }
     return next;
   });
 
+  // Track which collapsed group the cursor is currently over so we can
+  // temporarily peek-expand it without changing the user's pinned state.
+  // null means no group is being hovered.
+  const [hoverGroup, setHoverGroup] = useState(null);
+
   const displayName = user?.name || "Signed in";
   return (
     <aside className="sidebar">
@@ -369,69 +376,125 @@ export default function Sidebar({ current, setCurrent, role, user, permissions }
           <div className="b2">Sanvi Educational &amp; Charitable Trust</div>
         </div>
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 1, overflowY: "auto", marginTop: 4, flex: 1 }}>
+      <div className="side-groups" style={{ overflowY: "auto", flex: 1, marginTop: 4 }}>
         {groups.map((group, gi) => {
-          const isCollapsed = group.name && collapsed.has(group.name);
+          const pinnedCollapsed = group.name && collapsed.has(group.name);
+          const peeking = group.name && hoverGroup === group.name;
+          // visualOpen: items are visible iff the group is either not
+          // pinned-collapsed, OR the cursor is hovering over it (peek-expand).
+          const visualOpen = !pinnedCollapsed || peeking;
           return (
-            <div key={gi}>
+            <div
+              key={gi}
+              className={`side-group ${visualOpen ? "open" : "closed"} ${peeking ? "peek" : ""}`}
+              onMouseEnter={() => group.name && pinnedCollapsed && setHoverGroup(group.name)}
+              onMouseLeave={() => peeking && setHoverGroup(null)}
+            >
               {group.name && (
                 <button
                   type="button"
                   className="side-section"
                   onClick={() => toggleGroup(group.name)}
-                  title={isCollapsed ? `Expand ${group.name}` : `Collapse ${group.name}`}
-                  style={{
-                    width: "100%",
-                    background: "none",
-                    border: 0,
-                    cursor: "pointer",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                    textAlign: "left",
-                    padding: "10px 14px 4px",
-                  }}
+                  title={pinnedCollapsed ? `Expand ${group.name}` : `Collapse ${group.name}`}
                 >
                   <Icon
                     name="chevronDown"
                     size={10}
+                    className="side-section-chev"
                     style={{
-                      transition: "transform 120ms ease",
-                      transform: isCollapsed ? "rotate(-90deg)" : "rotate(0deg)",
-                      opacity: 0.7,
+                      transform: visualOpen ? "rotate(0deg)" : "rotate(-90deg)",
                     }}
                   />
                   <span style={{ flex: 1 }}>{group.name}</span>
-                  {isCollapsed && group.items.length > 0 && (
-                    <span style={{
-                      fontSize: 9.5,
-                      color: "var(--ink-4)",
-                      fontFamily: "var(--font-mono)",
-                      fontWeight: 400,
-                    }}>{group.items.length}</span>
+                  {pinnedCollapsed && !peeking && group.items.length > 0 && (
+                    <span className="side-section-count">{group.items.length}</span>
                   )}
                 </button>
               )}
-              {!isCollapsed && group.items.map((it) => {
-                const active = current === it.id;
-                return (
-                  <div key={it.id} className={`side-item ${active ? "active" : ""}`} onClick={() => setCurrent(it.id)}>
-                    <Icon name={it.icon} size={16} className="side-icon" />
-                    <span className="side-lbl">{it.label}</span>
-                    {it.live && (
-                      <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 4, color: "var(--ok)", fontSize: 10.5, fontWeight: 500 }}>
-                        <span className="pulse-dot" />
-                        Live
-                      </span>
-                    )}
-                    {it.badge && <span className={`side-badge ${it.badgeAlert ? "alert" : ""}`}>{it.badge}</span>}
-                  </div>
-                );
-              })}
+              <div className="side-group-items">
+                <div className="side-group-items-inner">
+                  {group.items.map((it) => {
+                    const active = current === it.id;
+                    return (
+                      <div key={it.id} className={`side-item ${active ? "active" : ""}`} onClick={() => setCurrent(it.id)}>
+                        <Icon name={it.icon} size={16} className="side-icon" />
+                        <span className="side-lbl">{it.label}</span>
+                        {it.live && (
+                          <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 4, color: "var(--ok)", fontSize: 10.5, fontWeight: 500 }}>
+                            <span className="pulse-dot" />
+                            Live
+                          </span>
+                        )}
+                        {it.badge && <span className={`side-badge ${it.badgeAlert ? "alert" : ""}`}>{it.badge}</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
           );
         })}
       </div>
+      <style jsx>{`
+        .side-groups :global(.side-group) {
+          margin-bottom: 10px;
+        }
+        .side-groups :global(.side-group + .side-group) {
+          margin-top: 8px;
+        }
+        .side-groups :global(.side-section) {
+          width: 100%;
+          background: none;
+          border: 0;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          text-align: left;
+          padding: 14px 14px 6px;
+          transition: color 0.15s ease;
+        }
+        .side-groups :global(.side-section:hover) {
+          color: var(--ink-2);
+        }
+        .side-groups :global(.side-section-chev) {
+          transition: transform 220ms cubic-bezier(0.4, 0, 0.2, 1);
+          opacity: 0.7;
+        }
+        .side-groups :global(.side-section-count) {
+          font-size: 9.5px;
+          color: var(--ink-4);
+          font-family: var(--font-mono);
+          font-weight: 400;
+        }
+        /* The grid-template-rows 1fr -> 0fr trick gives a smooth height
+           transition without needing a fixed max-height. The inner wrapper
+           uses overflow:hidden so the items clip cleanly during transition. */
+        .side-groups :global(.side-group-items) {
+          display: grid;
+          grid-template-rows: 1fr;
+          transition: grid-template-rows 280ms cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .side-groups :global(.side-group.closed > .side-group-items) {
+          grid-template-rows: 0fr;
+        }
+        .side-groups :global(.side-group-items-inner) {
+          overflow: hidden;
+          min-height: 0;
+        }
+        /* Peek-expand uses a slightly tinted background so the user sees
+           which section the cursor is hovering. Doesn't shift layout — the
+           grid transition above keeps the rest of the sidebar moving down
+           naturally as the section opens. */
+        .side-groups :global(.side-group.peek) {
+          background: var(--bg-2);
+          border-radius: 10px;
+          transition: background 200ms ease;
+        }
+        .side-groups :global(.side-group.peek > .side-section) {
+          color: var(--accent);
+        }
+      `}</style>
       <div className="side-foot">
         <AvatarChip initials={initialsOf(displayName)} />
         <div style={{ minWidth: 0, flex: 1 }} className="side-lbl">

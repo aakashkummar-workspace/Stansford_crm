@@ -51,6 +51,7 @@ export async function POST(req) {
       date: body.date,
       status: body.status,
       leaveReason: body.leaveReason,
+      lateReason:  body.lateReason,
       markedBy: session.name || session.email,
     });
     try { await logAudit(session.name || "User", "Teacher attendance", `${row.teacherName} · ${row.date} · ${row.status}`); } catch {}

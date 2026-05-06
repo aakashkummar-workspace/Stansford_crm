@@ -36,11 +36,17 @@ function termFeeFor(cls) {
 }
 
 export async function POST(req) {
-  const { csv } = await req.json();
+  let body; try { body = await req.json(); } catch { body = null; }
+  const csv = body?.csv;
   if (typeof csv !== "string" || !csv.trim()) {
     return NextResponse.json({ ok: false, error: "csv body required" }, { status: 400 });
   }
-  const rows = parseCsv(csv).filter((r) => r.length && r.some((c) => c.trim()));
+  let rows;
+  try {
+    rows = parseCsv(csv).filter((r) => r.length && r.some((c) => c.trim()));
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: `CSV parse failed: ${e.message}` }, { status: 400 });
+  }
   if (rows.length < 2) {
     return NextResponse.json({ ok: false, error: "Need at least one header row and one data row" }, { status: 400 });
   }
@@ -52,28 +58,31 @@ export async function POST(req) {
   }
 
   const created = [];
-  for (const cells of rows.slice(1)) {
+  const errors = [];
+  for (let r = 1; r < rows.length; r++) {
+    const cells = rows[r];
     const name = (cells[ni] || "").trim();
     if (!name) continue;
     const clsRaw = (cells[ci] || "1-A").trim();
     const cls = /^\d/.test(clsRaw) ? (clsRaw.includes("-") ? clsRaw : `${clsRaw}-A`) : "1-A";
     const row = {
-      id: newId(),
-      name,
-      cls,
+      id: newId(), name, cls,
       parent: (cells[pi] || "—").trim(),
-      fee: "pending",
-      attendance: 0,
+      fee: "pending", attendance: 0,
       transport: (cells[ti] || "—").trim(),
       joined: monthYear(),
     };
-    await addStudent(row);
-    await addPendingFee({
-      id: row.id, name: row.name, cls: row.cls,
-      amount: termFeeFor(row.cls), due: "in 7 days", overdue: false,
-    });
-    created.push(row);
+    try {
+      await addStudent(row);
+      await addPendingFee({
+        id: row.id, name: row.name, cls: row.cls,
+        amount: termFeeFor(row.cls), due: "in 7 days", overdue: false,
+      });
+      created.push(row);
+    } catch (e) {
+      errors.push({ row: r + 1, name, reason: e.message || "Failed" });
+    }
   }
-  await logAudit("Rashmi Iyer", "Bulk import", `${created.length} students added`);
-  return NextResponse.json({ ok: true, count: created.length, students: created });
+  try { await logAudit("Rashmi Iyer", "Bulk import", `${created.length} students added${errors.length ? ` · ${errors.length} skipped` : ""}`); } catch {}
+  return NextResponse.json({ ok: true, count: created.length, students: created, errors });
 }

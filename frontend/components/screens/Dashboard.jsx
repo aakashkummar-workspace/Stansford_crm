@@ -281,6 +281,9 @@ export default function ScreenDashboard({ E, role, session }) {
         const todayIso = new Date().toISOString().slice(0, 10);
         const todaysLogs = (E.DAILY_LOGS || []).filter((l) => l.date === todayIso);
         const absentToday = todaysLogs.filter((l) => l.attendance === "absent");
+        const lateStudents = todaysLogs.filter((l) => l.attendance === "late");
+        const todaysTeacherAtt = (E.TEACHER_ATTENDANCE || []).filter((r) => r.date === todayIso);
+        const lateTeachers = todaysTeacherAtt.filter((r) => r.status === "late");
         const pendingHomework = todaysLogs.filter((l) => l.homeworkStatus === "pending");
         const incompleteClasswork = todaysLogs.filter((l) => l.classworkStatus === "not_completed");
         const openComplaints = (E.COMPLAINTS || []).filter((c) => c.status === "Open");
@@ -288,6 +291,8 @@ export default function ScreenDashboard({ E, role, session }) {
         const items = [
           openComplaints.length && { tone: "bad", icon: "complaint", title: `${openComplaints.length} pending complaint${openComplaints.length === 1 ? "" : "s"}`, sub: openComplaints.slice(0, 3).map((c) => c.student || "—").join(" · ") },
           absentToday.length      && { tone: "warn", icon: "users",     title: `${absentToday.length} student${absentToday.length === 1 ? "" : "s"} absent today`, sub: absentToday.slice(0, 3).map((l) => l.studentName).join(" · ") },
+          lateStudents.length     && { tone: "warn", icon: "clock",     title: `${lateStudents.length} student${lateStudents.length === 1 ? "" : "s"} late today`, sub: lateStudents.slice(0, 3).map((l) => l.studentName).join(" · ") },
+          lateTeachers.length     && { tone: "warn", icon: "clock",     title: `${lateTeachers.length} teacher${lateTeachers.length === 1 ? "" : "s"} late today`, sub: lateTeachers.slice(0, 3).map((r) => r.teacherName).join(" · ") },
           pendingHomework.length  && { tone: "warn", icon: "book",      title: `${pendingHomework.length} pending homework`, sub: pendingHomework.slice(0, 3).map((l) => l.studentName).join(" · ") },
           incompleteClasswork.length && { tone: "warn", icon: "pencil", title: `${incompleteClasswork.length} classwork not completed`, sub: incompleteClasswork.slice(0, 3).map((l) => l.studentName).join(" · ") },
           overdueFees.length      && { tone: "bad",  icon: "fees",      title: `${overdueFees.length} overdue fee${overdueFees.length === 1 ? "" : "s"}`, sub: overdueFees.slice(0, 3).map((f) => f.name).join(" · ") },

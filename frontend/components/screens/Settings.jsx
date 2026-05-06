@@ -38,6 +38,16 @@ const SECTIONS = [
     ],
   },
   {
+    key: "parent",
+    t: "Parent dashboard",
+    fields: [
+      { k: "headerContact1Label", label: "Header contact 1 · label", hint: "e.g. Office, Reception" },
+      { k: "headerContact1Number", label: "Header contact 1 · number", hint: "e.g. +91 98765 43210 — shown in the parent header" },
+      { k: "headerContact2Label", label: "Header contact 2 · label", hint: "e.g. Emergency, Principal" },
+      { k: "headerContact2Number", label: "Header contact 2 · number", hint: "Optional second number" },
+    ],
+  },
+  {
     key: "security",
     t: "Security",
     fields: [

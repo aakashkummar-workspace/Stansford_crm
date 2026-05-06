@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   addRemarkReward, listRemarksRewards, removeRemarkReward,
+  resolveRemarkReward, reopenRemarkReward,
   addNotification, logAudit, readAllData,
 } from "@/lib/db";
 import { getSession } from "@/lib/auth";
@@ -13,6 +14,9 @@ export const dynamic = "force-dynamic";
 //   teacher                 → reward or remark, students in their class only
 const WRITE_ROLES = new Set(["admin", "principal", "academic_director", "teacher"]);
 const DELETE_ROLES = new Set(["admin", "principal"]);
+// Marking a remark resolved is an admin/principal/academic_director task.
+// Teachers report and rewards/remarks; closing the loop is a leadership action.
+const RESOLVE_ROLES = new Set(["admin", "principal", "academic_director"]);
 
 // GET /api/remarks-rewards?targetType=student&targetId=…&type=reward
 export async function GET(req) {
@@ -192,6 +196,40 @@ export async function POST(req) {
       );
     } catch {}
     return NextResponse.json({ ok: true, item: rr });
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: e.message || "Failed" }, { status: 400 });
+  }
+}
+
+// PATCH /api/remarks-rewards { id, action: "resolve" | "reopen", resolutionNote? }
+//   Mark a remark/reward row as resolved (or undo). The audit trail and
+//   the original entry are preserved — this just attaches metadata that
+//   the screen renders as a "Resolved" chip.
+export async function PATCH(req) {
+  const session = await getSession();
+  if (!session || !RESOLVE_ROLES.has(session.role)) {
+    return NextResponse.json({ ok: false, error: "Not authorised" }, { status: 403 });
+  }
+  let body; try { body = await req.json(); } catch { body = null; }
+  if (!body?.id) return NextResponse.json({ ok: false, error: "id required" }, { status: 400 });
+  const action = body.action === "reopen" ? "reopen" : "resolve";
+
+  try {
+    const updated = action === "reopen"
+      ? await reopenRemarkReward(body.id)
+      : await resolveRemarkReward(body.id, {
+          resolvedBy: session.sub,
+          resolutionNote: body.resolutionNote || null,
+        });
+    if (!updated) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 });
+    try {
+      await logAudit(
+        session.name || "User",
+        action === "reopen" ? "Reopened remark/reward" : "Resolved remark/reward",
+        `${updated.id}${body.resolutionNote ? ` · ${String(body.resolutionNote).slice(0, 80)}` : ""}`,
+      );
+    } catch {}
+    return NextResponse.json({ ok: true, item: updated });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e.message || "Failed" }, { status: 400 });
   }

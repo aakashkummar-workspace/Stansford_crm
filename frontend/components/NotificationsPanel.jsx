@@ -33,7 +33,7 @@ function parseDonorNext(raw) {
   return { iso: `${m[1]}-${m[2]}-${m[3]}`, note: (m[4] || "").trim() };
 }
 
-function buildAlerts(E) {
+export function buildAlerts(E) {
   const alerts = [];
   const overdueFees = (E.PENDING_FEES || []).filter((f) => f.overdue);
   const openComplaints = (E.COMPLAINTS || []).filter((c) => c.status === "Open");
@@ -106,11 +106,203 @@ function buildAlerts(E) {
     });
   }
 
-  // Donor touchpoint reminders. Fire on the scheduled day, nag for a week
-  // after (overdue), and give a heads-up in the preceding 3 days so the
-  // principal isn't surprised. Older / farther-out dates stay silent.
+  // Shared "today" anchor for every date-based reminder below.
   const todayMs = new Date(`${todayIso}T00:00:00`).getTime();
   const DAY = 86_400_000;
+
+  // Helpers for the date-driven reminders that follow. `daysFromIso` accepts
+  // either a YYYY-MM-DD or a full ISO timestamp and returns whole days from
+  // today (negative = past, 0 = today, positive = future). Returns null if
+  // the input isn't a parseable date.
+  function daysFromIso(iso) {
+    if (!iso) return null;
+    const t = new Date(/T/.test(iso) ? iso : `${iso}T00:00:00`).getTime();
+    if (Number.isNaN(t)) return null;
+    return Math.round((t - todayMs) / DAY);
+  }
+  function tsLabel(days) {
+    if (days < 0)  return `${Math.abs(days)}d ago`;
+    if (days === 0) return "today";
+    if (days === 1) return "tomorrow";
+    return `in ${days}d`;
+  }
+
+  // ---------- Library loans: overdue + due ≤ 3 days ----------
+  // Skip already-returned. Borrower side too: parents/teachers who see this
+  // panel will see only their own loans because E is already scoped.
+  const loanRem = [];
+  for (const l of (E.LOANS || [])) {
+    if (l.returnedAt) continue;
+    const d = daysFromIso(l.dueAt);
+    if (d == null) continue;
+    if (d <= 3) loanRem.push({ l, days: d });
+  }
+  loanRem.sort((a, b) => a.days - b.days);
+  const loanOverdue = loanRem.filter((r) => r.days < 0);
+  const loanDueSoon = loanRem.filter((r) => r.days >= 0 && r.days <= 3);
+  if (loanOverdue.length) {
+    alerts.push({
+      tone: "bad", icon: "book", screen: "library",
+      title: `${loanOverdue.length} library loan${loanOverdue.length === 1 ? "" : "s"} overdue`,
+      sub: loanOverdue.slice(0, 3).map((r) => `${r.l.borrowerName} · ${r.l.bookTitle}`).join(" · "),
+      ts: tsLabel(loanOverdue[0].days),
+    });
+  }
+  if (loanDueSoon.length) {
+    alerts.push({
+      tone: "warn", icon: "book", screen: "library",
+      title: `${loanDueSoon.length} library loan${loanDueSoon.length === 1 ? "" : "s"} due soon`,
+      sub: loanDueSoon.slice(0, 3).map((r) => `${r.l.borrowerName} · ${r.l.bookTitle} · ${tsLabel(r.days)}`).join(" · "),
+      ts: tsLabel(loanDueSoon[0].days),
+    });
+  }
+
+  // ---------- Tasks: overdue + due today/tomorrow (skip completed) ----------
+  const taskRem = [];
+  for (const t of (E.TASKS || [])) {
+    const status = String(t.status || "").toLowerCase();
+    if (status === "completed" || status === "done") continue;
+    const d = daysFromIso(t.dueDate);
+    if (d == null) continue;
+    if (d <= 1) taskRem.push({ t, days: d });
+  }
+  taskRem.sort((a, b) => a.days - b.days);
+  const taskOverdue = taskRem.filter((r) => r.days < 0);
+  const taskSoon    = taskRem.filter((r) => r.days >= 0 && r.days <= 1);
+  if (taskOverdue.length) {
+    alerts.push({
+      tone: "bad", icon: "check", screen: "tasks",
+      title: `${taskOverdue.length} task${taskOverdue.length === 1 ? "" : "s"} overdue`,
+      sub: taskOverdue.slice(0, 3).map((r) => r.t.title).join(" · "),
+      ts: tsLabel(taskOverdue[0].days),
+    });
+  }
+  if (taskSoon.length) {
+    alerts.push({
+      tone: "warn", icon: "check", screen: "tasks",
+      title: `${taskSoon.length} task${taskSoon.length === 1 ? "" : "s"} due ${taskSoon[0].days === 0 ? "today" : "tomorrow"}`,
+      sub: taskSoon.slice(0, 3).map((r) => r.t.title).join(" · "),
+      ts: tsLabel(taskSoon[0].days),
+    });
+  }
+
+  // ---------- Meetings within the next 7 days ----------
+  const mtgRem = [];
+  for (const m of (E.MEETINGS || [])) {
+    const d = daysFromIso(m.scheduledAt);
+    if (d == null) continue;
+    if (d >= 0 && d <= 7) mtgRem.push({ m, days: d });
+  }
+  mtgRem.sort((a, b) => a.days - b.days);
+  if (mtgRem.length) {
+    alerts.push({
+      tone: mtgRem[0].days === 0 ? "warn" : "warn",
+      icon: "clock", screen: "meetings",
+      title: `${mtgRem.length} meeting${mtgRem.length === 1 ? "" : "s"} ${mtgRem[0].days === 0 ? "today" : "this week"}`,
+      sub: mtgRem.slice(0, 3).map((r) => `${r.m.title} · ${tsLabel(r.days)}`).join(" · "),
+      ts: tsLabel(mtgRem[0].days),
+    });
+  }
+
+  // ---------- Exams within the next 7 days ----------
+  const examRem = [];
+  for (const x of (E.EXAMS || [])) {
+    const d = daysFromIso(x.date);
+    if (d == null) continue;
+    if (d >= 0 && d <= 7) examRem.push({ x, days: d });
+  }
+  examRem.sort((a, b) => a.days - b.days);
+  if (examRem.length) {
+    alerts.push({
+      tone: "warn", icon: "reports", screen: "exams",
+      title: `${examRem.length} exam${examRem.length === 1 ? "" : "s"} ${examRem[0].days === 0 ? "today" : "this week"}`,
+      sub: examRem.slice(0, 3).map((r) => {
+        const head = [r.x.cls, r.x.subject || r.x.name].filter(Boolean).join(" · ");
+        return `${head || r.x.name || "Exam"} · ${tsLabel(r.days)}`;
+      }).join(" · "),
+      ts: tsLabel(examRem[0].days),
+    });
+  }
+
+  // ---------- Transport maintenance: overdue + ≤30 days out ----------
+  // Each maintenance log carries a `nextDueDate`. The legally-required
+  // paperwork (insurance, FC, PUC) and service / repair items all share
+  // this field, so a single block covers everything that can "expire" on
+  // a bus. We keep only the LATEST log per (bus, type) — when a school
+  // records the next service, the older log's nextDueDate is superseded.
+  const TYPE_LABEL = {
+    service:   "Service",
+    fuel:      "Fuel",
+    insurance: "Insurance",
+    FC:        "Fitness (FC)",
+    PUC:       "Pollution (PUC)",
+    repair:    "Repair",
+    tyre:      "Tyre",
+    battery:   "Battery",
+  };
+  const latestByBusType = new Map();
+  for (const m of (E.MAINTENANCE_LOGS || [])) {
+    if (!m.nextDueDate) continue;
+    const key = `${m.busNumber || ""}|${m.type || ""}`;
+    const ts = new Date(m.createdAt || m.date || 0).getTime();
+    const cur = latestByBusType.get(key);
+    if (!cur || ts > cur._ts) latestByBusType.set(key, { ...m, _ts: ts });
+  }
+  const mntExpired = [];
+  const mntSoon = [];
+  for (const m of latestByBusType.values()) {
+    const d = daysFromIso(m.nextDueDate);
+    if (d == null) continue;
+    if (d < 0)        mntExpired.push({ m, days: d });
+    else if (d <= 30) mntSoon.push({ m, days: d });
+  }
+  mntExpired.sort((a, b) => a.days - b.days);
+  mntSoon.sort((a, b) => a.days - b.days);
+  if (mntExpired.length) {
+    alerts.push({
+      tone: "bad", icon: "bus", screen: "transport",
+      title: `${mntExpired.length} bus maintenance overdue`,
+      sub: mntExpired.slice(0, 3).map((r) =>
+        `${r.m.busNumber || "—"} · ${TYPE_LABEL[r.m.type] || r.m.type || "Item"} · ${tsLabel(r.days)}`
+      ).join(" · "),
+      ts: tsLabel(mntExpired[0].days),
+    });
+  }
+  if (mntSoon.length) {
+    alerts.push({
+      tone: "warn", icon: "bus", screen: "transport",
+      title: `${mntSoon.length} bus item${mntSoon.length === 1 ? "" : "s"} due within 30 days`,
+      sub: mntSoon.slice(0, 3).map((r) =>
+        `${r.m.busNumber || "—"} · ${TYPE_LABEL[r.m.type] || r.m.type || "Item"} · ${tsLabel(r.days)}`
+      ).join(" · "),
+      ts: tsLabel(mntSoon[0].days),
+    });
+  }
+
+  // ---------- Pending fees due within 3 days (overdue handled above) ----------
+  const feeSoon = [];
+  for (const f of (E.PENDING_FEES || [])) {
+    if (f.overdue) continue;
+    // f.due is a free-text field — pull the first YYYY-MM-DD we find.
+    const iso = String(f.due || "").match(/(\d{4}-\d{2}-\d{2})/)?.[1];
+    const d = daysFromIso(iso);
+    if (d == null) continue;
+    if (d >= 0 && d <= 3) feeSoon.push({ f, days: d });
+  }
+  feeSoon.sort((a, b) => a.days - b.days);
+  if (feeSoon.length) {
+    alerts.push({
+      tone: "warn", icon: "fees", screen: "fees",
+      title: `${feeSoon.length} fee payment${feeSoon.length === 1 ? "" : "s"} due soon`,
+      sub: feeSoon.slice(0, 3).map((r) => `${r.f.name} · ${tsLabel(r.days)}`).join(" · "),
+      ts: tsLabel(feeSoon[0].days),
+    });
+  }
+
+  // ---------- Donor touchpoints (existing) — fires on the scheduled day,
+  // nags for a week after (overdue), and gives a heads-up in the preceding
+  // 3 days so the principal isn't surprised. Older / farther-out dates
+  // stay silent.
   const reminders = [];
   for (const d of (E.DONORS || [])) {
     const parsed = parseDonorNext(d.next);

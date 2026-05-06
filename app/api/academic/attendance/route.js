@@ -17,12 +17,26 @@ export async function POST(req) {
       postedBy: actor,
       marks: body.marks,
     });
-    const present = logs.filter((l) => l.attendance !== "absent").length;
-    const absent  = logs.length - present;
+    const counts = { present: 0, late: 0, absent: 0, leave: 0 };
+    for (const l of logs) counts[l.attendance] = (counts[l.attendance] || 0) + 1;
     try {
-      await logAudit(actor, "Marked class attendance", `${body.cls || ""} · ${body.date} · ${present} present, ${absent} absent`);
+      await logAudit(
+        actor,
+        "Marked class attendance",
+        `${body.cls || ""} · ${body.date} · ${counts.present} present · ${counts.late} late · ${counts.absent} absent · ${counts.leave} on leave`
+      );
     } catch {}
-    return NextResponse.json({ ok: true, count: logs.length, present, absent, logs });
+    // Backwards-compat keys (`present`, `absent`) preserved alongside the
+    // new `late` / `leave` totals so older callers don't break.
+    return NextResponse.json({
+      ok: true,
+      count: logs.length,
+      present: counts.present,
+      late: counts.late,
+      absent: counts.absent,
+      leave: counts.leave,
+      logs,
+    });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e.message || "Failed" }, { status: 500 });
   }

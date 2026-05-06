@@ -5,7 +5,8 @@ import { KPI } from "../ui";
 import { money, moneyK } from "@/lib/format";
 import { openPrintWindow } from "./Reports";
 
-export default function ScreenTrust({ E }) {
+export default function ScreenTrust({ E, setCurrent, role }) {
+  const isTrustOnly = role === "trust_accountant";
   // Defaults on every destructured array — when the trust accountant
   // role (or any role without the Schools feature) lands here, json
   // doesn't include SCHOOLS / COMPLIANCE and accessing `.length`
@@ -98,11 +99,20 @@ export default function ScreenTrust({ E }) {
     <div className="page">
       <div className="page-head">
         <div>
-          <div className="page-eyebrow">School overview · {SCHOOLS.length} school{SCHOOLS.length === 1 ? "" : "s"}</div>
-          <div className="page-title">
-            School <span className="amber">overview</span>
+          <div className="page-eyebrow">
+            {isTrustOnly
+              ? `Trust overview · ${DONORS.length} donor${DONORS.length === 1 ? "" : "s"} on file`
+              : `School overview · ${SCHOOLS.length} school${SCHOOLS.length === 1 ? "" : "s"}`}
           </div>
-          <div className="page-sub">Roll-up view across the school.</div>
+          <div className="page-title">
+            {isTrustOnly ? <>Trust <span className="amber">overview</span></>
+                         : <>School <span className="amber">overview</span></>}
+          </div>
+          <div className="page-sub">
+            {isTrustOnly
+              ? "Trust ledger roll-up — donors, donations, trust expenses."
+              : "Roll-up view across the school."}
+          </div>
         </div>
         <div className="page-actions">
           <div className="segmented">
@@ -119,7 +129,85 @@ export default function ScreenTrust({ E }) {
         </div>
       </div>
 
-      {(() => {
+      {isTrustOnly && (() => {
+        // Trust Accountant overview — strictly trust ledger numbers. No
+        // students / fees / transport.
+        const donorReceipts = DONOR_RECEIPTS || [];
+        const donations = donorReceipts.reduce((a, r) => a + (r.amount || 0), 0);
+        const trustExp  = (EXPENSES || []).filter((e) => e.scope === "trust");
+        const trustExpTotal = trustExp.reduce((a, e) => a + (e.amount || 0), 0);
+        const activeCampaigns = (CAMPAIGNS || []).filter((c) => c.status !== "completed");
+        const net = donations - trustExpTotal;
+        const topDonors = [...DONORS].sort((a, b) => (b.ytd || 0) - (a.ytd || 0)).slice(0, 8);
+        return (
+          <div className="grid g-4" style={{ marginBottom: 20 }}>
+            <KPI
+              label="Donors on file" value={DONORS.length}
+              sub={`${(activeCampaigns || []).length} active campaign${activeCampaigns.length === 1 ? "" : "s"}`}
+              puck="cream" puckIcon="donors"
+              details={{
+                title: `Donors · ${DONORS.length} on file`,
+                sub: "Top donors · YTD",
+                items: topDonors.map((d) => ({
+                  label: d.name, value: money(d.ytd || 0),
+                  sub: `${d.type || "—"}${d.last ? ` · last ${d.last}` : ""}`,
+                  tone: "ok",
+                })),
+              }}
+            />
+            <KPI
+              label="Donations YTD" value={moneyK(donations)}
+              sub={`${donorReceipts.length} receipt${donorReceipts.length === 1 ? "" : "s"}`}
+              puck="mint" puckIcon="donors"
+              details={{
+                title: `Donations YTD · ${money(donations)}`,
+                sub: "Newest receipts first",
+                items: donorReceipts.slice(0, 8).map((r) => ({
+                  label: r.donorName || r.donor || "Anonymous",
+                  value: money(r.amount || 0),
+                  sub: `${r.method || "—"} · ${r.issuedAtLabel || ""}`,
+                  tone: "ok",
+                })),
+              }}
+            />
+            <KPI
+              label="Trust expenses YTD" value={moneyK(trustExpTotal)}
+              sub={`${trustExp.length} entr${trustExp.length === 1 ? "y" : "ies"}`}
+              puck="peach" puckIcon="money"
+              details={{
+                title: `Trust expenses · ${money(trustExpTotal)}`,
+                sub: "Most recent first",
+                items: [...trustExp]
+                  .sort((a, b) => (b.date || "").localeCompare(a.date || ""))
+                  .slice(0, 8)
+                  .map((e) => ({
+                    label: e.category || "—",
+                    value: money(e.amount || 0),
+                    sub: `${e.vendor || "—"} · ${e.date || ""}`,
+                    tone: "bad",
+                  })),
+              }}
+            />
+            <KPI
+              label="Net trust position" value={moneyK(net)}
+              sub={net >= 0 ? "in surplus" : "in deficit"}
+              puck={net >= 0 ? "sky" : "rose"} puckIcon="trending"
+              details={{
+                title: `Net · ${money(net)}`,
+                sub: "Donations YTD minus trust expenses YTD",
+                items: [
+                  { label: "Donations", value: money(donations), tone: "ok",
+                    sub: `${donorReceipts.length} receipt${donorReceipts.length === 1 ? "" : "s"}` },
+                  { label: "Trust expenses", value: money(trustExpTotal), tone: "bad",
+                    sub: `${trustExp.length} entr${trustExp.length === 1 ? "y" : "ies"}` },
+                ],
+              }}
+            />
+          </div>
+        );
+      })()}
+
+      {!isTrustOnly && (() => {
         // Compute trust KPIs from actual school data — TRUST_KPIS in
         // STATIC_EMPTIES is a static placeholder that never gets updated,
         // which is why the dashboard was stuck on 0 / 0% / ₹0.
@@ -210,7 +298,7 @@ export default function ScreenTrust({ E }) {
         );
       })()}
 
-      {(() => {
+      {!isTrustOnly && (() => {
         // "Things needing attention" — single roll-up card so the principal
         // sees what to act on first thing in the morning. Each row links
         // out to the relevant screen by virtue of being self-explanatory;
@@ -241,49 +329,49 @@ export default function ScreenTrust({ E }) {
             title: "Pending fees",
             count: pendingFees.length,
             sub: `₹${pendingFees.reduce((a, f) => a + (f.amount || 0), 0).toLocaleString("en-IN")} outstanding${overdueFees.length ? ` · ${overdueFees.length} overdue` : ""}`,
-            screen: "Fees & UPI",
+            screen: "Fees & UPI", screenId: "fees",
           },
           complaintsOpen.length > 0 && {
             icon: "complaint", tone: "bad",
             title: "Open complaints",
             count: complaintsOpen.length,
             sub: `${complaintsOpen.length} ticket${complaintsOpen.length === 1 ? "" : "s"} awaiting first response`,
-            screen: "Complaints",
+            screen: "Complaints", screenId: "complaints",
           },
           tcWaiting.length > 0 && {
             icon: "reports", tone: "warn",
             title: "Transfer certificate requests",
             count: tcWaiting.length,
             sub: `${tcWaiting.length} awaiting principal approval`,
-            screen: "Transfer certificates",
+            screen: "Transfer certificates", screenId: "tc",
           },
           lowAttStudents.length > 0 && {
             icon: "warning", tone: "warn",
             title: "Low-attendance students",
             count: lowAttStudents.length,
             sub: `Below 75% — ${lowAttStudents.slice(0, 3).map((s) => s.name).join(", ")}${lowAttStudents.length > 3 ? `, +${lowAttStudents.length - 3} more` : ""}`,
-            screen: "Students",
+            screen: "Students", screenId: "students",
           },
           enquiriesNew.length > 0 && {
             icon: "enquiry", tone: "info",
             title: "New admission enquiries",
             count: enquiriesNew.length,
             sub: `${enquiriesNew.length} prospect${enquiriesNew.length === 1 ? "" : "s"} need a first call`,
-            screen: "Admissions",
+            screen: "Admissions", screenId: "enquiries",
           },
           donorPending.length > 0 && {
             icon: "donors", tone: "info",
             title: "Donor form submissions",
             count: donorPending.length,
             sub: `${donorPending.length} pending review · ${donorPending.slice(0, 3).map((s) => s.donorName).join(", ")}${donorPending.length > 3 ? `, +${donorPending.length - 3} more` : ""}`,
-            screen: "Donors",
+            screen: "Donors", screenId: "donors",
           },
           leavePending.length > 0 && {
             icon: "calendar", tone: "warn",
             title: "Leave requests",
             count: leavePending.length,
             sub: `${leavePending.length} awaiting approval${leavePending.some((r) => r.requesterType === "teacher") ? " · includes staff" : ""}`,
-            screen: "Leave requests",
+            screen: "Leave requests", screenId: "leave",
           },
           govExpiring.length > 0 && {
             icon: "warning",
@@ -291,7 +379,7 @@ export default function ScreenTrust({ E }) {
             title: "Government documents expiring",
             count: govExpiring.length,
             sub: `${govExpiring.length} due within 30d · ${govExpiring.slice(0, 3).map((d) => d.title).join(", ")}${govExpiring.length > 3 ? `, +${govExpiring.length - 3} more` : ""}`,
-            screen: "Government documents",
+            screen: "Government documents", screenId: "government_documents",
           },
         ].filter(Boolean);
 
@@ -323,27 +411,65 @@ export default function ScreenTrust({ E }) {
               </div>
             ) : (
               <div>
-                {items.map((it, i) => (
-                  <div key={i} className="lrow">
-                    <div className={`act-ico ${it.tone}`}>
-                      <Icon name={it.icon} size={14} />
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                        <span style={{ fontSize: 13, fontWeight: 500 }}>{it.title}</span>
-                        <span className={`chip ${it.tone}`} style={{ fontSize: 10.5 }}>
-                          <span className="dot" />{it.count}
-                        </span>
+                {items.map((it, i) => {
+                  const canNav = typeof setCurrent === "function" && it.screenId;
+                  return (
+                    <div
+                      key={i}
+                      className="lrow attn-row"
+                      role={canNav ? "button" : undefined}
+                      tabIndex={canNav ? 0 : undefined}
+                      onClick={canNav ? () => setCurrent(it.screenId) : undefined}
+                      onKeyDown={canNav ? (e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setCurrent(it.screenId);
+                        }
+                      } : undefined}
+                      style={canNav ? { cursor: "pointer" } : undefined}
+                      title={canNav ? `Open ${it.screen}` : undefined}
+                    >
+                      <div className={`act-ico ${it.tone}`}>
+                        <Icon name={it.icon} size={14} />
                       </div>
-                      <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 2 }}>
-                        {it.sub}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <span style={{ fontSize: 13, fontWeight: 500 }}>{it.title}</span>
+                          <span className={`chip ${it.tone}`} style={{ fontSize: 10.5 }}>
+                            <span className="dot" />{it.count}
+                          </span>
+                        </div>
+                        <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 2 }}>
+                          {it.sub}
+                        </div>
+                      </div>
+                      <div className="attn-cta" style={{
+                        fontSize: 11,
+                        color: canNav ? "var(--accent, #1f3f8b)" : "var(--ink-4)",
+                        whiteSpace: "nowrap",
+                        fontWeight: canNav ? 600 : 400,
+                      }}>
+                        Open {it.screen} →
                       </div>
                     </div>
-                    <div style={{ fontSize: 11, color: "var(--ink-4)", whiteSpace: "nowrap" }}>
-                      Open {it.screen} →
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
+                <style jsx>{`
+                  .attn-row {
+                    transition: background 0.15s ease;
+                    border-radius: 8px;
+                  }
+                  .attn-row[role="button"]:hover {
+                    background: var(--bg-2, #f7f5ee);
+                  }
+                  .attn-row[role="button"]:hover .attn-cta {
+                    text-decoration: underline;
+                  }
+                  .attn-row[role="button"]:focus-visible {
+                    outline: 2px solid var(--accent, #1f3f8b);
+                    outline-offset: 2px;
+                  }
+                `}</style>
               </div>
             )}
           </div>

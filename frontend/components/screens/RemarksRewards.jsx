@@ -15,6 +15,9 @@ const TYPE_TONE = { reward: "ok", remark: "bad" };
 export default function ScreenRemarksRewards({ E, role, session, refresh }) {
   const isManager = role === "admin" || role === "principal";
   const canWrite  = isManager || role === "academic_director" || role === "teacher";
+  // Resolve closes the loop on a remark — open to admin / principal /
+  // academic director. Teachers report; leadership resolves.
+  const canResolve = isManager || role === "academic_director";
   // Build a set of identifiers that all map to "this is about me" — the
   // signed-in user's account id plus the staff row id linked to that
   // user's email. This makes the "About you" chip robust whether the
@@ -36,6 +39,10 @@ export default function ScreenRemarksRewards({ E, role, session, refresh }) {
   const [page, setPage] = useState(1);
   const PAGE_SIZE = 12;
   const [showForm, setShowForm] = useState(false);
+  // Filter chip for resolution status: all | open | resolved
+  const [filterResolved, setFilterResolved] = useState("all");
+  // The remark currently being resolved — drives the ResolveModal below.
+  const [resolving, setResolving] = useState(null);
   const [busy, setBusy] = useState(null);
   const [toast, setToast] = useState(null);
   const flash = (msg, tone = "ok") => {
@@ -74,22 +81,25 @@ export default function ScreenRemarksRewards({ E, role, session, refresh }) {
     return items.filter((r) => {
       if (filterTarget !== "all" && r.targetType !== filterTarget) return false;
       if (filterType   !== "all" && r.type       !== filterType)   return false;
+      if (filterResolved === "open"     && r.resolvedAt)  return false;
+      if (filterResolved === "resolved" && !r.resolvedAt) return false;
       if (term) {
-        const blob = `${targetName(r)} ${r.category || ""} ${r.description || ""} ${r.actionTaken || ""}`.toLowerCase();
+        const blob = `${targetName(r)} ${r.category || ""} ${r.description || ""} ${r.actionTaken || ""} ${r.resolutionNote || ""}`.toLowerCase();
         if (!blob.includes(term)) return false;
       }
       return true;
     });
-  }, [items, filterTarget, filterType, q, studentMap, userMap]);
+  }, [items, filterTarget, filterType, filterResolved, q, studentMap, userMap]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
-  useEffect(() => { setPage(1); }, [filterTarget, filterType, q]);
+  useEffect(() => { setPage(1); }, [filterTarget, filterType, filterResolved, q]);
 
   const counts = useMemo(() => ({
     total: items.length,
     rewards: items.filter((r) => r.type === "reward").length,
     remarks: items.filter((r) => r.type === "remark").length,
+    openRemarks: items.filter((r) => r.type === "remark" && !r.resolvedAt).length,
     students: items.filter((r) => r.targetType === "student").length,
   }), [items]);
 
@@ -119,6 +129,50 @@ export default function ScreenRemarksRewards({ E, role, session, refresh }) {
       const j = await r.json().catch(() => ({}));
       if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
       flash("Entry removed", "ok");
+      await reload();
+      await refresh?.();
+    } catch (e) {
+      flash(e.message || "Failed", "err");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // Submit a resolution. Note is optional but encouraged — it's what
+  // future readers see in the "Resolved" chip's hover tooltip.
+  async function submitResolve({ id, note }) {
+    setBusy(id);
+    try {
+      const r = await fetch("/api/remarks-rewards", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id, action: "resolve", resolutionNote: note || null }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
+      flash("Marked resolved", "ok");
+      setResolving(null);
+      await reload();
+      await refresh?.();
+    } catch (e) {
+      flash(e.message || "Failed", "err");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function reopen(id) {
+    if (!confirm("Reopen this entry? The resolution note will be cleared.")) return;
+    setBusy(id);
+    try {
+      const r = await fetch("/api/remarks-rewards", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id, action: "reopen" }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
+      flash("Reopened", "ok");
       await reload();
       await refresh?.();
     } catch (e) {
@@ -204,7 +258,16 @@ export default function ScreenRemarksRewards({ E, role, session, refresh }) {
       <div className="grid g-4" style={{ marginBottom: 18 }}>
         <KPI label="Total entries" value={counts.total} sub="this term" puck="cream" puckIcon="audit" />
         <KPI label="Rewards" value={counts.rewards} sub="positive entries" puck="mint" puckIcon="check" />
-        <KPI label="Remarks" value={counts.remarks} sub="needs follow-up" puck="rose" puckIcon="warning" />
+        <KPI
+          label="Open remarks"
+          value={counts.openRemarks}
+          sub={
+            counts.openRemarks === 0
+              ? counts.remarks > 0 ? "all resolved" : "none on file"
+              : `${counts.remarks - counts.openRemarks} resolved · ${counts.openRemarks} pending`
+          }
+          puck="rose" puckIcon="warning"
+        />
         <KPI label="On students" value={counts.students} sub={`${counts.total - counts.students} on staff`} puck="peach" puckIcon="students" />
       </div>
 
@@ -225,6 +288,11 @@ export default function ScreenRemarksRewards({ E, role, session, refresh }) {
           <option value="all">Rewards &amp; remarks</option>
           <option value="reward">Rewards only</option>
           <option value="remark">Remarks only</option>
+        </select>
+        <select className="select" value={filterResolved} onChange={(e) => setFilterResolved(e.target.value)}>
+          <option value="all">Any status</option>
+          <option value="open">Open · unresolved</option>
+          <option value="resolved">Resolved</option>
         </select>
       </div>
 
@@ -266,6 +334,16 @@ export default function ScreenRemarksRewards({ E, role, session, refresh }) {
                       <span className="dot" />{r.type}
                     </span>
                     {r.category && <span className="chip">{r.category}</span>}
+                    {r.resolvedAt ? (
+                      <span
+                        className="chip ok"
+                        title={r.resolutionNote ? `Resolution: ${r.resolutionNote}` : "Resolved"}
+                      >
+                        <span className="dot" />Resolved
+                      </span>
+                    ) : r.type === "remark" ? (
+                      <span className="chip warn"><span className="dot" />Open</span>
+                    ) : null}
                   </div>
                   <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginTop: 5, lineHeight: 1.5 }}>
                     {r.description}
@@ -275,18 +353,56 @@ export default function ScreenRemarksRewards({ E, role, session, refresh }) {
                       <strong>Action:</strong> {r.actionTaken}
                     </div>
                   )}
+                  {r.resolvedAt && (
+                    <div style={{
+                      fontSize: 11.5, color: "var(--ok)",
+                      marginTop: 3, display: "flex", gap: 4, flexWrap: "wrap",
+                    }}>
+                      <Icon name="check" size={11} />
+                      <span>
+                        <strong>Resolved</strong>
+                        {r.resolutionNote ? `: ${r.resolutionNote}` : ""}
+                        {" · "}
+                        {new Date(r.resolvedAt).toLocaleString("en-IN")}
+                        {r.resolvedBy && userMap.get(r.resolvedBy)?.name
+                          ? ` by ${userMap.get(r.resolvedBy).name}`
+                          : ""}
+                      </span>
+                    </div>
+                  )}
                   <div style={{ fontSize: 10.5, color: "var(--ink-4)", marginTop: 3 }}>
                     {r.id} · {r.createdAt ? new Date(r.createdAt).toLocaleString("en-IN") : "—"}
                   </div>
                 </div>
-                {isManager && (
-                  <button
-                    className="btn sm"
-                    onClick={() => remove(r.id)}
-                    disabled={busy === r.id}
-                    style={{ flexShrink: 0 }}
-                  >Remove</button>
-                )}
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, flexShrink: 0 }}>
+                  {/* Resolve appears on remark-type entries only — rewards
+                      have no "to-do" attached so closing them is meaningless. */}
+                  {canResolve && r.type === "remark" && !r.resolvedAt && (
+                    <button
+                      className="btn sm accent"
+                      onClick={() => setResolving(r)}
+                      disabled={busy === r.id}
+                      title="Mark this remark as handled"
+                    >
+                      <Icon name="check" size={11} />Resolve
+                    </button>
+                  )}
+                  {canResolve && r.resolvedAt && (
+                    <button
+                      className="btn sm"
+                      onClick={() => reopen(r.id)}
+                      disabled={busy === r.id}
+                      title="Reopen this entry — clears the resolution note"
+                    >Reopen</button>
+                  )}
+                  {isManager && (
+                    <button
+                      className="btn sm"
+                      onClick={() => remove(r.id)}
+                      disabled={busy === r.id}
+                    >Remove</button>
+                  )}
+                </div>
               </div>
             ))}
             {totalPages > 1 && (
@@ -310,6 +426,88 @@ export default function ScreenRemarksRewards({ E, role, session, refresh }) {
           onSubmit={submitNew}
         />
       )}
+
+      {resolving && (
+        <ResolveModal
+          entry={resolving}
+          targetLabel={targetName(resolving)}
+          busy={busy === resolving.id}
+          onClose={() => setResolving(null)}
+          onSubmit={(note) => submitResolve({ id: resolving.id, note })}
+        />
+      )}
+    </div>
+  );
+}
+
+// Small modal for capturing the optional resolution note when an admin
+// marks a remark resolved. Skipping the note is fine — the chip still
+// records who/when, and the existing "Action taken" field already
+// captures the action that was decided when the remark was logged.
+function ResolveModal({ entry, targetLabel, busy, onClose, onSubmit }) {
+  const [note, setNote] = useState("");
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  function submit(e) {
+    e.preventDefault();
+    if (busy) return;
+    onSubmit(note.trim());
+  }
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(20,16,10,0.5)",
+      display: "grid", placeItems: "center", zIndex: 260, padding: 16,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 480 }}>
+        <div className="card-head">
+          <div>
+            <div className="card-title" style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--ok)" }}>
+              <Icon name="check" size={14} /> Resolve remark
+            </div>
+            <div className="card-sub">
+              {targetLabel}{entry.category ? ` · ${entry.category}` : ""} — closing the loop on this entry
+            </div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
+        <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ background: "var(--bg-2)", padding: "10px 12px", borderRadius: 8, fontSize: 12, color: "var(--ink-2)", lineHeight: 1.5 }}>
+            <div style={{ fontWeight: 700 }}>{entry.description}</div>
+            {entry.actionTaken && (
+              <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 4 }}>
+                <strong>Action recorded:</strong> {entry.actionTaken}
+              </div>
+            )}
+          </div>
+          <label style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--ink-3)" }}>
+              Resolution note (optional)
+            </span>
+            <textarea
+              className="input" rows={3}
+              autoFocus
+              value={note}
+              onChange={(e) => setNote(e.target.value.slice(0, 500))}
+              placeholder="e.g. Met with parent on 6 May, behaviour improved since."
+              style={{ resize: "vertical", fontFamily: "inherit" }}
+            />
+            <span style={{ fontSize: 10.5, color: "var(--ink-4)" }}>
+              Stored on the record so future readers know what was done. The original entry is preserved.
+            </span>
+          </label>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, paddingTop: 4 }}>
+            <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn accent" disabled={busy}>
+              {busy ? "Resolving…" : <><Icon name="check" size={13} />Mark resolved</>}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }

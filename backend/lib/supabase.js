@@ -318,7 +318,12 @@ export const toTcRequest = (r) => ({
 export const fromTeacherAttendance = (r) => r && {
   id: r.id, teacherId: r.teacher_id, teacherName: r.teacher_name,
   date: r.date, status: r.status ?? "present",
-  leaveReason: r.leave_reason, markedBy: r.marked_by, markedAt: r.marked_at,
+  // The same DB column (leave_reason) backs both the leave note and the
+  // late note — surface the right alias depending on the row's status so
+  // client code reads cleanly.
+  leaveReason: r.status === "leave" ? r.leave_reason : null,
+  lateReason:  r.status === "late"  ? r.leave_reason : null,
+  markedBy: r.marked_by, markedAt: r.marked_at,
 };
 
 export const fromExam = (r) => r && {

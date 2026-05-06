@@ -12,7 +12,11 @@ export async function GET() {
 }
 
 export async function POST() {
-  const created = await ensureDemoUsers();
-  const total = (await listUsers()).length;
-  return NextResponse.json({ ok: true, created, total });
+  try {
+    const created = await ensureDemoUsers();
+    const total = (await listUsers()).length;
+    return NextResponse.json({ ok: true, created, total });
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: e.message || "Failed" }, { status: 500 });
+  }
 }

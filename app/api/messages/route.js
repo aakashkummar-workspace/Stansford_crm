@@ -12,6 +12,16 @@ export const dynamic = "force-dynamic";
 // can also receive parent messages on the admin's behalf.
 const ADMIN_ROLES = new Set(["admin", "principal"]);
 
+// Roles allowed to initiate messages to a specific parent. Teacher /
+// academic_director / school_accountant join admin / principal so any
+// staff member who signs in can reach a parent and the conversation
+// shows up in both the sender's history and the parent's inbox.
+// trust_accountant is intentionally excluded — trust-side staff don't
+// touch the parent communication stream.
+const STAFF_SENDER_ROLES = new Set([
+  "admin", "principal", "academic_director", "teacher", "school_accountant",
+]);
+
 // GET /api/messages
 //   ?with=USR-XXX  → fetch full conversation between session.sub and that user
 //   (no `with`)    → return inbox = thread list
@@ -67,15 +77,24 @@ export async function POST(req) {
     if (!admin) return NextResponse.json({ ok: false, error: "No admin account found" }, { status: 503 });
     receiverId = admin.id;
     receiverRole = admin.role;
-  } else if (ADMIN_ROLES.has(session.role)) {
+  } else if (STAFF_SENDER_ROLES.has(session.role)) {
     if (!receiverId) return NextResponse.json({ ok: false, error: "receiverId required" }, { status: 400 });
     const users = await listUsers();
     const target = users.find((u) => u.id === receiverId);
     if (!target) return NextResponse.json({ ok: false, error: "Recipient not found" }, { status: 404 });
+    // Non-admin staff can only message parents on this stream — internal
+    // staff-to-staff chat goes through /api/chat. Admin / principal keep
+    // their existing freedom (replying to anyone).
+    if (!ADMIN_ROLES.has(session.role) && target.role !== "parent") {
+      return NextResponse.json(
+        { ok: false, error: "You can only message parent accounts on this stream" },
+        { status: 403 }
+      );
+    }
     receiverRole = target.role;
   } else {
     return NextResponse.json(
-      { ok: false, error: "Only parents and admin / principal can use this messaging stream" },
+      { ok: false, error: "Your role can't use the parent messaging stream" },
       { status: 403 }
     );
   }

@@ -6,10 +6,11 @@ import { KPI } from "../ui";
 
 const STATUSES = [
   { k: "present", label: "Present", tone: "ok",   color: "var(--ok)" },
+  { k: "late",    label: "Late",    tone: "warn", color: "var(--warn)" },
   { k: "absent",  label: "Absent",  tone: "bad",  color: "var(--err, #b13c1c)" },
   { k: "leave",   label: "Leave",   tone: "warn", color: "var(--warn)" },
 ];
-const STATUS_LABEL = { present: "Present", absent: "Absent", leave: "Leave" };
+const STATUS_LABEL = { present: "Present", late: "Late", absent: "Absent", leave: "Leave" };
 
 function Toast({ msg, tone, onClose }) {
   if (!msg) return null;
@@ -30,6 +31,7 @@ export default function ScreenMyAttendance({ E, refresh, role, session }) {
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState(null);
   const [leaveReason, setLeaveReason] = useState("");
+  const [lateReason,  setLateReason]  = useState("");
 
   const showToast = (msg, tone) => { setToast({ msg, tone }); setTimeout(() => setToast(null), 3000); };
 
@@ -52,6 +54,10 @@ export default function ScreenMyAttendance({ E, refresh, role, session }) {
       showToast("Add a leave reason first", "err");
       return;
     }
+    if (status === "late" && !lateReason.trim()) {
+      showToast("Add a late-arrival reason first", "err");
+      return;
+    }
     setBusy(true);
     try {
       const r = await fetch("/api/teacher-attendance", {
@@ -61,12 +67,14 @@ export default function ScreenMyAttendance({ E, refresh, role, session }) {
           date: today,
           status,
           leaveReason: status === "leave" ? leaveReason.trim() : null,
+          lateReason:  status === "late"  ? lateReason.trim()  : null,
         }),
       });
       const j = await r.json();
       if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
       showToast(`Marked ${status} for today`, "ok");
       if (status !== "leave") setLeaveReason("");
+      if (status !== "late")  setLateReason("");
       await load();
       await refresh?.();
     } catch (e) { showToast(e.message, "err"); }
@@ -81,11 +89,13 @@ export default function ScreenMyAttendance({ E, refresh, role, session }) {
       return d >= cutoff;
     });
     const present = last30.filter((r) => r.status === "present").length;
+    const late    = last30.filter((r) => r.status === "late").length;
     const absent  = last30.filter((r) => r.status === "absent").length;
     const leave   = last30.filter((r) => r.status === "leave").length;
     const total   = last30.length;
-    const pct = total > 0 ? Math.round((present / total) * 100) : null;
-    return { present, absent, leave, total, pct };
+    // Present + Late both count as "showed up" for the headline percentage.
+    const pct = total > 0 ? Math.round(((present + late) / total) * 100) : null;
+    return { present, late, absent, leave, total, pct };
   }, [records]);
 
   const todayLabel = new Date().toLocaleDateString("en-IN", { weekday: "long", day: "2-digit", month: "long", year: "numeric" });
@@ -119,9 +129,9 @@ export default function ScreenMyAttendance({ E, refresh, role, session }) {
               ? <>You're marked <span style={{ color: STATUSES.find((s) => s.k === todays.status)?.color }}>{STATUS_LABEL[todays.status]}</span> today</>
               : "Not marked yet — pick one"}
           </div>
-          {todays?.status === "leave" && todays.leaveReason && (
+          {(todays?.status === "leave" || todays?.status === "late") && (todays.leaveReason || todays.lateReason) && (
             <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 4 }}>
-              Reason: <em>{todays.leaveReason}</em>
+              Reason: <em>{todays.leaveReason || todays.lateReason}</em>
             </div>
           )}
           {todays && (
@@ -147,13 +157,24 @@ export default function ScreenMyAttendance({ E, refresh, role, session }) {
               }}
             >
               <Icon name={s.k === "present" ? "check" : s.k === "absent" ? "x" : "clock"} size={13} />
+              {/* "late" + "leave" both render with the clock icon; the label disambiguates */}
               {s.label}
             </button>
           ))}
         </div>
       </div>
 
-      {/* Leave reason — only relevant when picking Leave */}
+      {/* Reason fields — only relevant when picking Late or Leave */}
+      <div className="card" style={{ marginBottom: 14, padding: "12px 16px", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+        <div style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 500 }}>Late reason (only when picking <b>Late</b>)</div>
+        <input
+          className="input"
+          style={{ flex: 1, minWidth: 220 }}
+          value={lateReason}
+          onChange={(e) => setLateReason(e.target.value)}
+          placeholder="e.g. Traffic, late train, personal emergency"
+        />
+      </div>
       <div className="card" style={{ marginBottom: 14, padding: "12px 16px", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
         <div style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 500 }}>Leave reason (only when picking <b>Leave</b>)</div>
         <input
@@ -167,10 +188,10 @@ export default function ScreenMyAttendance({ E, refresh, role, session }) {
 
       {/* 30-day KPIs */}
       <div className="grid g-4" style={{ marginBottom: 14 }}>
-        <KPI label="Attendance · 30d" value={stats.pct === null ? "—" : `${stats.pct}%`} sub={`${stats.present}/${stats.total} days present`} puck="mint" puckIcon="check" />
-        <KPI label="Days marked" value={stats.total} sub="last 30 days" puck="cream" puckIcon="audit" />
+        <KPI label="Attendance · 30d" value={stats.pct === null ? "—" : `${stats.pct}%`} sub={`${stats.present + stats.late}/${stats.total} on-site (incl. late)`} puck="mint" puckIcon="check" />
+        <KPI label="Late arrivals" value={stats.late} sub={stats.late ? "with reasons logged" : "always on time"} puck="peach" puckIcon="clock" />
         <KPI label="Absent" value={stats.absent} sub={stats.absent ? "review reasons" : "all clear"} puck="rose" puckIcon="x" />
-        <KPI label="On leave" value={stats.leave} sub={stats.leave ? "with reasons logged" : "no leaves"} puck="peach" puckIcon="clock" />
+        <KPI label="On leave" value={stats.leave} sub={stats.leave ? "with reasons logged" : "no leaves"} puck="cream" puckIcon="calendar" />
       </div>
 
       {/* Recent log */}
@@ -194,7 +215,7 @@ export default function ScreenMyAttendance({ E, refresh, role, session }) {
                       {r.date === today && <span className="chip" style={{ marginLeft: 6, fontSize: 9.5 }}>today</span>}
                     </td>
                     <td><span className={`chip ${tone}`}><span className="dot" />{STATUS_LABEL[r.status]}</span></td>
-                    <td style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{r.leaveReason || "—"}</td>
+                    <td style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{r.leaveReason || r.lateReason || "—"}</td>
                     <td style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{r.markedBy === (session?.name) ? "self" : r.markedBy}</td>
                     <td style={{ fontSize: 11, color: "var(--ink-4)", whiteSpace: "nowrap" }}>{new Date(r.markedAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</td>
                   </tr>

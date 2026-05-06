@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI, AvatarChip, StatusChip } from "../ui";
 import DocumentsPanel from "../DocumentsPanel";
+import CredentialsModal from "../CredentialsModal";
 import { resolveSchool, downloadPdf } from "@/lib/export";
 
 export default function ScreenStudents({ E, refresh, role, session }) {
@@ -516,7 +517,23 @@ export default function ScreenStudents({ E, refresh, role, session }) {
         />
       )}
       {showAdmission && <AdmissionModal classes={E.CLASSES || []} routes={E.ROUTES || []} students={E.ADDED_STUDENTS || []} onClose={() => setShowAdmission(false)} onSubmit={submitAdmission} />}
-      {issuedLogin && <CredentialsModal data={issuedLogin} onClose={() => setIssuedLogin(null)} flash={flash} />}
+      {issuedLogin && (
+        <CredentialsModal
+          title="Parent login created"
+          subtitle={`For ${issuedLogin.studentName} (${issuedLogin.studentId}) — share these with the parent`}
+          email={issuedLogin.email}
+          password={issuedLogin.defaultPassword}
+          extras={[{ label: "Role", value: "Parent" }]}
+          note={
+            <>
+              The parent can sign in at the login screen and pick the <b>Parent</b> role.
+              Their dashboard will be scoped to {issuedLogin.studentName} only.
+            </>
+          }
+          onClose={() => setIssuedLogin(null)}
+          flash={flash}
+        />
+      )}
       {showImport && <ImportModal onClose={() => setShowImport(false)} onFile={handleImportFile} />}
       {profileOf && (
         <ProfileModal
@@ -1537,63 +1554,6 @@ function EditPhoneModal({ student, onClose, onSubmit }) {
 
 // Shown once after admission whenever a fresh parent account was minted by
 // the API. Staff can copy email + password and hand them to the parent.
-function CredentialsModal({ data, onClose, flash }) {
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === "Escape") onClose(); };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  const copy = async (txt, what) => {
-    try { await navigator.clipboard.writeText(txt); flash(`${what} copied`, "ok"); }
-    catch { flash(`Couldn't copy — select & copy manually`, "bad"); }
-  };
-  const copyBoth = () => copy(`Login: ${data.email}\nPassword: ${data.defaultPassword}`, "Credentials");
-
-  return (
-    <div onClick={onClose} style={{
-      position: "fixed", inset: 0, background: "rgba(20,16,10,0.5)",
-      display: "grid", placeItems: "center", zIndex: 260, padding: 16,
-    }}>
-      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 460 }}>
-        <div className="card-head">
-          <div>
-            <div className="card-title">Parent login created</div>
-            <div className="card-sub">For {data.studentName} ({data.studentId}) — share these with the parent</div>
-          </div>
-          <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
-        </div>
-        <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <CredRow label="Login email" value={data.email} onCopy={() => copy(data.email, "Email")} />
-          <CredRow label="Password" value={data.defaultPassword} onCopy={() => copy(data.defaultPassword, "Password")} mono />
-          <div style={{ background: "var(--bg-2)", border: "1px dashed var(--rule)", padding: "9px 12px", borderRadius: 8, fontSize: 11.5, color: "var(--ink-3)" }}>
-            The parent can sign in at the login screen and pick the <b>Parent</b> role. Their dashboard will be scoped to {data.studentName} only.
-          </div>
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-            <button className="btn" onClick={copyBoth}><Icon name="download" size={13} />Copy both</button>
-            <button className="btn accent" onClick={onClose}>Done</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function CredRow({ label, value, onCopy, mono }) {
-  return (
-    <div style={{ background: "var(--bg-2)", borderRadius: 8, padding: "8px 12px", display: "flex", alignItems: "center", gap: 10 }}>
-      <div style={{ minWidth: 110 }}>
-        <div style={{ fontSize: 10.5, color: "var(--ink-4)", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 500 }}>{label}</div>
-        <div style={{ fontSize: 13, fontWeight: 500, color: "var(--ink)", marginTop: 2, fontFamily: mono ? "var(--font-mono)" : undefined }}>{value}</div>
-      </div>
-      <div style={{ flex: 1 }} />
-      <button className="btn sm" onClick={onCopy} title={`Copy ${label.toLowerCase()}`}>
-        <Icon name="download" size={11} />Copy
-      </button>
-    </div>
-  );
-}
-
 // Compose-and-send WhatsApp message to a parent. Uses Evolution API directly
 // via /api/parents/message. Template suggestions can be picked or edited.
 function MessageParentModal({ student, onClose, flash }) {

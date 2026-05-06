@@ -60,6 +60,10 @@ function shapeForScreens(db) {
     ARCHIVED_STUDENTS: db.archivedStudents || [],
     DAILY_LOGS: db.dailyLogs || [],
     CUSTOM_ROLES: db.customRoles || [],
+    // Carry app_settings into the initial server-rendered payload so the
+    // parent contact banner (and any other settings-driven UI) renders on
+    // first paint instead of waiting for the first refresh() round-trip.
+    SETTINGS: db.appSettings || {},
   };
 }
 
@@ -71,7 +75,41 @@ export default async function Page() {
   if (!session) redirect("/login");
 
   const db = await readAllData();
-  const E = shapeForScreens(db);
+  let E = shapeForScreens(db);
+
+  // Trust Accountant: strip every school-side list from the initial
+  // server-rendered payload so a curious admin tools / hydration peek
+  // can't read student or staff data. /api/data/route.js applies the
+  // same slice on subsequent fetches; AppShell adds a third layer.
+  if (session.role === "trust_accountant") {
+    E = {
+      ...E,
+      EXPENSES: (E.EXPENSES || []).filter((e) => e.scope === "trust"),
+      ADDED_STUDENTS: [], ARCHIVED_STUDENTS: [],
+      DAILY_LOGS: [],
+      PENDING_FEES: [], RECENT_FEES: [], FEE_REMINDERS: [],
+      STAFF: [], TEACHER_ATTENDANCE: [],
+      CLASSES: [], CLASS_STRENGTH: [],
+      TIMETABLE: [], SYLLABUS: [],
+      EXAMS: [], MARKS: [],
+      INVENTORY: [], INVENTORY_CATEGORIES: [],
+      LIBRARY: [], LOANS: [],
+      MAINTENANCE_LOGS: [],
+      ROUTES: [], TRANSPORT_ATTENDANCE: [],
+      COMPLAINTS: [], ENQUIRIES: [],
+      BROADCASTS: [], TEMPLATES: [], RECIPIENT_LISTS: [], MOVEMENTS: [],
+      MEETINGS: [], VOLUNTEERS: [],
+      CHAT_THREADS: [],
+      TC_REQUESTS: [],
+      TASKS: [],
+      USERS: [],
+      // Audit trimmed to finance-related entries only.
+      AUDIT: (E.AUDIT || []).filter((a) => {
+        const blob = `${a.action || ""} ${a.entity || ""}`.toLowerCase();
+        return /donor|donation|trust|expense|campaign|receipt/.test(blob);
+      }),
+    };
+  }
 
   // For staff-side roles (teacher, principal, admin, etc.) try to resolve the
   // user's own staff id by matching their session email against the staff

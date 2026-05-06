@@ -59,19 +59,26 @@ export async function POST(req) {
   }
 
   // Parent auto-link: if a parent account signs in with no linkedId
-  // set, link them to the first active student so the child-scoped
-  // screens (Academic, Fees, Leave) all have a target. Production
-  // installs should set linkedId explicitly during enquiry conversion;
-  // this fallback covers the demo seed + any pre-conversion accounts.
-  if (user.role === "parent" && !user.linkedId) {
+  // set, OR with a linkedId that no longer resolves to an active student
+  // (data drift between Supabase + file fallback, or the linked student
+  // was archived), re-link to the first active student so the
+  // child-scoped screens always have a target. Production installs set
+  // linkedId explicitly during enquiry conversion; this fallback covers
+  // demo seeds + any drift.
+  if (user.role === "parent") {
     try {
       const data = await readAllData();
-      const firstActive = (data.addedStudents || []).find(
+      const active = (data.addedStudents || []).filter(
         (s) => (s.status ?? "active") !== "archived"
       );
-      if (firstActive) {
-        await updateUser(user.id, { linkedId: firstActive.id }).catch(() => {});
-        user = { ...user, linkedId: firstActive.id };
+      const linkedExists = user.linkedId && active.some((s) => s.id === user.linkedId);
+      if (!linkedExists && active.length > 0) {
+        const target = active[0];
+        await updateUser(user.id, { linkedId: target.id }).catch(() => {});
+        user = { ...user, linkedId: target.id };
+      } else if (!user.linkedId) {
+        // No active students at all → leave linkedId null; child-scoped
+        // screens will show "No child linked" instead of crashing.
       }
     } catch {}
   }

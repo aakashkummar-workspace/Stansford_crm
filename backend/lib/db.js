@@ -1404,12 +1404,15 @@ export async function advanceRoute(code, action) {
 
 // ---------- daily logs ----------
 export async function upsertDailyLog(row) {
-  const att = row.attendance === "absent" ? "absent" : "present";
+  const ATT_BUCKETS = new Set(["present", "late", "absent", "leave"]);
+  const att = ATT_BUCKETS.has(row.attendance) ? row.attendance : "present";
   const dbRow = {
     student_id: row.studentId, student_name: row.studentName, cls: row.cls,
     date: row.date,
     attendance: att,
-    leave_reason: att === "absent" ? (row.leaveReason || "") : null,
+    // Reason persists for any non-present bucket (absent/late/leave), not
+    // just absences. The leave_reason column is reused for late-reason too.
+    leave_reason: att === "present" ? null : (row.leaveReason || ""),
     classwork: row.classwork,
     classwork_status: row.classworkStatus || null,
     homework: row.homework,
@@ -2284,25 +2287,37 @@ export async function removeTcRequest(id) {
 // ---------- teacher attendance ----------
 // One row per (teacherId, date). Self-marked by teachers, can be overridden
 // by principal/admin. File-only for now.
-const TEACHER_ATTENDANCE_STATUSES = ["present", "absent", "leave"];
+const TEACHER_ATTENDANCE_STATUSES = ["present", "late", "absent", "leave"];
 
-export async function markTeacherAttendance({ teacherId, teacherName, date, status, leaveReason, markedBy }) {
+export async function markTeacherAttendance({ teacherId, teacherName, date, status, leaveReason, lateReason, markedBy }) {
   if (!teacherId || !date) throw new Error("teacherId + date required");
   const st = TEACHER_ATTENDANCE_STATUSES.includes(status) ? status : "present";
+  // For backward compat we keep storing the explanation in `leave_reason`
+  // (the existing column) regardless of whether the status is "leave" or
+  // "late". Callers can pass either `leaveReason` or `lateReason`; the API
+  // surfaces both names so client code reads cleanly.
+  const reasonText = st === "leave" ? (leaveReason || "")
+                   : st === "late"  ? (lateReason  || leaveReason || "")
+                   : null;
   const row = {
     id: `TAT-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 999)}`,
     teacherId,
     teacherName: teacherName || "—",
     date,
     status: st,
-    leaveReason: st === "leave" ? (leaveReason || "") : null,
+    leaveReason: st === "leave" ? reasonText : null,
+    lateReason:  st === "late"  ? reasonText : null,
     markedBy: markedBy || teacherId,
     markedAt: new Date().toISOString(),
   };
   if (supabaseEnabled) {
     const dbRow = {
       id: row.id, teacher_id: teacherId, teacher_name: row.teacherName,
-      date, status: st, leave_reason: row.leaveReason,
+      date, status: st,
+      // Reuse the existing leave_reason column for both leave + late notes.
+      // Avoids a schema migration for the late-reason rollout while still
+      // letting clients read it back via `lateReason` (mapped in fromTeacherAttendance).
+      leave_reason: reasonText,
       marked_by: row.markedBy, marked_at: row.markedAt,
     };
     const up = await supabase.from("teacher_attendance").upsert(dbRow, { onConflict: "teacher_id,date" }).select().single();
@@ -4829,6 +4844,53 @@ export async function updateUser(id, patch) {
   });
 }
 
+// Replace a user's bcrypt hash. Used by the admin "Reset password" flow on
+// the Users screen. Falls back to seeding the user row from DEMO_ACCOUNTS if
+// they only existed in memory before. Returns the safe (no-hash) user, or
+// null if the id is unknown to both stores.
+export async function setUserPassword(id, passwordHash) {
+  if (!id || !passwordHash) return null;
+
+  if (supabaseEnabled) {
+    const r = await supabase
+      .from("users")
+      .update({ password_hash: passwordHash })
+      .eq("id", id)
+      .select()
+      .maybeSingle();
+    if (!r.error && r.data) return fromUser(r.data);
+    // Fall through to file fallback if Supabase doesn't know this user
+    // (legacy demo accounts that were never written to the table).
+  }
+
+  const db = fileRead();
+  if (!Array.isArray(db.authUsers)) db.authUsers = [];
+  let idx = db.authUsers.findIndex((u) => u.id === id);
+  if (idx === -1) {
+    try {
+      const seed = require("./seed-users.js");
+      const demo = (seed.DEMO_ACCOUNTS || []).find((a) => a.id === id);
+      if (demo) {
+        db.authUsers.push({
+          id: demo.id, email: demo.email, role: demo.role, name: demo.name,
+          linkedId: demo.linkedId || null,
+          createdAt: new Date().toISOString(),
+        });
+        idx = db.authUsers.length - 1;
+      }
+    } catch {}
+  }
+  if (idx === -1) return null;
+  db.authUsers[idx] = { ...db.authUsers[idx], passwordHash };
+  fileWrite(db);
+  const merged = db.authUsers[idx];
+  return fromUser({
+    id: merged.id, email: merged.email, role: merged.role, name: merged.name,
+    password_hash: merged.passwordHash, linked_id: merged.linkedId,
+    created_at: merged.createdAt,
+  });
+}
+
 // Look up a user by id. Used internally for atomic add/remove operations.
 async function getUserById(id) {
   if (!id) return null;
@@ -4929,11 +4991,18 @@ export async function markAttendanceBulk({ date, cls, postedBy, marks }) {
     throw new Error("date and marks[] are required");
   }
   const results = [];
+  // Allowed daily-log attendance buckets. "late" and "leave" join the
+  // existing present/absent so reports can distinguish a student who
+  // showed up late from a planned leave.
+  const STUDENT_ATTENDANCE = new Set(["present", "late", "absent", "leave"]);
   for (const m of marks) {
     const studentId = m.studentId;
     if (!studentId) continue;
-    const att = m.attendance === "absent" ? "absent" : "present";
-    const leaveReason = att === "absent" ? (m.leaveReason || "") : "";
+    const att = STUDENT_ATTENDANCE.has(m.attendance) ? m.attendance : "present";
+    // Reason text persists for absent/leave/late — useful for the audit
+    // trail and the late-arrivals widget. Stored in `leaveReason` for
+    // backward compat (the column is reused).
+    const leaveReason = att === "present" ? "" : (m.leaveReason || m.lateReason || "");
 
     let existing = null;
     if (supabaseEnabled) {
@@ -5378,6 +5447,11 @@ const fromRemarkReward = (r) => r ? ({
   actionTaken: r.action_taken,
   createdBy: r.created_by,
   createdAt: r.created_at,
+  // Resolution fields. May be null when the schema hasn't been migrated
+  // yet — listRemarksRewards merges in the file-overlay for backward compat.
+  resolvedAt:     r.resolved_at     ?? null,
+  resolvedBy:     r.resolved_by     ?? null,
+  resolutionNote: r.resolution_note ?? null,
 }) : null;
 
 export async function addRemarkReward({
@@ -5424,13 +5498,34 @@ export async function addRemarkReward({
 }
 
 export async function listRemarksRewards({ targetType, targetId, type, limit = 200 } = {}) {
+  // Always read the file-side resolution overlay so we can merge it on top
+  // of whatever the primary store returns. Stored as
+  // db.remarksRewardsResolutions = { [id]: { resolvedAt, resolvedBy, resolutionNote } }
+  // — used for installs where the Supabase schema doesn't have the
+  // resolution columns yet.
+  const overlayDb = fileRead();
+  const overlay = (overlayDb && typeof overlayDb.remarksRewardsResolutions === "object")
+    ? overlayDb.remarksRewardsResolutions
+    : {};
+  const mergeOverlay = (item) => {
+    if (!item) return item;
+    const ov = overlay[item.id];
+    if (!ov) return item;
+    return {
+      ...item,
+      resolvedAt:     item.resolvedAt     ?? ov.resolvedAt     ?? null,
+      resolvedBy:     item.resolvedBy     ?? ov.resolvedBy     ?? null,
+      resolutionNote: item.resolutionNote ?? ov.resolutionNote ?? null,
+    };
+  };
+
   if (supabaseEnabled) {
     let q = supabase.from("remarks_rewards").select("*").order("created_at", { ascending: false }).limit(limit);
     if (targetType) q = q.eq("target_type", targetType);
     if (targetId)   q = q.eq("target_id", targetId);
     if (type)       q = q.eq("type", type);
     const sel = await q;
-    if (!sel.error) return (sel.data || []).map(fromRemarkReward);
+    if (!sel.error) return (sel.data || []).map(fromRemarkReward).map(mergeOverlay);
     if (!isSchemaMissError(sel.error)) console.warn(`[db] remarks_rewards fell back: ${sel.error.message}`);
   }
   const db = fileRead();
@@ -5438,7 +5533,92 @@ export async function listRemarksRewards({ targetType, targetId, type, limit = 2
   if (targetType) all = all.filter((r) => r.targetType === targetType);
   if (targetId)   all = all.filter((r) => r.targetId === targetId);
   if (type)       all = all.filter((r) => r.type === type);
-  return all.slice(0, limit);
+  return all.slice(0, limit).map(mergeOverlay);
+}
+
+// Mark a remark/reward as resolved. Optional `resolutionNote` records what
+// was done. Tries Supabase first; on missing-column errors, falls back to
+// a file-side overlay keyed by id so the change persists even before the
+// schema migration is applied. Returns the merged row, or null if the
+// id is unknown.
+export async function resolveRemarkReward(id, { resolvedBy = null, resolutionNote = null } = {}) {
+  if (!id) return null;
+  const resolvedAt = new Date().toISOString();
+  const note = resolutionNote ? String(resolutionNote).trim().slice(0, 500) : null;
+
+  // Try Supabase update first (fast path on freshly-migrated installs).
+  if (supabaseEnabled) {
+    const upd = await supabase
+      .from("remarks_rewards")
+      .update({ resolved_at: resolvedAt, resolved_by: resolvedBy, resolution_note: note })
+      .eq("id", id)
+      .select()
+      .maybeSingle();
+    if (!upd.error && upd.data) return fromRemarkReward(upd.data);
+    // Schema lag (column doesn't exist yet) → fall through to overlay.
+    if (upd.error && !isSchemaMissError(upd.error) && !/column\s+\".+\"\s+does not exist/i.test(upd.error.message)) {
+      console.warn(`[db] remarks_rewards resolve fell back: ${upd.error.message}`);
+    }
+  }
+
+  // File overlay path. Mirror to db.remarksRewardsResolutions[id] so reads
+  // pick it up regardless of which store actually owns the row.
+  const db = fileRead();
+  if (!db.remarksRewardsResolutions || typeof db.remarksRewardsResolutions !== "object") {
+    db.remarksRewardsResolutions = {};
+  }
+  // If the row lives in the file fallback, also update it in place so
+  // subsequent reads see the resolution without needing the overlay.
+  let baseRow = null;
+  if (Array.isArray(db.remarksRewards)) {
+    const idx = db.remarksRewards.findIndex((r) => r.id === id);
+    if (idx !== -1) {
+      db.remarksRewards[idx] = {
+        ...db.remarksRewards[idx],
+        resolvedAt, resolvedBy, resolutionNote: note,
+      };
+      baseRow = db.remarksRewards[idx];
+    }
+  }
+  db.remarksRewardsResolutions[id] = { resolvedAt, resolvedBy, resolutionNote: note };
+  fileWrite(db);
+  return baseRow || { id, resolvedAt, resolvedBy, resolutionNote: note };
+}
+
+// Reopen — clears resolution metadata. Used when an admin marks a row as
+// resolved by mistake. Mirrors resolveRemarkReward's overlay pattern.
+export async function reopenRemarkReward(id) {
+  if (!id) return null;
+  if (supabaseEnabled) {
+    const upd = await supabase
+      .from("remarks_rewards")
+      .update({ resolved_at: null, resolved_by: null, resolution_note: null })
+      .eq("id", id)
+      .select()
+      .maybeSingle();
+    if (!upd.error && upd.data) {
+      // Drop the overlay too so the row reads as fully reopened.
+      const db = fileRead();
+      if (db.remarksRewardsResolutions && db.remarksRewardsResolutions[id]) {
+        delete db.remarksRewardsResolutions[id];
+        fileWrite(db);
+      }
+      return fromRemarkReward(upd.data);
+    }
+  }
+  const db = fileRead();
+  if (db.remarksRewardsResolutions) delete db.remarksRewardsResolutions[id];
+  if (Array.isArray(db.remarksRewards)) {
+    const idx = db.remarksRewards.findIndex((r) => r.id === id);
+    if (idx !== -1) {
+      db.remarksRewards[idx] = {
+        ...db.remarksRewards[idx],
+        resolvedAt: null, resolvedBy: null, resolutionNote: null,
+      };
+    }
+  }
+  fileWrite(db);
+  return { id, resolvedAt: null, resolvedBy: null, resolutionNote: null };
 }
 
 export async function removeRemarkReward(id) {

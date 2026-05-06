@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI, AvatarChip } from "../ui";
 import DocumentsPanel from "../DocumentsPanel";
+import CredentialsModal from "../CredentialsModal";
 import { resolveSchool, downloadPdf } from "@/lib/export";
 
 const FILTERS = [
@@ -44,6 +45,7 @@ export default function ScreenStaff({ E, refresh, role, session }) {
   const [docsFor, setDocsFor] = useState(null); // staff being shown in the docs modal
   const [profileFor, setProfileFor] = useState(null); // staff being viewed in the profile modal
   const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
+  const [issuedLogin, setIssuedLogin] = useState(null); // teacher login just provisioned
 
   const allStaff = E.STAFF || [];
   const filtered = useMemo(() => {
@@ -74,15 +76,15 @@ export default function ScreenStaff({ E, refresh, role, session }) {
       const json = await r.json().catch(() => ({}));
       if (!r.ok || !json.ok) throw new Error(json.error || "Failed to add staff");
       setShowAdd(false);
-      // If a login was auto-provisioned (teachers with email), surface the
-      // default password so the principal can share it. Otherwise plain toast.
+      showToast(`${json.staff.name} added to staff`, "ok");
+      // If a login was auto-provisioned (teachers with email), pop the
+      // copyable credentials modal so the principal can hand them over.
       if (json.createdLogin) {
-        showToast(
-          `${json.staff.name} added · login: ${json.createdLogin.email} / ${json.createdLogin.defaultPassword}`,
-          "ok",
-        );
-      } else {
-        showToast(`${json.staff.name} added to staff`, "ok");
+        setIssuedLogin({
+          ...json.createdLogin,
+          staffName: json.staff.name,
+          staffId: json.staff.id,
+        });
       }
       await refresh?.();
     } catch (e) {
@@ -497,6 +499,26 @@ export default function ScreenStaff({ E, refresh, role, session }) {
         <AddStaffModal onClose={() => setShowAdd(false)} onSubmit={handleAdd} />
       )}
 
+      {issuedLogin && (
+        <CredentialsModal
+          title="Teacher login created"
+          subtitle={`For ${issuedLogin.staffName} (${issuedLogin.staffId}) — share these with the teacher`}
+          email={issuedLogin.email}
+          password={issuedLogin.defaultPassword}
+          extras={[
+            { label: "Role", value: "Teacher" },
+          ]}
+          note={
+            <>
+              The teacher can sign in at the login screen and pick the <b>Teacher</b> role.
+              Advise them to change the password from <b>My account</b> on first sign-in.
+            </>
+          }
+          onClose={() => setIssuedLogin(null)}
+          flash={showToast}
+        />
+      )}
+
       {docsFor && (
         <ModalShell title={`Documents · ${docsFor.name}`} sub={`${docsFor.id || ""} · ${docsFor.role}`} onClose={() => setDocsFor(null)} width={520}>
           <div className="card-body">
@@ -616,31 +638,15 @@ function AddStaffModal({ onClose, onSubmit }) {
             <input className="input" type="email" value={form.email} onChange={(e) => set("email", e.target.value)} placeholder="staff@school.com" />
           </Field>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
-          <Field label="Salary (₹/month)">
-            <input
-              className="input"
-              value={form.salary}
-              onChange={(e) => set("salary", e.target.value.replace(/\D/g, ""))}
-              placeholder="35000"
-              inputMode="numeric"
-            />
-          </Field>
-          <Field label="Attendance %">
-            <input
-              className="input"
-              type="number" min={0} max={100} value={form.attendance}
-              onChange={(e) => set("attendance", e.target.value)}
-            />
-          </Field>
-          <Field label="Tasks %">
-            <input
-              className="input"
-              type="number" min={0} max={100} value={form.tasks}
-              onChange={(e) => set("tasks", e.target.value)}
-            />
-          </Field>
-        </div>
+        <Field label="Salary (₹/month)">
+          <input
+            className="input"
+            value={form.salary}
+            onChange={(e) => set("salary", e.target.value.replace(/\D/g, ""))}
+            placeholder="35000"
+            inputMode="numeric"
+          />
+        </Field>
 
         {err && (
           <div style={{

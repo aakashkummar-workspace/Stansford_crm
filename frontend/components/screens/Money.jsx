@@ -108,7 +108,11 @@ export default function ScreenMoney({ E, refresh, role }) {
 
   const TXNS = useMemo(() => [...incomeRows, ...donationRows, ...expenseRows], [incomeRows, donationRows, expenseRows]);
 
-  const [accountScope, setAccountScope] = useState("Combined");   // Combined | School only | Trust only
+  // Trust Accountant is locked to the trust ledger — they never see the
+  // school stream, so the picker is preset to "Trust only" and hidden
+  // below. Other roles default to "Combined" and can switch freely.
+  const isTrustOnly = role === "trust_accountant";
+  const [accountScope, setAccountScope] = useState(isTrustOnly ? "Trust only" : "Combined");   // Combined | School only | Trust only
   const [ledgerType, setLedgerType] = useState("All");            // All | Collected | Spent
   const [methodFilter, setMethodFilter] = useState("All");
   const [spentFilter, setSpentFilter] = useState("All");          // All | Manual | Inventory
@@ -181,17 +185,24 @@ export default function ScreenMoney({ E, refresh, role }) {
 
       <div className="page-head">
         <div>
-          <div className="page-title">Money <span className="amber">Control</span></div>
+          <div className="page-title">
+            {isTrustOnly ? <>Trust <span className="amber">expenses</span></>
+                         : <>Money <span className="amber">Control</span></>}
+          </div>
           <div className="page-sub">
-            Two streams kept separate: <strong>Spent</strong> (manual expenses + inventory purchases) and <strong>Collected</strong> (student fees, donations, trust receipts).
+            {isTrustOnly
+              ? <>Trust ledger only · donations, donor receipts, trust expenses.</>
+              : <>Two streams kept separate: <strong>Spent</strong> (manual expenses + inventory purchases) and <strong>Collected</strong> (student fees, donations, trust receipts).</>}
           </div>
         </div>
         <div className="page-actions">
-          <div className="segmented">
-            {["Combined", "School only", "Trust only"].map((s) => (
-              <button key={s} className={accountScope === s ? "active" : ""} onClick={() => setAccountScope(s)}>{s}</button>
-            ))}
-          </div>
+          {!isTrustOnly && (
+            <div className="segmented">
+              {["Combined", "School only", "Trust only"].map((s) => (
+                <button key={s} className={accountScope === s ? "active" : ""} onClick={() => setAccountScope(s)}>{s}</button>
+              ))}
+            </div>
+          )}
           {canEdit && (
             <button className="btn accent" onClick={() => setShowAddExpense(true)}>
               <Icon name="plus" size={13} />Add money spent
@@ -465,7 +476,8 @@ export default function ScreenMoney({ E, refresh, role }) {
         <AddExpenseModal
           onClose={() => setShowAddExpense(false)}
           onSubmit={submitExpense}
-          defaultScope={accountScope === "Trust only" ? "trust" : "school"}
+          defaultScope={isTrustOnly || accountScope === "Trust only" ? "trust" : "school"}
+          lockScope={isTrustOnly}
           customCategories={E.EXPENSE_CATEGORIES || []}
           onCategoryAdded={refresh}
         />
@@ -474,7 +486,7 @@ export default function ScreenMoney({ E, refresh, role }) {
   );
 }
 
-function AddExpenseModal({ onClose, onSubmit, defaultScope, customCategories = [], onCategoryAdded }) {
+function AddExpenseModal({ onClose, onSubmit, defaultScope, lockScope = false, customCategories = [], onCategoryAdded }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const today = new Date().toISOString().slice(0, 10);
@@ -558,9 +570,9 @@ function AddExpenseModal({ onClose, onSubmit, defaultScope, customCategories = [
       <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           <Field label="Account *">
-            <div className="segmented">
-              <button type="button" className={form.scope === "school" ? "active" : ""} onClick={() => set("scope", "school")}>School</button>
-              <button type="button" className={form.scope === "trust" ? "active" : ""} onClick={() => set("scope", "trust")}>Trust</button>
+            <div className="segmented" style={lockScope ? { opacity: 0.7, pointerEvents: "none" } : undefined}>
+              <button type="button" disabled={lockScope} className={form.scope === "school" ? "active" : ""} onClick={() => !lockScope && set("scope", "school")}>School</button>
+              <button type="button" disabled={lockScope} className={form.scope === "trust" ? "active" : ""} onClick={() => !lockScope && set("scope", "trust")}>Trust</button>
             </div>
           </Field>
           <Field label="Date">

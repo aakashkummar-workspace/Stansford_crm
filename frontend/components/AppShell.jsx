@@ -6,7 +6,7 @@ import Sidebar, { NAV_BY_ROLE } from "./Sidebar";
 import MobileShell from "./MobileShell";
 import Tweaks from "./Tweaks";
 import GlobalSearch from "./GlobalSearch";
-import NotificationsPanel from "./NotificationsPanel";
+import NotificationsPanel, { buildAlerts } from "./NotificationsPanel";
 
 import ScreenDashboard from "./screens/Dashboard";
 import ScreenTrust from "./screens/Trust";
@@ -139,6 +139,11 @@ export default function AppShell({ initialData, session }) {
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [permissions, setPermissions] = useState(null); // { role: { fid: bool } }
   const [access, setAccess] = useState({});              // { role: { fid: { canView, canEdit, canDelete } } }
+  // One-per-session reminder toast. Fires once after hydrate when there
+  // are any upcoming/overdue dated items (fees, loans, tasks, meetings,
+  // exams, gov-doc expiries, donor follow-ups). Dismissable; the bell
+  // panel stays the source of truth.
+  const [reminderToast, setReminderToast] = useState(null);
   const userMenuRef = useRef(null);
 
   // Role comes from the server-issued session — never from localStorage.
@@ -184,6 +189,37 @@ export default function AppShell({ initialData, session }) {
     if (!hydrated) return;
     localStorage.setItem("vidyalaya360.tweaks", JSON.stringify(settings));
   }, [settings, hydrated]);
+
+  // Once-per-session reminder toast. We dedupe by user-id + day so a
+  // refresh in the same browser tab doesn't keep spamming the same
+  // reminder, but a new login (or a new day) re-fires it. The bell
+  // panel keeps the full list — this is just the "look up here ↗" nudge.
+  useEffect(() => {
+    if (!hydrated) return;
+    if (!session?.id) return;
+    if (typeof window === "undefined") return;
+    const dayKey = new Date().toISOString().slice(0, 10);
+    const key = `vidyalaya360.notifToast.${session.id}.${dayKey}`;
+    try { if (sessionStorage.getItem(key)) return; } catch {}
+    let alerts = [];
+    try { alerts = buildAlerts(data) || []; } catch { alerts = []; }
+    if (alerts.length === 0) return;
+    // Pick the first "bad" (overdue) alert as the headline; otherwise the
+    // first warn. The full list still lives in the bell.
+    const headline = alerts.find((a) => a.tone === "bad") || alerts[0];
+    setReminderToast({
+      count: alerts.length,
+      title: headline.title,
+      sub: headline.sub,
+      screen: headline.screen,
+    });
+    try { sessionStorage.setItem(key, "1"); } catch {}
+  // Run when the data first loads. If the user navigates and `data`
+  // mutates we don't want a fresh toast — sessionStorage gate catches
+  // that, but we still avoid putting `data` in deps so we don't recompute
+  // alerts on every refresh().
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, session?.id]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -403,6 +439,42 @@ export default function AppShell({ initialData, session }) {
         SCHOOLS: [], ANOMALIES: [], ENQUIRIES: [],
       };
     }
+    if (role === "trust_accountant") {
+      // Trust Accountant: trust ledger only. The server (/api/data) is
+      // the security boundary and already strips student / staff /
+      // academic / inventory data — this client-side scope is a second
+      // layer so any list a screen reads via E.* is empty even if the
+      // server slip-up returned more.
+      return {
+        ...data,
+        EXPENSES: (data.EXPENSES || []).filter((e) => e.scope === "trust"),
+        ADDED_STUDENTS: [], ARCHIVED_STUDENTS: [],
+        DAILY_LOGS: [],
+        PENDING_FEES: [], RECENT_FEES: [], FEE_REMINDERS: [],
+        STAFF: [], TEACHER_ATTENDANCE: [], STAFF_AWARDS: [],
+        CLASSES: [], CLASS_STRENGTH: [],
+        TIMETABLE: [], SYLLABUS: [],
+        EXAMS: [], MARKS: [],
+        INVENTORY: [], INVENTORY_CATEGORIES: [],
+        LIBRARY: [], LOANS: [],
+        MAINTENANCE_LOGS: [],
+        ROUTES: [], TRANSPORT_ATTENDANCE: [],
+        COMPLAINTS: [], ENQUIRIES: [],
+        BROADCASTS: [], TEMPLATES: [], RECIPIENT_LISTS: [], MOVEMENTS: [],
+        MEETINGS: [], VOLUNTEERS: [],
+        CHAT_THREADS: [],
+        TC_REQUESTS: [],
+        TASKS: [],
+        GOVERNMENT_DOCUMENTS: [],
+        CUSTOM_ROLES: [], USERS: [],
+        STUDENT_ACTIVITIES: [],
+        LEAVE_REQUESTS: [],
+        REMARKS_REWARDS: [],
+        SCALE_SESSIONS: [], SCALE_ENTRIES: [],
+        SCALE_SUPPORT_PLANS: [], SCALE_DAILY_RITUALS: [],
+        SUBJECTS: [],
+      };
+    }
     return data;
   })();
   // Inject the role→feature→{view,edit,delete} access map so every screen
@@ -513,10 +585,15 @@ export default function AppShell({ initialData, session }) {
         style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: "32px 16px", background: "var(--bg-2)" }}
       >
         <MobileShell current={current} setCurrent={setCurrent} role={role}>
-          <Comp E={E} refresh={refresh} role={role} session={session} />
+          <Comp E={E} refresh={refresh} role={role} session={session} setCurrent={setCurrent} />
         </MobileShell>
         <ViewToggle view={view} setView={(v) => setSetting("view", v)} />
         <Tweaks show={showTweaks} settings={settings} setSetting={setSetting} />
+        <ReminderToast
+          toast={reminderToast}
+          onDismiss={() => setReminderToast(null)}
+          onOpen={(screen) => { setReminderToast(null); if (screen) setCurrent(screen); }}
+        />
       </div>
     );
   }
@@ -542,6 +619,7 @@ export default function AppShell({ initialData, session }) {
         aria-hidden={!mobileDrawerOpen}
       />
       <div className="main">
+        {role === "parent" && <ParentContactBanner settings={data?.SETTINGS} />}
         <div className="topbar">
           <button
             className="icon-btn"
@@ -562,7 +640,14 @@ export default function AppShell({ initialData, session }) {
             E={scopedData}
             role={role}
             setCurrent={setCurrent}
-            placeholder={role === "parent" ? "Search fees, messages, transport…" : "Search students, fees, staff, routes…"}
+            placeholder={
+              role === "parent"            ? "Search fees, messages, library, activities…" :
+              role === "teacher"           ? "Search students, leave, remarks, library, SCALE…" :
+              role === "school_accountant" ? "Search fees, expenses, students…" :
+              role === "trust_accountant"  ? "Search donors, expenses, campaigns…" :
+              role === "academic_director" ? "Search students, classes, exams, SCALE, leave…" :
+              "Search students, fees, donors, staff, expenses, library…"
+            }
           />
           <div className="topbar-right">
             <NotificationsPanel E={scopedData} role={role} setCurrent={setCurrent} />
@@ -570,12 +655,174 @@ export default function AppShell({ initialData, session }) {
           </div>
         </div>
 
-        <Comp E={E} refresh={refresh} role={role} session={session} />
+        <Comp E={E} refresh={refresh} role={role} session={session} setCurrent={setCurrent} />
 
         <BrandFooter />
       </div>
 
       <Tweaks show={showTweaks} settings={settings} setSetting={setSetting} />
+
+      <ReminderToast
+        toast={reminderToast}
+        onDismiss={() => setReminderToast(null)}
+        onOpen={(screen) => { setReminderToast(null); if (screen) setCurrent(screen); }}
+      />
+    </div>
+  );
+}
+
+// Floating toast that surfaces upcoming/overdue dated items on app load.
+// One per session per user per day (gated by sessionStorage in the parent).
+// Auto-dismisses after 12s but stays clickable to jump to the relevant
+// screen, or to the bell when no specific screen makes sense.
+function ReminderToast({ toast, onDismiss, onOpen }) {
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(onDismiss, 12_000);
+    return () => clearTimeout(t);
+  }, [toast, onDismiss]);
+  if (!toast) return null;
+  return (
+    <div
+      role="status"
+      style={{
+        position: "fixed", bottom: 22, right: 22, zIndex: 8000,
+        background: "var(--card, #fff)",
+        border: "1px solid var(--rule, #e5dfd1)",
+        borderLeft: "4px solid var(--accent, #e8530e)",
+        borderRadius: 10,
+        padding: "12px 14px",
+        width: 340,
+        boxShadow: "0 18px 40px -18px rgba(0,0,0,0.35)",
+        display: "flex", flexDirection: "column", gap: 6,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{
+          width: 26, height: 26, borderRadius: 7,
+          background: "var(--accent-soft, #fff1e6)",
+          color: "var(--accent, #e8530e)",
+          display: "grid", placeItems: "center", flexShrink: 0,
+        }}>
+          <Icon name="bell" size={13} />
+        </span>
+        <div style={{ flex: 1, fontSize: 12.5, fontWeight: 600, color: "var(--ink)" }}>
+          {toast.count} reminder{toast.count === 1 ? "" : "s"} need{toast.count === 1 ? "s" : ""} attention
+        </div>
+        <button
+          onClick={onDismiss}
+          aria-label="Dismiss"
+          style={{
+            background: "none", border: 0, cursor: "pointer",
+            color: "var(--ink-3)", padding: 2, lineHeight: 0,
+          }}
+        >
+          <Icon name="x" size={12} />
+        </button>
+      </div>
+      <div style={{ fontSize: 12, color: "var(--ink-2)", fontWeight: 500 }}>
+        {toast.title}
+      </div>
+      {toast.sub && (
+        <div style={{ fontSize: 11, color: "var(--ink-3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          {toast.sub}
+        </div>
+      )}
+      <button
+        onClick={() => onOpen(toast.screen)}
+        style={{
+          alignSelf: "flex-start",
+          marginTop: 2,
+          background: "none", border: 0, padding: 0,
+          color: "var(--accent, #e8530e)", cursor: "pointer",
+          fontSize: 11.5, fontWeight: 600,
+        }}
+      >
+        Open {toast.screen ? toast.screen.replace(/_/g, " ") : "details"} →
+      </button>
+    </div>
+  );
+}
+
+// Sticky contact strip shown above the top bar on parent logins. Numbers
+// are configured by the admin in Settings → Parent dashboard. If neither
+// number is set, the banner stays hidden so the parent never sees an empty
+// strip. Tapping a number on mobile opens the dialer via tel: link.
+function ParentContactBanner({ settings }) {
+  const p = (settings && settings.parent) || {};
+  const c1 = String(p.headerContact1Number || "").trim();
+  const c2 = String(p.headerContact2Number || "").trim();
+  if (!c1 && !c2) return null;
+  const l1 = String(p.headerContact1Label || "Office").trim() || "Office";
+  const l2 = String(p.headerContact2Label || "Emergency").trim() || "Emergency";
+  const Item = ({ label, number }) => {
+    if (!number) return null;
+    return (
+      <a href={`tel:${number.replace(/\s+/g, "")}`} className="parent-contact-pill" title={`Call ${label}`}>
+        <span className="parent-contact-ico" aria-hidden="true">
+          <Icon name="phone" size={11} />
+        </span>
+        <span className="parent-contact-label">{label}</span>
+        <span className="parent-contact-num">{number}</span>
+      </a>
+    );
+  };
+  return (
+    <div className="parent-contact-banner">
+      <Item label={l1} number={c1} />
+      <Item label={l2} number={c2} />
+      <style jsx>{`
+        .parent-contact-banner {
+          position: sticky;
+          top: 0;
+          z-index: 30;
+          background: linear-gradient(135deg, var(--brand, #1f3f8b) 0%, var(--accent, #e8530e) 100%);
+          color: #fff;
+          padding: 8px 18px;
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+          align-items: center;
+          justify-content: center;
+          font-size: 12px;
+          box-shadow: 0 2px 6px -2px rgba(15, 23, 42, 0.18);
+        }
+        .parent-contact-banner :global(.parent-contact-pill) {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          padding: 4px 10px 4px 6px;
+          background: rgba(255, 255, 255, 0.18);
+          border-radius: 999px;
+          color: #fff;
+          text-decoration: none;
+          font-weight: 500;
+          transition: background 0.15s ease, transform 0.15s ease;
+        }
+        .parent-contact-banner :global(.parent-contact-pill:hover) {
+          background: rgba(255, 255, 255, 0.32);
+          transform: translateY(-1px);
+        }
+        .parent-contact-banner :global(.parent-contact-ico) {
+          width: 20px;
+          height: 20px;
+          border-radius: 50%;
+          display: grid;
+          place-items: center;
+          background: rgba(255, 255, 255, 0.92);
+          color: var(--brand, #1f3f8b);
+        }
+        .parent-contact-banner :global(.parent-contact-label) {
+          font-size: 10.5px;
+          opacity: 0.9;
+          text-transform: uppercase;
+          letter-spacing: 0.4px;
+        }
+        .parent-contact-banner :global(.parent-contact-num) {
+          font-variant-numeric: tabular-nums;
+          font-weight: 600;
+        }
+      `}</style>
     </div>
   );
 }

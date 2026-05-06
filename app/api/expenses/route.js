@@ -42,12 +42,17 @@ export async function POST(req) {
   }
   let body; try { body = await req.json(); } catch { body = null; }
   if (!body?.amount) return NextResponse.json({ ok: false, error: "amount required" }, { status: 400 });
+  // Catch validation errors thrown by addExpense (negative / zero / NaN
+  // amount, unknown scope) and surface them as 400, not 500. Anything
+  // we can't classify falls through as a genuine 500.
   try {
     const exp = await addExpense({ ...body, recordedBy: session.name || session.email });
     try { await logAudit(session.name || "User", "Logged expense", `${exp.id} · ${exp.scope} · ${exp.category} · ₹${exp.amount.toLocaleString("en-IN")}`); } catch {}
     return NextResponse.json({ ok: true, expense: exp });
   } catch (e) {
-    return NextResponse.json({ ok: false, error: e.message || "Failed" }, { status: 500 });
+    const msg = e.message || "Failed";
+    const validation = /amount|scope|required|invalid|must be/i.test(msg);
+    return NextResponse.json({ ok: false, error: msg }, { status: validation ? 400 : 500 });
   }
 }
 

@@ -46,10 +46,7 @@ export default function DonorFormClient({ school }) {
       <div className="df-card">
         <header className="df-head">
           <img src="/logo.png" alt="" className="df-logo" />
-          <div>
-            <div className="df-school">{school.name}</div>
-            <div className="df-trust">{school.trustName}</div>
-          </div>
+          <div className="df-trust">{school.trustName}</div>
         </header>
 
         {!done ? (
@@ -173,8 +170,19 @@ export default function DonorFormClient({ school }) {
           border-bottom: 1px solid rgba(15, 23, 42, 0.08);
         }
         .df-logo { width: 48px; height: 48px; border-radius: 10px; object-fit: contain; }
-        .df-school { font-size: 16px; font-weight: 800; color: #1f3f8b; letter-spacing: -0.01em; }
-        .df-trust { font-size: 11.5px; font-weight: 700; color: #6b6e74; letter-spacing: 0.03em; }
+        .df-trust {
+          display: inline-flex;
+          align-items: center;
+          padding: 8px 16px;
+          font-size: 14px;
+          font-weight: 700;
+          color: #ffffff;
+          background: linear-gradient(135deg, #1f3f8b 0%, #e8530e 100%);
+          border-radius: 999px;
+          letter-spacing: 0.02em;
+          line-height: 1.2;
+          box-shadow: 0 4px 12px -4px rgba(31, 63, 139, 0.35);
+        }
         .df-title { margin: 22px 0 4px; font-size: 24px; font-weight: 800; color: #1d2433; letter-spacing: -0.02em; }
         .df-sub { margin: 0 0 22px; font-size: 13px; line-height: 1.6; color: #5b5e64; font-weight: 600; }
         .df-form { display: flex; flex-direction: column; gap: 14px; }

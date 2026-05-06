@@ -4,14 +4,26 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { AvatarChip } from "../ui";
 
-// Parent ↔ Admin direct messaging. Replaces the previous parent ↔
-// teacher chat for general queries. Two layouts off the same component:
-//   - Parent / non-admin: single locked-in thread with an admin user.
-//   - Admin / Principal:  inbox of parent threads on the left, active
-//                         conversation on the right.
+// Parent ↔ Staff direct messaging. Two layouts off the same component:
+//   - Parent: single locked-in thread with the admin desk (parent
+//             messages always route to the first available admin /
+//             principal account on the server).
+//   - Staff (admin, principal, academic_director, teacher,
+//            school_accountant): inbox of parent threads on the left,
+//            active conversation on the right. Non-admin staff can
+//            only message parents (server enforces).
 
 export default function ScreenMessages({ role, session }) {
-  const isAdmin = role === "admin" || role === "principal";
+  // Staff layout for any non-parent role with access to this screen.
+  // The server limits non-admin staff to messaging parents only — this
+  // flag just toggles the UI.
+  const STAFF_ROLES = new Set([
+    "admin", "principal", "academic_director", "teacher", "school_accountant",
+  ]);
+  const isStaff = STAFF_ROLES.has(role);
+  // Kept under the old name so the rest of the file (button labels,
+  // inbox vs. single-thread switch) doesn't need rewriting.
+  const isAdmin = isStaff;
   const [threads, setThreads] = useState([]);
   const [activeId, setActiveId] = useState(null);
   const [messages, setMessages] = useState([]);

@@ -18,32 +18,38 @@ export async function POST(req) {
       { status: 403 }
     );
   }
-  const body = await req.json();
-  if (!body.studentId || !body.date) {
+  let body; try { body = await req.json(); } catch { body = null; }
+  if (!body?.studentId || !body?.date) {
     return NextResponse.json({ ok: false, error: "studentId and date are required" }, { status: 400 });
   }
-  const { fresh, log } = await upsertDailyLog({
-    studentId: body.studentId,
-    studentName: body.studentName || "",
-    cls: body.cls || "",
-    date: body.date,
-    attendance: body.attendance || "present",
-    leaveReason: body.leaveReason || null,
-    classwork: (body.classwork || "").trim(),
-    classworkStatus: body.classworkStatus || null,
-    homework: (body.homework || "").trim(),
-    homeworkStatus: body.homeworkStatus || null,
-    topics: (body.topics || "").trim(),
-    handwritingNote: (body.handwritingNote || "").trim(),
-    handwritingGrade: (body.handwritingGrade || "").trim(),
-    behaviour: (body.behaviour || "").trim(),
-    extra: (body.extra || "").trim(),
-    postedBy: body.postedBy || "Teacher",
-  });
-  await logAudit(
-    log.postedBy || "Teacher",
-    fresh ? "Posted daily log" : "Updated daily log",
-    `${log.studentId} ${log.studentName} · ${log.date}`
-  );
-  return NextResponse.json({ ok: true, log });
+  try {
+    const { fresh, log } = await upsertDailyLog({
+      studentId: body.studentId,
+      studentName: body.studentName || "",
+      cls: body.cls || "",
+      date: body.date,
+      attendance: body.attendance || "present",
+      leaveReason: body.leaveReason || null,
+      classwork: (body.classwork || "").trim(),
+      classworkStatus: body.classworkStatus || null,
+      homework: (body.homework || "").trim(),
+      homeworkStatus: body.homeworkStatus || null,
+      topics: (body.topics || "").trim(),
+      handwritingNote: (body.handwritingNote || "").trim(),
+      handwritingGrade: (body.handwritingGrade || "").trim(),
+      behaviour: (body.behaviour || "").trim(),
+      extra: (body.extra || "").trim(),
+      postedBy: body.postedBy || "Teacher",
+    });
+    try {
+      await logAudit(
+        log.postedBy || "Teacher",
+        fresh ? "Posted daily log" : "Updated daily log",
+        `${log.studentId} ${log.studentName} · ${log.date}`
+      );
+    } catch {}
+    return NextResponse.json({ ok: true, log });
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: e.message || "Failed" }, { status: 400 });
+  }
 }

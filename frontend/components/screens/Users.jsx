@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Icon from "../Icon";
 import { resolveSchool, downloadPdf } from "@/lib/export";
 import { AvatarChip, KPI } from "../ui";
+import CredentialsModal from "../CredentialsModal";
 
 // Short blurbs shown in the Roles side-panel (admin view only). Listed
 // roughly in seniority order so the sidebar reads top-down.
@@ -80,12 +81,30 @@ export default function ScreenUsers({ E, role, session, refresh }) {
     }));
   }, [allStudents]);
 
-  // Tabs the current role is allowed to flip between.
+  // Live auth-user roster — only loaded for the Logins tab (admin-only).
+  // Held outside the tab so the tab counter is correct even when the tab
+  // hasn't been opened yet.
+  const [authUsers, setAuthUsers] = useState([]);
+  const [authBusy, setAuthBusy]   = useState(false);
+  const reloadAuthUsers = async () => {
+    if (!isAdmin) return;
+    setAuthBusy(true);
+    try {
+      const r = await fetch("/api/users", { cache: "no-store" });
+      const j = await r.json().catch(() => ({}));
+      if (j?.ok) setAuthUsers(Array.isArray(j.users) ? j.users : []);
+    } catch {}
+    setAuthBusy(false);
+  };
+  useEffect(() => { reloadAuthUsers(); /* eslint-disable-next-line */ }, [isAdmin]);
+
+  // Tabs the current role is allowed to flip between. Logins tab is admin-only.
   const TABS = isManager
     ? [
         { k: "staff",    label: "Staff",    count: allStaff.length },
         { k: "students", label: "Students", count: allStudents.length },
         { k: "parents",  label: "Parents",  count: parents.length },
+        ...(isAdmin ? [{ k: "logins", label: "Logins", count: authUsers.length }] : []),
       ]
     : [
         { k: "students", label: "Students", count: visibleStudents.length },
@@ -109,6 +128,69 @@ export default function ScreenUsers({ E, role, session, refresh }) {
     const n = q.trim().toLowerCase(); if (!n) return parents;
     return parents.filter((p) => `${p.name} ${p.childName} ${p.childCls} ${p.phone} ${p.email}`.toLowerCase().includes(n));
   }, [parents, q]);
+  // "logins" tab sub-filter — admin can slice the login list by role bucket
+  // so they don't have to scroll past parents to find a teacher account etc.
+  // Buckets:  all · teacher · parent · admin · other  (other = accountants
+  // and any custom-role users).
+  const [loginRoleFilter, setLoginRoleFilter] = useState("all");
+  const ADMIN_ROLES = useMemo(() => new Set(["admin", "principal", "academic_director"]), []);
+  const PRIMARY_ROLES = useMemo(() => new Set(["admin", "principal", "academic_director", "teacher", "parent"]), []);
+  const loginCounts = useMemo(() => {
+    const c = { all: authUsers.length, teacher: 0, parent: 0, admin: 0, other: 0 };
+    for (const u of authUsers) {
+      const r = String(u.role || "").toLowerCase();
+      if (r === "teacher") c.teacher++;
+      else if (r === "parent") c.parent++;
+      else if (ADMIN_ROLES.has(r)) c.admin++;
+      else c.other++;
+    }
+    return c;
+  }, [authUsers, ADMIN_ROLES]);
+  const filteredAuthUsers = useMemo(() => {
+    const n = q.trim().toLowerCase();
+    let pool = authUsers;
+    if (loginRoleFilter !== "all") {
+      pool = authUsers.filter((u) => {
+        const r = String(u.role || "").toLowerCase();
+        if (loginRoleFilter === "admin") return ADMIN_ROLES.has(r);
+        if (loginRoleFilter === "other") return !PRIMARY_ROLES.has(r);
+        return r === loginRoleFilter;
+      });
+    }
+    if (!n) return pool;
+    return pool.filter((u) => `${u.name || ""} ${u.email || ""} ${u.role || ""} ${u.id || ""}`.toLowerCase().includes(n));
+  }, [authUsers, q, loginRoleFilter, ADMIN_ROLES, PRIMARY_ROLES]);
+
+  // Tracks which login row is currently being reset, so we can disable just
+  // that button (rather than the whole list) while the API call is in flight.
+  const [resetBusyId, setResetBusyId] = useState(null);
+
+  async function resetPassword(u) {
+    if (!isAdmin || resetBusyId) return;
+    if (!confirm(`Generate a new password for ${u.email}? The old one stops working immediately.`)) return;
+    setResetBusyId(u.id);
+    try {
+      const r = await fetch("/api/users/reset-password", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: u.id }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "Reset failed");
+      // Show the credential receipt — the plain password is in `j.password`.
+      setCreatedUser({
+        name: j.user?.name || u.name,
+        email: j.user?.email || u.email,
+        role:  j.user?.role || u.role,
+        password: j.password,
+        linkedId: j.user?.linkedId || null,
+      });
+    } catch (e) {
+      setToast({ msg: e.message || "Reset failed", tone: "err" });
+      setTimeout(() => setToast(null), 3500);
+    }
+    setResetBusyId(null);
+  }
 
   // Counts per role for the admin's right-side Roles panel. Staff records
   // already have a `role` string; we add synthetic Student / Parent counts.
@@ -438,6 +520,98 @@ export default function ScreenUsers({ E, role, session, refresh }) {
             </div>
           )}
 
+          {tab === "logins" && isAdmin && (
+            <div style={{ overflowX: "auto" }}>
+              <div style={{
+                background: "var(--warn-soft, #fff5e0)", color: "var(--ink-2)",
+                border: "1px solid var(--warn, #d99523)",
+                padding: "9px 12px", borderRadius: 7, fontSize: 11.5,
+                margin: "0 14px 12px",
+              }}>
+                <b>Why you can't see existing passwords:</b> they're stored as one-way bcrypt hashes — even the database can't reverse them. Use <b>Reset password</b> to mint a fresh one and copy it once. The user should change it on first sign-in from <b>My account</b>.
+              </div>
+              <div style={{
+                margin: "0 14px 10px", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center",
+              }}>
+                <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 500, marginRight: 4 }}>
+                  Show:
+                </span>
+                {[
+                  { k: "all",     label: "All",       count: loginCounts.all },
+                  { k: "teacher", label: "Teachers",  count: loginCounts.teacher },
+                  { k: "parent",  label: "Students / Parents", count: loginCounts.parent },
+                  { k: "admin",   label: "Admins",    count: loginCounts.admin },
+                  { k: "other",   label: "Other",     count: loginCounts.other },
+                ].filter((b) => b.k === "all" || b.count > 0).map((b) => (
+                  <button
+                    key={b.k}
+                    onClick={() => setLoginRoleFilter(b.k)}
+                    style={{
+                      padding: "5px 12px", borderRadius: 999,
+                      background: loginRoleFilter === b.k ? "var(--accent)" : "var(--bg-2)",
+                      color:      loginRoleFilter === b.k ? "#fff" : "var(--ink-2)",
+                      border: 0, cursor: "pointer", fontSize: 12, fontWeight: 500,
+                    }}
+                  >
+                    {b.label} · {b.count}
+                  </button>
+                ))}
+              </div>
+              <table className="table">
+                <thead>
+                  <tr><th>User</th><th>Email</th><th>Role</th><th>Linked</th><th style={{ textAlign: "right" }}>Action</th></tr>
+                </thead>
+                <tbody>
+                  {authBusy && filteredAuthUsers.length === 0 && (
+                    <tr><td colSpan={5} className="empty">Loading login accounts…</td></tr>
+                  )}
+                  {!authBusy && filteredAuthUsers.length === 0 && (
+                    <tr><td colSpan={5} className="empty">
+                      {authUsers.length === 0
+                        ? "No login accounts on file."
+                        : loginRoleFilter === "teacher" ? "No teacher logins on file yet."
+                        : loginRoleFilter === "parent"  ? "No parent logins on file yet."
+                        : loginRoleFilter === "admin"   ? "No admin logins on file."
+                        : loginRoleFilter === "other"   ? "No other-role logins on file."
+                        : "No matches."}
+                    </td></tr>
+                  )}
+                  {filteredAuthUsers.map((u) => (
+                    <tr key={u.id || u.email}>
+                      <td>
+                        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                          <AvatarChip initials={initialsOf(u.name || u.email)} />
+                          <div>
+                            <div style={{ fontSize: 12.5, fontWeight: 500 }}>{u.name || "—"}</div>
+                            <div style={{ fontSize: 10.5, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>{u.id}</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td style={{ fontSize: 11.5, color: "var(--ink-3)", fontFamily: "var(--font-mono)" }}>{u.email || "—"}</td>
+                      <td><span className="chip">{u.role || "—"}</span></td>
+                      <td style={{ fontSize: 11.5, color: "var(--ink-3)" }}>
+                        {Array.isArray(u.linkedClasses) && u.linkedClasses.length
+                          ? u.linkedClasses.join(", ")
+                          : (u.linkedId || "—")}
+                      </td>
+                      <td style={{ textAlign: "right" }}>
+                        <button
+                          className="btn sm"
+                          disabled={resetBusyId === u.id}
+                          onClick={() => resetPassword(u)}
+                          title="Generate a new password and show it once"
+                        >
+                          <Icon name="refresh" size={11} />
+                          {resetBusyId === u.id ? "Resetting…" : "Reset password"}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
           {tab === "parents" && (
             <div style={{ overflowX: "auto" }}>
               <table className="table">
@@ -510,9 +684,24 @@ export default function ScreenUsers({ E, role, session, refresh }) {
         />
       )}
       {createdUser && (
-        <CredentialsReceipt
-          user={createdUser}
+        <CredentialsModal
+          title="Account created"
+          subtitle={`Save these — the password won't be shown again`}
+          email={createdUser.email}
+          password={createdUser.password}
+          extras={[
+            { label: "Name", value: createdUser.name },
+            { label: "Role", value: createdUser.role },
+            ...(createdUser.linkedId ? [{ label: "Linked ID", value: createdUser.linkedId }] : []),
+          ]}
+          note={
+            <>
+              The user can sign in at the login screen with this email and password.
+              They should change their password from <b>My account</b> on first sign-in.
+            </>
+          }
           onClose={() => { setCreatedUser(null); flashOk(`User ${createdUser.name} created`); }}
+          flash={(msg, tone) => { setToast({ msg, tone: tone === "ok" ? "ok" : "err" }); setTimeout(() => setToast(null), 3000); }}
         />
       )}
       {toast && (
@@ -680,55 +869,6 @@ function AddUserModal({ customRoles = [], onClose, onCreated }) {
           </div>
         </form>
       </div>
-    </div>
-  );
-}
-
-// One-time receipt shown right after creation so the admin can copy the
-// credentials and hand them to the new user. The plain password is held in
-// state only — never re-fetched from the server.
-function CredentialsReceipt({ user, onClose }) {
-  const copy = (txt) => {
-    try { navigator.clipboard?.writeText(txt); } catch {}
-  };
-  return (
-    <div onClick={onClose} style={{
-      position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)",
-      display: "grid", placeItems: "center", zIndex: 250, padding: 16,
-    }}>
-      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 460 }}>
-        <div className="card-head">
-          <div>
-            <div className="card-title" style={{ color: "var(--ok)" }}>
-              <Icon name="check" size={14} /> Account created
-            </div>
-            <div className="card-sub">Save these credentials — the password won't be shown again.</div>
-          </div>
-          <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
-        </div>
-        <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <CredRow label="Name"     value={user.name} />
-          <CredRow label="Email"    value={user.email}    onCopy={() => copy(user.email)} />
-          <CredRow label="Password" value={user.password} onCopy={() => copy(user.password)} mono />
-          <CredRow label="Role"     value={user.role} />
-          {user.linkedId && <CredRow label="Linked ID" value={user.linkedId} />}
-          <button className="btn accent" style={{ marginTop: 6 }} onClick={() => copy(`Email: ${user.email}\nPassword: ${user.password}\nRole: ${user.role}`)}>
-            <Icon name="download" size={12} />Copy all
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function CredRow({ label, value, onCopy, mono }) {
-  return (
-    <div style={{ background: "var(--bg-2)", borderRadius: 8, padding: "8px 12px", display: "flex", alignItems: "center", gap: 10 }}>
-      <div style={{ minWidth: 90, fontSize: 10.5, color: "var(--ink-4)", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600 }}>{label}</div>
-      <div style={{ flex: 1, fontSize: 12.5, fontWeight: 500, fontFamily: mono ? "var(--font-mono)" : undefined, wordBreak: "break-all" }}>{value || "—"}</div>
-      {onCopy && (
-        <button type="button" className="btn sm ghost" onClick={onCopy} title={`Copy ${label.toLowerCase()}`}>Copy</button>
-      )}
     </div>
   );
 }
