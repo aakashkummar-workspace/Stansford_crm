@@ -17,6 +17,10 @@ const PUBLIC_PATHS = [
   // Public donor form — anyone with the link can submit.
   "/donorform",
   "/api/donor-form",
+  // Cinematic inauguration experience — designed for the live launch
+  // event, projector + walk-up audience. No auth required so the Chief
+  // Guest doesn't have to sign in.
+  "/launch",
 ];
 
 function isPublic(pathname) {
