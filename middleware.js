@@ -30,7 +30,9 @@ function isPublic(pathname) {
   // Anything served from /public — whitelist by extension so static images
   // (school logo, favicons, fonts) load on the login page too. Without
   // this, /logo.png was getting bounced to /login → broken image.
-  if (/\.(png|jpe?g|svg|gif|webp|ico|avif|bmp|woff2?|ttf|otf|eot|map)$/i.test(pathname)) {
+  // Audio/video extensions are included so the cinematic background score
+  // (/music/crm_music.mpeg) and any future media assets serve unauthenticated.
+  if (/\.(png|jpe?g|svg|gif|webp|ico|avif|bmp|woff2?|ttf|otf|eot|map|mp3|mpe?g|ogg|oga|wav|m4a|mp4|webm)$/i.test(pathname)) {
     return true;
   }
   return false;
