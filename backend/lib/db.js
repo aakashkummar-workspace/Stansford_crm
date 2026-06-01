@@ -3448,7 +3448,14 @@ export async function addInventoryItem(row) {
   // Cascade: if the item carries a cost, log a matching expense so the
   // money screen sees inventory purchases as part of school spend. Best
   // effort — failures don't fail the inventory write.
-  await maybeLogInventoryExpense(saved, row.recordedBy);
+  //
+  // skipExpenseCascade is set by the reverse flow (Add Expense modal with
+  // "Also track in inventory" ticked) where the caller is creating the
+  // expense itself and only wants the inventory row — without it we'd
+  // double-book the same purchase.
+  if (!row.skipExpenseCascade) {
+    await maybeLogInventoryExpense(saved, row.recordedBy);
+  }
 
   return saved;
 }

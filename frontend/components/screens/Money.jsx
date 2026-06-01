@@ -11,6 +11,26 @@ const EXPENSE_CATEGORIES = [
 ];
 const PAYMENT_METHODS = ["Bank transfer", "UPI", "Cheque", "Cash", "Credit card"];
 
+// Categories that represent a physical purchase. The "Also track in
+// inventory" toggle on the Add Expense modal is shown only when the
+// current category is one of these — salaries, utilities, software
+// licences etc. shouldn't end up as inventory rows.
+const PURCHASE_CATEGORIES = new Set([
+  "Supplies", "Stationery", "Maintenance", "Inventory purchase",
+]);
+
+// Inventory category slugs. Mirrors what the Inventory screen accepts —
+// kept short so the dropdown stays clean. "stationery" is the default
+// when the expense category is Stationery; "asset" otherwise.
+const INVENTORY_CATEGORIES = [
+  { value: "stationery", label: "Stationery" },
+  { value: "asset",      label: "Asset" },
+  { value: "book",       label: "Book" },
+  { value: "uniform",    label: "Uniform" },
+  { value: "lab",        label: "Lab" },
+  { value: "sports",     label: "Sports" },
+];
+
 function Toast({ msg, tone, onClose }) {
   if (!msg) return null;
   const bg = tone === "ok" ? "var(--ok)" : tone === "err" ? "var(--err, #b13c1c)" : "var(--ink)";
@@ -499,6 +519,32 @@ function AddExpenseModal({ onClose, onSubmit, defaultScope, lockScope = false, c
     date: today,
     paymentMethod: "Bank transfer",
   });
+  // "Also track in inventory" state. Only meaningful when the chosen
+  // category is purchase-style (PURCHASE_CATEGORIES). When the user
+  // switches to a non-purchase category mid-edit, the toggle stays off
+  // — we don't quietly preserve it because the fields disappear and a
+  // ghost-inventory write would be confusing.
+  const [trackInv, setTrackInv] = useState(false);
+  const [invForm, setInvForm] = useState({
+    name: "",
+    category: "stationery",
+    onHand: "",
+    unitPrice: "",
+  });
+  const canTrackInventory = PURCHASE_CATEGORIES.has(form.category);
+  // Reset inventory tracking whenever the category changes to a
+  // non-purchase one. Cheaper than a useEffect — runs only on category
+  // change which is rare.
+  const setCategory = (c) => {
+    setForm((f) => ({ ...f, category: c }));
+    if (!PURCHASE_CATEGORIES.has(c)) setTrackInv(false);
+    // Pre-fill the inventory category sensibly based on the expense one.
+    setInvForm((iv) => ({
+      ...iv,
+      category: c === "Stationery" ? "stationery" : iv.category,
+    }));
+  };
+  const setInv = (k, v) => setInvForm((iv) => ({ ...iv, [k]: v }));
   // Inline-add category state. The "+ Add" button next to the dropdown
   // toggles the inline input; submitting POSTs to the categories API
   // and selects the new category automatically.
@@ -539,7 +585,7 @@ function AddExpenseModal({ onClose, onSubmit, defaultScope, lockScope = false, c
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
-      setForm((f) => ({ ...f, category: j.category.name }));
+      setCategory(j.category.name);
       setNewCat("");
       setShowAddCat(false);
       await onCategoryAdded?.();
@@ -557,11 +603,29 @@ function AddExpenseModal({ onClose, onSubmit, defaultScope, lockScope = false, c
     try {
       const amount = Number(form.amount);
       if (!amount) throw new Error("Enter a positive amount");
-      await onSubmit({
+      const payload = {
         scope: form.scope, category: form.category,
         amount, vendor: form.vendor.trim() || null, memo: form.memo.trim() || null,
         date: form.date, paymentMethod: form.paymentMethod,
-      });
+      };
+      if (trackInv && canTrackInventory) {
+        const itemName = invForm.name.trim();
+        if (!itemName) throw new Error("Item name required for inventory tracking");
+        const qty = Math.max(1, Math.floor(Number(invForm.onHand) || 1));
+        // Default unit price = total expense / qty so the inventory line
+        // total reconciles with the expense amount. User can override.
+        const unitPriceRaw = invForm.unitPrice.trim();
+        const unitPrice = unitPriceRaw === ""
+          ? Math.round(amount / qty)
+          : Math.max(0, Math.floor(Number(unitPriceRaw) || 0));
+        payload.inventory = {
+          name: itemName,
+          category: invForm.category || "stationery",
+          onHand: qty,
+          unitPrice,
+        };
+      }
+      await onSubmit(payload);
     } catch (ex) { setErr(ex.message); setBusy(false); }
   }
 
@@ -585,7 +649,7 @@ function AddExpenseModal({ onClose, onSubmit, defaultScope, lockScope = false, c
               <select
                 className="select"
                 value={form.category}
-                onChange={(e) => set("category", e.target.value)}
+                onChange={(e) => setCategory(e.target.value)}
                 style={{ flex: 1, minWidth: 0 }}
               >
                 {mergedCategories.map((c) => <option key={c}>{c}</option>)}
@@ -638,6 +702,71 @@ function AddExpenseModal({ onClose, onSubmit, defaultScope, lockScope = false, c
             {PAYMENT_METHODS.map((m) => <option key={m}>{m}</option>)}
           </select>
         </Field>
+
+        {canTrackInventory && (
+          <div style={{
+            background: "var(--bg-2)", border: "1px dashed var(--rule, #e5dfd1)",
+            borderRadius: 8, padding: "10px 12px",
+          }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={trackInv}
+                onChange={(e) => setTrackInv(e.target.checked)}
+                style={{ cursor: "pointer" }}
+              />
+              <span style={{ fontSize: 12.5, fontWeight: 500, color: "var(--ink)" }}>
+                Also track as inventory
+              </span>
+              <span style={{ fontSize: 10.5, color: "var(--ink-4)", marginLeft: "auto" }}>
+                creates a linked stock row
+              </span>
+            </label>
+            {trackInv && (
+              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
+                <Field label="Item name *">
+                  <input
+                    className="input"
+                    value={invForm.name}
+                    onChange={(e) => setInv("name", e.target.value)}
+                    placeholder="e.g. A4 ruled notebooks"
+                  />
+                </Field>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+                  <Field label="Inventory category">
+                    <select
+                      className="select"
+                      value={invForm.category}
+                      onChange={(e) => setInv("category", e.target.value)}
+                    >
+                      {INVENTORY_CATEGORIES.map((c) => (
+                        <option key={c.value} value={c.value}>{c.label}</option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="Quantity">
+                    <input
+                      className="input"
+                      inputMode="numeric"
+                      value={invForm.onHand}
+                      onChange={(e) => setInv("onHand", e.target.value.replace(/\D/g, ""))}
+                      placeholder="e.g. 50"
+                    />
+                  </Field>
+                  <Field label="Unit price (₹)" hint="leave blank to split total ÷ qty">
+                    <input
+                      className="input"
+                      inputMode="numeric"
+                      value={invForm.unitPrice}
+                      onChange={(e) => setInv("unitPrice", e.target.value.replace(/\D/g, ""))}
+                      placeholder="auto"
+                    />
+                  </Field>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {err && <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "9px 12px", borderRadius: 7, fontSize: 12 }}>{err}</div>}
 

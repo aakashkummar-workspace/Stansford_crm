@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { addExpense, listExpenses, removeExpense, logAudit, listRoleFeatureAccess, __EXPENSE_META } from "@/lib/db";
+import { addExpense, addInventoryItem, listExpenses, removeExpense, logAudit, listRoleFeatureAccess, __EXPENSE_META } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -34,7 +34,14 @@ export async function GET(req) {
   return NextResponse.json({ ok: true, expenses, meta: __EXPENSE_META });
 }
 
-// POST /api/expenses { scope, category, amount, vendor?, memo?, date?, paymentMethod? }
+// POST /api/expenses { scope, category, amount, vendor?, memo?, date?, paymentMethod?, inventory? }
+//
+// If `inventory` is present — { name, category?, onHand?, unitPrice? } — the
+// expense is also mirrored into the Inventory screen as a stock row. We
+// create the inventory item FIRST (with skipExpenseCascade so it doesn't
+// auto-log its own expense), then create the expense with `inventoryId`
+// pointing at it. The Money screen already recognises that link and
+// renders the row with a "locked" badge so it can't be removed twice.
 export async function POST(req) {
   const session = await getSession();
   if (!session || !(await canWriteExpense(session.role))) {
@@ -46,12 +53,39 @@ export async function POST(req) {
   // amount, unknown scope) and surface them as 400, not 500. Anything
   // we can't classify falls through as a genuine 500.
   try {
-    const exp = await addExpense({ ...body, recordedBy: session.name || session.email });
-    try { await logAudit(session.name || "User", "Logged expense", `${exp.id} · ${exp.scope} · ${exp.category} · ₹${exp.amount.toLocaleString("en-IN")}`); } catch {}
-    return NextResponse.json({ ok: true, expense: exp });
+    const recordedBy = session.name || session.email;
+    let inventoryItem = null;
+    if (body.inventory && typeof body.inventory === "object" && body.inventory.name) {
+      const inv = body.inventory;
+      const qty = Math.max(1, Math.floor(Number(inv.onHand) || 1));
+      const unitPrice = Math.max(0, Math.floor(Number(inv.unitPrice) || 0));
+      inventoryItem = await addInventoryItem({
+        name: inv.name,
+        category: inv.category || "stationery",
+        onHand: qty,
+        min: Math.max(0, Math.floor(Number(inv.min) || 0)),
+        unitPrice,
+        supplier: body.vendor || null,
+        recordedBy,
+        skipExpenseCascade: true,
+      });
+    }
+    const exp = await addExpense({
+      ...body,
+      recordedBy,
+      inventoryId: inventoryItem?.id || body.inventoryId || null,
+    });
+    try {
+      await logAudit(
+        session.name || "User",
+        inventoryItem ? "Logged expense + stocked inventory" : "Logged expense",
+        `${exp.id} · ${exp.scope} · ${exp.category} · ₹${exp.amount.toLocaleString("en-IN")}${inventoryItem ? ` · stock ${inventoryItem.id} · ${inventoryItem.name}` : ""}`
+      );
+    } catch {}
+    return NextResponse.json({ ok: true, expense: exp, inventory: inventoryItem });
   } catch (e) {
     const msg = e.message || "Failed";
-    const validation = /amount|scope|required|invalid|must be/i.test(msg);
+    const validation = /amount|scope|required|invalid|must be|item name/i.test(msg);
     return NextResponse.json({ ok: false, error: msg }, { status: validation ? 400 : 500 });
   }
 }
