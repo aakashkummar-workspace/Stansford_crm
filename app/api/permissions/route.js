@@ -13,7 +13,9 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   const session = await getSession();
   if (!session) return NextResponse.json({ ok: false, error: "Not signed in" }, { status: 401 });
-  const permissions = { ...(await readPermissions()) };
+  const { permissions: permsBase, explicit: explicitBase } = await readPermissions();
+  const permissions = { ...permsBase };
+  const explicit = { ...explicitBase };
   // Fold every custom role's role_feature_access toggles into the matrix.
   // Anything not granted (canView=false or missing) is recorded as `false`
   // so the sidebar hides it. Granted features are recorded as `true`.
@@ -25,11 +27,13 @@ export async function GET() {
     for (const cr of custom) {
       const feats = await listRoleFeatureAccess(cr.id);
       const viewMap = {};
+      const explicitMap = {};
       const detailMap = {};
       // Default everything to false — custom roles are deny-by-default so
       // a freshly-created role shows nothing until the admin grants a screen.
       for (const f of ALL_FEATURES) {
         viewMap[f.id] = false;
+        explicitMap[f.id] = true; // custom roles record every feature explicitly
         detailMap[f.id] = { canView: false, canEdit: false, canDelete: false };
       }
       // Flip on the ones the admin explicitly granted.
@@ -46,12 +50,14 @@ export async function GET() {
       viewMap.account = true;
       detailMap.account = { canView: true, canEdit: true, canDelete: false };
       permissions[cr.id] = viewMap;
+      explicit[cr.id] = explicitMap;
       access[cr.id] = detailMap;
     }
   } catch {}
   return NextResponse.json({
     ok: true,
     permissions,
+    explicit,
     access,
     features: ALL_FEATURES,
     roles: ROLES,
@@ -84,7 +90,11 @@ export async function PUT(req) {
         `${body.role} · on=${flippedOn.length} off=${flippedOff.length}`
       );
     } catch {}
-    return NextResponse.json({ ok: true, permissions: merged });
+    return NextResponse.json({
+      ok: true,
+      permissions: merged.permissions,
+      explicit: merged.explicit,
+    });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e.message || "Failed" }, { status: 500 });
   }

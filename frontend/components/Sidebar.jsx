@@ -266,29 +266,70 @@ function isCustomRoleKey(role) {
   return typeof role === "string" && (role.startsWith("role-") || !NAV_BY_ROLE[role]);
 }
 
-export default function Sidebar({ current, setCurrent, role, user, permissions }) {
-  // For canonical roles use the hard-coded NAV_BY_ROLE list. For custom
-  // roles, fall back to the catalog above and let the permissions-based
-  // filter below decide what survives — if the admin hasn't granted any
-  // feature yet, only "My account" will show (that's enforced server-side
-  // in /api/permissions for safety).
-  const allItems = NAV_BY_ROLE[role] || (isCustomRoleKey(role) ? FEATURE_NAV_CATALOG : NAV_BY_ROLE.admin);
-  // Apply admin-controlled feature toggles. A missing entry == allowed (so new
-  // screens default to visible). Section headers are kept iff at least one item
-  // following them survives.
+// Build the sidebar nav for a role from its NAV_BY_ROLE default plus any
+// extra features the admin has explicitly granted via Access Control.
+//
+// Two-pass logic:
+//   1. Start with NAV_BY_ROLE[role] (or FEATURE_NAV_CATALOG for custom
+//      roles) and remove any item the admin toggled OFF.
+//   2. For canonical roles, walk FEATURE_NAV_CATALOG and ADD any feature
+//      where `permExplicit[role][id] === true` AND the resolved value is
+//      true AND it's not already present. This makes Access Control fully
+//      bi-directional for the sparse-nav roles (Trust Accountant, School
+//      Accountant, Parent) — toggling on a feature outside their default
+//      nav actually adds it.
+//
+// Exported because AppShell uses `getAllowedNavIds(...)` to drive its
+// auto-snap effect against the same set the sidebar shows.
+export function buildSidebarNav(role, permissions, permExplicit) {
+  const isCustom = isCustomRoleKey(role);
+  const base = NAV_BY_ROLE[role] || (isCustom ? FEATURE_NAV_CATALOG : NAV_BY_ROLE.admin);
   const rolePerms = (permissions && permissions[role]) || null;
-  const items = (() => {
-    if (!rolePerms) return allItems;
-    const kept = [];
+  const roleExplicit = (permExplicit && permExplicit[role]) || null;
+
+  // Pass 1: filter base list by admin toggles. Missing perms => allowed.
+  const kept = [];
+  if (!rolePerms) {
+    kept.push(...base);
+  } else {
     let pendingSection = null;
-    for (const it of allItems) {
+    for (const it of base) {
       if (it.section) { pendingSection = it; continue; }
       if (rolePerms[it.id] === false) continue;
       if (pendingSection) { kept.push(pendingSection); pendingSection = null; }
       kept.push(it);
     }
-    return kept;
-  })();
+  }
+
+  // Pass 2: for canonical roles only, append admin-granted extras that
+  // aren't already in `kept`. Skipped for custom roles (whose base list
+  // is already FEATURE_NAV_CATALOG).
+  if (!isCustom && rolePerms && roleExplicit) {
+    const presentIds = new Set(kept.filter((it) => it.id).map((it) => it.id));
+    let pendingSection = null;
+    for (const cat of FEATURE_NAV_CATALOG) {
+      if (cat.section) { pendingSection = cat; continue; }
+      if (presentIds.has(cat.id)) continue;
+      if (!roleExplicit[cat.id]) continue;          // not explicitly touched by admin
+      if (rolePerms[cat.id] === false) continue;    // explicit OFF still wins
+      if (pendingSection) { kept.push(pendingSection); pendingSection = null; }
+      kept.push(cat);
+      presentIds.add(cat.id);
+    }
+  }
+
+  return kept;
+}
+
+// Just the ids (no section headers) — used by AppShell's auto-snap.
+export function getAllowedNavIds(role, permissions, permExplicit) {
+  return buildSidebarNav(role, permissions, permExplicit)
+    .filter((it) => it.id)
+    .map((it) => it.id);
+}
+
+export default function Sidebar({ current, setCurrent, role, user, permissions, permExplicit }) {
+  const items = buildSidebarNav(role, permissions, permExplicit);
 
   // Group the flat items[] into [{ name, items: [...] }] blocks so each
   // category becomes a collapsible dropdown. Items that come before any

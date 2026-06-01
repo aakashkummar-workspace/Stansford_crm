@@ -73,6 +73,15 @@ const ADMIN_LOCKED_ON = new Set(["access", "dashboard", "trust", "settings"]);
 
 // Read the matrix from Supabase (preferred) with file-store fallback. Fills
 // missing entries with `true` so brand-new features default to allowed.
+//
+// Returns `{ permissions, explicit }` where:
+//   permissions[role][fid] — the resolved boolean (missing rows → true)
+//   explicit[role][fid]   — whether there's an actual stored row for this
+//                           (role, feature). Lets the sidebar distinguish
+//                           "admin explicitly granted this" from "defaulted
+//                           to true" — needed so toggling on a feature
+//                           outside the role's default NAV_BY_ROLE actually
+//                           adds it to the sidebar.
 export async function readPermissions() {
   let raw = {};
   if (supabaseEnabled) {
@@ -98,16 +107,24 @@ export async function readPermissions() {
       }
     }
   } catch {}
-  const out = {};
+  const permissions = {};
+  const explicit = {};
   for (const role of ROLES) {
     const roleMap = (raw[role] && typeof raw[role] === "object") ? raw[role] : {};
-    out[role] = {};
+    permissions[role] = {};
+    explicit[role] = {};
     for (const f of ALL_FEATURES) {
-      if (role === "admin" && ADMIN_LOCKED_ON.has(f.id)) out[role][f.id] = true;
-      else out[role][f.id] = roleMap[f.id] === false ? false : true;
+      const has = Object.prototype.hasOwnProperty.call(roleMap, f.id);
+      if (role === "admin" && ADMIN_LOCKED_ON.has(f.id)) {
+        permissions[role][f.id] = true;
+        explicit[role][f.id] = true;
+      } else {
+        permissions[role][f.id] = roleMap[f.id] === false ? false : true;
+        explicit[role][f.id] = has;
+      }
     }
   }
-  return out;
+  return { permissions, explicit };
 }
 
 // Write a partial patch — `{ role: { featureId: bool, ... } }`. Persists to

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Icon from "./Icon";
-import Sidebar, { NAV_BY_ROLE } from "./Sidebar";
+import Sidebar, { NAV_BY_ROLE, getAllowedNavIds } from "./Sidebar";
 import MobileShell from "./MobileShell";
 import Tweaks from "./Tweaks";
 import GlobalSearch from "./GlobalSearch";
@@ -138,6 +138,7 @@ export default function AppShell({ initialData, session }) {
   // the backdrop closes it.
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [permissions, setPermissions] = useState(null); // { role: { fid: bool } }
+  const [permExplicit, setPermExplicit] = useState(null); // { role: { fid: bool } } — true == stored row, false == defaulted
   const [access, setAccess] = useState({});              // { role: { fid: { canView, canEdit, canDelete } } }
   // One-per-session reminder toast. Fires once after hydrate when there
   // are any upcoming/overdue dated items (fees, loans, tasks, meetings,
@@ -178,6 +179,7 @@ export default function AppShell({ initialData, session }) {
         const json = await r.json();
         if (!cancelled && json?.ok) {
           setPermissions(json.permissions || {});
+          setPermExplicit(json.explicit || {});
           setAccess(json.access || {});
         }
       } catch {}
@@ -227,31 +229,25 @@ export default function AppShell({ initialData, session }) {
   }, [current, role, hydrated]);
 
   // Snap to a sensible default whenever:
-  //   1. the current screen isn't part of this role's NAV_BY_ROLE (legacy reasons), or
-  //   2. the admin just disabled it via Access control (permissions.role[id] === false), or
+  //   1. the current screen isn't part of this role's allowed nav, or
+  //   2. the admin just disabled it via Access control, or
   //   3. the role is a custom one — its allowed screens come purely from
   //      the permissions matrix (built server-side from role_feature_access).
+  //
+  // We use the same Sidebar helper that builds the visible nav so the
+  // auto-snap can never disagree with what the user is looking at — e.g.
+  // a feature the admin explicitly granted to Trust Accountant shows up
+  // in the sidebar AND is recognised here as a valid current screen.
   useEffect(() => {
-    const rolePerms = (permissions && permissions[role]) || null;
-    const isCustom = !NAV_BY_ROLE[role];
-    let allowedNow;
-    if (isCustom) {
-      // Custom role: allowed list is "every featureId where permissions === true".
-      // Filter to ones we have a screen component for.
-      if (!rolePerms) return; // permissions still loading
-      allowedNow = Object.entries(rolePerms)
-        .filter(([id, on]) => on && SCREENS[id])
-        .map(([id]) => id);
-    } else {
-      const navIds = (NAV_BY_ROLE[role] || []).filter((n) => !n.section).map((n) => n.id);
-      allowedNow = navIds.filter((id) => !rolePerms || rolePerms[id] !== false);
-    }
+    if (!permissions) return; // wait for first /api/permissions response
+    let allowedNow = getAllowedNavIds(role, permissions, permExplicit)
+      .filter((id) => SCREENS[id]);
     if (allowedNow.length === 0) return; // edge: nothing allowed → leave alone
     if (!allowedNow.includes(current)) {
       const fallback = allowedNow.includes(DEFAULT_SCREEN_BY_ROLE[role]) ? DEFAULT_SCREEN_BY_ROLE[role] : allowedNow[0];
       setCurrent(fallback);
     }
-  }, [role, current, permissions]);
+  }, [role, current, permissions, permExplicit]);
 
   // Cmd/Ctrl+K toggles tweaks.
   useEffect(() => {
@@ -290,6 +286,7 @@ export default function AppShell({ initialData, session }) {
         const pj = await pr.json();
         if (pj?.ok) {
           setPermissions(pj.permissions || {});
+          setPermExplicit(pj.explicit || {});
           setAccess(pj.access || {});
         }
       } catch {}
@@ -609,7 +606,7 @@ export default function AppShell({ initialData, session }) {
       <Sidebar
         current={current}
         setCurrent={(id) => { setCurrent(id); setMobileDrawerOpen(false); }}
-        role={role} user={session} permissions={permissions}
+        role={role} user={session} permissions={permissions} permExplicit={permExplicit}
       />
       {/* Backdrop is hidden on desktop via the same CSS that hides the
           drawer there. On mobile, tapping it closes the drawer. */}
