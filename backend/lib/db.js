@@ -704,7 +704,12 @@ export async function addPendingFee(row) {
     feeType: row.feeType || DEFAULT_FEE_TYPE,
   };
   if (supabaseEnabled) {
-    await supabase.from("pending_fees").insert(toPendingFee(filled));
+    const ins = await supabase.from("pending_fees").insert(toPendingFee(filled));
+    // Supabase doesn't throw on DB errors — it just returns { error }. Without
+    // this check, a schema mismatch (e.g. missing student_id / fee_type
+    // columns on older installs) silently dropped every imported student's
+    // fee row, so they vanished from the Fees screen with no warning.
+    if (ins.error) throw new Error(`pending_fees insert failed: ${ins.error.message}`);
     return;
   }
   const db = fileRead();
@@ -744,7 +749,8 @@ export async function addStudentFeeItem({ studentId, feeType, amount, due }) {
   };
   if (supabaseEnabled) {
     // Upsert by id so re-adding the same fee type just updates the amount.
-    await supabase.from("pending_fees").upsert(toPendingFee(row), { onConflict: "id" });
+    const up = await supabase.from("pending_fees").upsert(toPendingFee(row), { onConflict: "id" });
+    if (up.error) throw new Error(`pending_fees upsert failed: ${up.error.message}`);
     return row;
   }
   const db = fileRead();
@@ -780,12 +786,14 @@ export async function setPendingFeeAmount(studentId, amount) {
       return { fee: student.fee, amount: 0 };
     }
     if (fSel.data) {
-      await supabase.from("pending_fees").update({ amount: amt }).eq("id", studentId);
+      const upd = await supabase.from("pending_fees").update({ amount: amt }).eq("id", studentId);
+      if (upd.error) throw new Error(`pending_fees update failed: ${upd.error.message}`);
     } else {
-      await supabase.from("pending_fees").insert(toPendingFee({
+      const ins = await supabase.from("pending_fees").insert(toPendingFee({
         id: student.id, name: student.name, cls: student.cls,
         amount: amt, due: "in 7 days", overdue: false,
       }));
+      if (ins.error) throw new Error(`pending_fees insert failed: ${ins.error.message}`);
     }
     // If the student was 'paid', a fresh outstanding amount means they're
     // back to 'pending' (or 'partial' if some receipts already exist —

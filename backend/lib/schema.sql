@@ -27,15 +27,29 @@ alter table students add column if not exists pickup_stop text;
 create index if not exists idx_students_status on students (status);
 
 -- ---------- pending fees ----------
+-- One row per (student, fee-type) outstanding balance. `id` is composite —
+-- "<student-id>__<fee-type>" — so a single student can carry multiple
+-- pending items (Term I, Kit, Uniform, …) without clobbering each other.
+-- `student_id` links back to the students table for joins; `fee_type` is
+-- one of the FEE_TYPES keys (term1, term2, kit, …) and defaults to term1
+-- so legacy single-fee inserts still land in a sensible bucket.
 create table if not exists pending_fees (
   id text primary key,
+  student_id text,
   name text,
   cls text,
   amount int,
   due text,
   overdue boolean default false,
+  fee_type text default 'term1',
   created_at timestamptz default now()
 );
+-- Idempotent migration for older installs that pre-date the multi-fee
+-- model — without these columns, every insert from the bulk-import / Add
+-- Fee paths failed silently with "column does not exist".
+alter table pending_fees add column if not exists student_id text;
+alter table pending_fees add column if not exists fee_type text default 'term1';
+create index if not exists idx_pending_fees_student on pending_fees (student_id);
 
 -- ---------- recent (paid) fees ----------
 -- One row per payment receipt. Multiple rows per student are allowed
