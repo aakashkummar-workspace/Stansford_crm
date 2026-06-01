@@ -8,8 +8,7 @@ build/
 *.log
 data/db.json
 .claude/
-# Standalone sub-app has been merged into app/launch/. Keep the source
-# folder locally for reference but don't ship it.
+# Legacy standalone cinematic sub-app (post-launch, never deployed from here).
 Stansford CRM/
 # Working note, not part of the deploy.
 DEPLOYMENT.md
