@@ -4,11 +4,28 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI } from "../ui";
 
-// Single in-app channel — messages land in the parent's app, not on WhatsApp/SMS.
+// Channels the compose form offers. In-app delivers via the parent's
+// dashboard (no external dependency). WhatsApp actually fires the message
+// through the Evolution API — requires EVOLUTION_API_URL/_KEY/_INSTANCE
+// env vars on the server, and a 10-digit phone in `student.parent`.
 const CHANNELS = [
-  { k: "in_app", label: "In-app message", icon: "megaphone" },
+  { k: "in_app",   label: "In-app message", icon: "megaphone" },
+  { k: "whatsapp", label: "WhatsApp",       icon: "send" },
 ];
 const DEFAULT_CHANNEL = "in_app";
+
+// Pull a 10-digit Indian phone out of student.parent (which is a free-form
+// string like "Mr Suresh · 9876543210"). Returns null if no valid number.
+function parentPhoneOf(student) {
+  if (!student) return null;
+  const digits = String(student.parent || "").replace(/\D/g, "");
+  if (!digits) return null;
+  // Last 10 digits — handles entries that include the country code or a
+  // leading 0. The server-side normaliser re-prefixes 91.
+  const ten = digits.slice(-10);
+  if (ten.length !== 10 || !/^[6-9]/.test(ten)) return null;
+  return ten;
+}
 
 function Toast({ msg, tone, onClose }) {
   if (!msg) return null;
@@ -453,6 +470,32 @@ function audienceCount(value, students, pending) {
   if (value.mode === "pending") return pending.filter((f) => students.some((s) => s.id === f.id)).length;
   return value.selectedStudentIds.length;
 }
+// Build the WhatsApp recipient list (phone + studentId) for the chosen
+// audience. Filters out students whose `parent` field doesn't parse to a
+// valid 10-digit mobile — the server applies its own normaliser too, but
+// trimming here keeps the request payload small and the count accurate.
+function audienceRecipients(value, students, pending) {
+  let pool = [];
+  if (value.mode === "all") {
+    pool = students;
+  } else if (value.mode === "pending") {
+    const pendingIds = new Set(pending.map((f) => f.id));
+    pool = students.filter((s) => pendingIds.has(s.id));
+  } else {
+    const picked = new Set(value.selectedStudentIds);
+    pool = students.filter((s) => picked.has(s.id));
+  }
+  const out = [];
+  const seen = new Set();
+  for (const s of pool) {
+    const phone = parentPhoneOf(s);
+    if (!phone) continue;
+    if (seen.has(phone)) continue; // dedupe siblings sharing a parent phone
+    seen.add(phone);
+    out.push({ phone, studentId: s.id, name: s.name || "" });
+  }
+  return out;
+}
 function audienceKey(value) {
   if (value.mode === "all") return "all";
   if (value.mode === "pending") return "pending_fees";
@@ -492,12 +535,21 @@ function ComposeCard({ classes, students, pending, role, onSend, disabled, templ
     }
     setBusy(true);
     try {
-      await onSend({
+      const payload = {
         campaign: "Manual broadcast",
         audience: audienceKey(audience),
         audienceLabel: audienceLabelOf(audience),
         channel, message: message.trim(), sent: count,
-      });
+      };
+      if (channel === "whatsapp") {
+        const recipients = audienceRecipients(audience, students, pending);
+        if (recipients.length === 0) {
+          throw new Error("No reachable phone numbers in the selected audience");
+        }
+        payload.recipients = recipients;
+        payload.sent = recipients.length;
+      }
+      await onSend(payload);
       setMessage("");
       setAudience((a) => ({ ...a, selectedClasses: [], selectedStudentIds: [] }));
     } catch (e) { setErr(e.message); }
@@ -589,12 +641,21 @@ function BroadcastModal({ classes, students, pending, role, templates, prefill, 
     }
     setBusy(true);
     try {
-      await onSubmit({
+      const payload = {
         campaign: campaign.trim() || "Manual broadcast",
         audience: audienceKey(audience),
         audienceLabel: audienceLabelOf(audience),
         channel, message: message.trim(), sent: count,
-      });
+      };
+      if (channel === "whatsapp") {
+        const recipients = audienceRecipients(audience, students, pending);
+        if (recipients.length === 0) {
+          throw new Error("No reachable phone numbers in the selected audience");
+        }
+        payload.recipients = recipients;
+        payload.sent = recipients.length;
+      }
+      await onSubmit(payload);
     } catch (ex) { setErr(ex.message); setBusy(false); }
   }
 

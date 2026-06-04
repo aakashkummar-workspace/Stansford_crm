@@ -13,7 +13,6 @@ const PUBLIC_PATHS = [
   "/api/auth/login",
   "/api/auth/logout",
   "/api/auth/me",
-  "/api/auth/seed",
   // Public donor form — anyone with the link can submit.
   "/donorform",
   "/api/donor-form",
