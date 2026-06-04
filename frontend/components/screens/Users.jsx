@@ -33,6 +33,36 @@ export default function ScreenUsers({ E, role, session, refresh }) {
   const [createdUser, setCreatedUser] = useState(null); // { name, email, password, role } — credential receipt
   const [toast, setToast] = useState(null);
   const flashOk = (msg) => { setToast({ msg, tone: "ok" }); setTimeout(() => setToast(null), 3000); };
+  const flashErr = (msg) => { setToast({ msg, tone: "err" }); setTimeout(() => setToast(null), 4500); };
+
+  // Backfill parent logins: wipe all parent user accounts, then re-create
+  // one fresh login per current student so emails follow the canonical
+  // parent.{name}@sanfort.com scheme. Used to clean up after imports
+  // where stale parent rows were colliding with new student IDs.
+  const [backfillBusy, setBackfillBusy]   = useState(false);
+  const [backfillLogins, setBackfillLogins] = useState(null);
+  const runBackfill = async () => {
+    if (backfillBusy) return;
+    if (!confirm(
+      "This will DELETE every existing parent login and create fresh ones for all current students.\n\n" +
+      "Each parent will get a new email + password. Old passwords stop working immediately.\n\n" +
+      "Continue?"
+    )) return;
+    setBackfillBusy(true);
+    try {
+      const r = await fetch("/api/admin/backfill-parent-logins", { method: "POST" });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "Backfill failed");
+      flashOk(`Wiped ${j.wiped} old parent logins · created ${j.created} new ones`);
+      if (j.logins?.length) setBackfillLogins(j.logins);
+      await reloadAuthUsers();
+      await refresh?.();
+    } catch (e) {
+      flashErr(e.message || "Backfill failed");
+    } finally {
+      setBackfillBusy(false);
+    }
+  };
 
   // Custom roles defined on the Custom Roles screen — surfaced here so we
   // can offer them as assignable roles when creating a new user.
@@ -335,9 +365,31 @@ export default function ScreenUsers({ E, role, session, refresh }) {
             <Icon name="download" size={13} />Export PDF
           </button>
           {isAdmin && (
-            <button className="btn accent" onClick={() => setShowAddUser(true)} title="Create a new login (canonical or custom role)">
-              <Icon name="plus" size={13} />Add user
-            </button>
+            <>
+              <button
+                className="btn"
+                onClick={runBackfill}
+                disabled={backfillBusy}
+                title="Wipe every parent user and create a clean login per current student (parent.{name}@sanfort.com + {Name}@123)"
+              >
+                {backfillBusy ? (
+                  <>
+                    <span style={{
+                      width: 12, height: 12, borderRadius: "50%",
+                      border: "2px solid currentColor", borderTopColor: "transparent",
+                      display: "inline-block", animation: "spin 0.8s linear infinite",
+                    }} />
+                    Rebuilding…
+                  </>
+                ) : (
+                  <><Icon name="refresh" size={13} />Rebuild parent logins</>
+                )}
+                <style jsx>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+              </button>
+              <button className="btn accent" onClick={() => setShowAddUser(true)} title="Create a new login (canonical or custom role)">
+                <Icon name="plus" size={13} />Add user
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -714,6 +766,13 @@ export default function ScreenUsers({ E, role, session, refresh }) {
           flash={(msg, tone) => { setToast({ msg, tone: tone === "ok" ? "ok" : "err" }); setTimeout(() => setToast(null), 3000); }}
         />
       )}
+      {backfillLogins && (
+        <BulkParentLoginsModal
+          logins={backfillLogins}
+          onClose={() => setBackfillLogins(null)}
+          flash={flashOk}
+        />
+      )}
       {toast && (
         <div role="status" style={{
           position: "fixed", bottom: 18, right: 18, zIndex: 9000,
@@ -890,5 +949,109 @@ function Field({ label, children, hint }) {
       {children}
       {hint && <span style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{hint}</span>}
     </label>
+  );
+}
+
+// Shown after the "Rebuild parent logins" action wipes + re-creates the
+// parent roster. Same shape as BulkLoginsModal on the Students screen
+// (could be shared if it gets a third caller).
+function BulkParentLoginsModal({ logins, onClose, flash }) {
+  const count = logins.length;
+
+  const downloadCsv = () => {
+    const escape = (v) => {
+      const s = String(v ?? "");
+      if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+      return s;
+    };
+    const header = "Student ID,Student Name,Class,Parent Email,Password";
+    const rows = logins.map((l) =>
+      [l.studentId, l.studentName, l.cls, l.email, l.password].map(escape).join(",")
+    );
+    const csv = [header, ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href = url;
+    a.download = `parent-logins-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    flash?.(`Downloaded ${count} parent login${count === 1 ? "" : "s"}`);
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(20,16,10,0.55)",
+        display: "grid", placeItems: "center", zIndex: 250, padding: 16, overflowY: "auto",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="card"
+        style={{ width: "100%", maxWidth: 760, maxHeight: "calc(100vh - 32px)", display: "flex", flexDirection: "column" }}
+      >
+        <div className="card-head">
+          <div>
+            <div className="card-title">{count} parent login{count === 1 ? "" : "s"} created</div>
+            <div className="card-sub">Download the CSV now — passwords are hashed after this dialog closes and can't be recovered.</div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
+
+        <div style={{ padding: "16px 20px 8px", display: "flex", flexDirection: "column", gap: 12, overflow: "hidden", flex: 1 }}>
+          <div style={{
+            background: "var(--warn-soft, #fff4e2)",
+            border: "1px solid var(--warn, #d4944e)",
+            color: "var(--ink-2)",
+            fontSize: 12, lineHeight: 1.45,
+            padding: "10px 12px", borderRadius: 8,
+          }}>
+            <strong>Security note:</strong> these passwords follow a predictable
+            <code style={{ margin: "0 4px", fontSize: 11 }}>FirstName@123</code>
+            pattern. Ask each parent to change their password after first sign-in.
+          </div>
+
+          <div style={{
+            overflowY: "auto", flex: 1,
+            border: "1px solid var(--rule)", borderRadius: 8,
+          }}>
+            <table className="table" style={{ width: "100%", fontSize: 12 }}>
+              <thead>
+                <tr style={{ position: "sticky", top: 0, background: "var(--bg)", zIndex: 1 }}>
+                  <th style={{ textAlign: "left", padding: "8px 10px" }}>Student</th>
+                  <th style={{ textAlign: "left", padding: "8px 10px" }}>Class</th>
+                  <th style={{ textAlign: "left", padding: "8px 10px" }}>Email</th>
+                  <th style={{ textAlign: "left", padding: "8px 10px" }}>Password</th>
+                </tr>
+              </thead>
+              <tbody>
+                {logins.map((l) => (
+                  <tr key={l.studentId} style={{ borderTop: "1px solid var(--rule-2)" }}>
+                    <td style={{ padding: "7px 10px" }}>
+                      <div style={{ fontWeight: 500 }}>{l.studentName}</div>
+                      <div className="mono" style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{l.studentId}</div>
+                    </td>
+                    <td style={{ padding: "7px 10px" }}>{l.cls}</td>
+                    <td style={{ padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 11.5 }}>{l.email}</td>
+                    <td style={{ padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 11.5 }}>{l.password}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, paddingTop: 4, paddingBottom: 12 }}>
+            <button className="btn ghost" onClick={onClose}>I've saved these</button>
+            <button className="btn accent" onClick={downloadCsv}>
+              <Icon name="download" size={13} />Download CSV
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
