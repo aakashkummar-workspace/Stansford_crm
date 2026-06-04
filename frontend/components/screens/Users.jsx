@@ -63,27 +63,10 @@ export default function ScreenUsers({ E, role, session, refresh }) {
     return allStudents.filter((s) => teacherClassSet.has(s.cls));
   }, [allStudents, teacherClassSet]);
 
-  // Parents are derived 1:1 from students (auto-provisioned at admission).
-  // Show one row per student with the parent contact + login email.
-  const parents = useMemo(() => {
-    return allStudents.map((s) => ({
-      id: `${s.id}-parent`,
-      childId: s.id,
-      childName: s.name,
-      childCls: s.cls,
-      // Phone column on the student record is the parent's number.
-      phone: s.parent || "—",
-      // The auto-provisioned login uses a derived email. We don't have it
-      // explicitly on the student record but the `parent` field carries it
-      // when it's an email; otherwise show "—".
-      email: /@/.test(s.parent || "") ? s.parent : "—",
-      name: `Parent of ${s.name}`,
-    }));
-  }, [allStudents]);
-
-  // Live auth-user roster — only loaded for the Logins tab (admin-only).
-  // Held outside the tab so the tab counter is correct even when the tab
-  // hasn't been opened yet.
+  // Live auth-user roster — admins always load it so the Parents tab
+  // can show the auto-provisioned login email (joined by linkedId).
+  // Other roles still see the parent list, just without the email column
+  // populated (they don't need credentials anyway).
   const [authUsers, setAuthUsers] = useState([]);
   const [authBusy, setAuthBusy]   = useState(false);
   const reloadAuthUsers = async () => {
@@ -97,6 +80,33 @@ export default function ScreenUsers({ E, role, session, refresh }) {
     setAuthBusy(false);
   };
   useEffect(() => { reloadAuthUsers(); /* eslint-disable-next-line */ }, [isAdmin]);
+
+  // Parents are derived 1:1 from students (auto-provisioned at admission).
+  // The login email lives in the users table — find it by matching the
+  // parent role + linkedId == student id. Falls back to "—" when the
+  // login hasn't been provisioned yet (e.g. legacy students admitted
+  // before the auto-provisioning was wired up).
+  const parents = useMemo(() => {
+    const parentLogins = new Map();
+    for (const u of authUsers) {
+      if (u.role === "parent" && u.linkedId) parentLogins.set(u.linkedId, u);
+    }
+    return allStudents.map((s) => {
+      const login = parentLogins.get(s.id);
+      return {
+        id: `${s.id}-parent`,
+        childId: s.id,
+        childName: s.name,
+        childCls: s.cls,
+        // Phone column on the student record is the parent's number.
+        phone: s.parent || "—",
+        // The actual login email from the auth users table. Empty for
+        // non-admin viewers because `authUsers` is only fetched for admin.
+        email: login?.email || "—",
+        name: login?.name || `Parent of ${s.name}`,
+      };
+    });
+  }, [allStudents, authUsers]);
 
   // Tabs the current role is allowed to flip between. Logins tab is admin-only.
   const TABS = isManager
