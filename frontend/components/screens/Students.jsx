@@ -18,6 +18,10 @@ export default function ScreenStudents({ E, refresh, role, session }) {
   // ---------- state ----------
   const [classFilter, setClassFilter] = useState("All");
   const [filterOpen, setFilterOpen] = useState(false);
+  // Free-text search — matches name OR parent phone digits. Empty string
+  // disables the filter. Combined with classFilter below so admins can
+  // narrow to "Class 5-A" AND "ends in 1234" in one go.
+  const [search, setSearch] = useState("");
   const [showAdmission, setShowAdmission] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [profileOf, setProfileOf] = useState(null);
@@ -61,8 +65,18 @@ export default function ScreenStudents({ E, refresh, role, session }) {
   }, [E.TC_REQUESTS]);
 
   const visible = roster.filter((s) => {
-    if (classFilter === "All") return true;
-    return `Class ${s.cls.split("-")[0]}` === classFilter;
+    if (classFilter !== "All" && `Class ${s.cls.split("-")[0]}` !== classFilter) return false;
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+    // Numeric-only query → match the parent phone digits + the student id.
+    // Otherwise → match the student name (substring, case-insensitive).
+    const numericQuery = /^\d+$/.test(q);
+    if (numericQuery) {
+      const parentDigits = String(s.parent || "").replace(/\D/g, "");
+      const idDigits     = String(s.id || "").replace(/\D/g, "");
+      return parentDigits.includes(q) || idDigits.includes(q);
+    }
+    return String(s.name || "").toLowerCase().includes(q);
   });
 
   const eligibleIds = visible.map((s) => s.id);
@@ -329,6 +343,44 @@ export default function ScreenStudents({ E, refresh, role, session }) {
             </div>
           </div>
           <div className="card-actions">
+            {/* Search by name or phone digits. Sticks to the left of the
+                view toggle so it reads like a primary filter. The clear
+                button appears once there's text so admins can reset
+                without selecting the text first. */}
+            <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
+              <Icon
+                name="search"
+                size={12}
+                style={{ position: "absolute", left: 9, color: "var(--ink-4)", pointerEvents: "none" }}
+              />
+              <input
+                className="input"
+                type="search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search name or phone"
+                style={{
+                  height: 30,
+                  padding: "0 28px 0 26px",
+                  fontSize: 12.5,
+                  width: 200,
+                }}
+              />
+              {search && (
+                <button
+                  type="button"
+                  onClick={() => setSearch("")}
+                  aria-label="Clear search"
+                  style={{
+                    position: "absolute", right: 6,
+                    background: "none", border: 0, padding: 2,
+                    cursor: "pointer", color: "var(--ink-3)", lineHeight: 0,
+                  }}
+                >
+                  <Icon name="x" size={11} />
+                </button>
+              )}
+            </div>
             <div className="segmented">
               <button className={view === "active" ? "active" : ""} onClick={() => setView("active")}>
                 Active · {activeRoster.length}

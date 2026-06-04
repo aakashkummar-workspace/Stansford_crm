@@ -794,7 +794,27 @@ export default function ScreenFees({ E, refresh, role, session }) {
             }}
           />
         )}
-        <div className="card col-4">
+        <div
+          className="card col-4"
+          // Sticky so the Collect-fee flow stays in view while the cashier
+          // scrolls through a long fee register on the left.
+          //   - `top: 68px` clears the 56px sticky topbar plus a 12px gap,
+          //     so the card title isn't hidden behind it
+          //   - `alignSelf: start` stops the grid cell from stretching to
+          //     the row's full height (which would defeat sticky)
+          //   - `maxHeight` + scrollY ensures the panel scrolls internally
+          //     when its steps grow tall (e.g. QR step with full receipt)
+          //   - `zIndex: 4` keeps it under the topbar (z-index 5) so the
+          //     topbar still covers its top edge during scroll transitions
+          style={{
+            position: "sticky",
+            top: 68,
+            alignSelf: "start",
+            maxHeight: "calc(100vh - 80px)",
+            overflowY: "auto",
+            zIndex: 4,
+          }}
+        >
           <div className="card-head">
             <div>
               <div className="card-title">Collect fee</div>
@@ -1166,7 +1186,17 @@ function ParentFeesSummary({ scopedPending, scopedRecent, child, openReceipt, on
   }
 
   return (
-    <div className="card col-4">
+    <div
+      className="card col-4"
+      style={{
+        position: "sticky",
+        top: 68,
+        alignSelf: "start",
+        maxHeight: "calc(100vh - 80px)",
+        overflowY: "auto",
+        zIndex: 4,
+      }}
+    >
       <div className="card-head">
         <div>
           <div className="card-title">{child?.name ? `${child.name.split(" ")[0]}'s fees` : "Fees · summary"}</div>
