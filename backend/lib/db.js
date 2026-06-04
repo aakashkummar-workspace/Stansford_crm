@@ -1577,13 +1577,45 @@ export async function addStaff(row) {
 // Common credentials used when an account is auto-created on staff/student add.
 // Documented here so they're easy to find + change in one place.
 const COMMON_TEACHER_PASSWORD = "teacher123";
-const COMMON_PARENT_PASSWORD  = "parent123";
 
-// Derive a parent login email when one wasn't explicitly supplied. Format is
-// `parent.{lowercased-student-id}@school.local` — predictable + unique per
-// child so re-admission of a withdrawn student gets a fresh inbox.
-function deriveParentEmail(studentId) {
-  return `parent.${String(studentId).toLowerCase()}@school.local`;
+// Strip everything except a-z 0-9 — used to turn a student's free-form name
+// ("Hari Krishna S.S") into a stable email local-part ("harikrishnass").
+function slugifyName(name) {
+  return String(name || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+// Capitalised first word of the student's name. Used as the parent password
+// stem so each parent's credential is at least minimally personalised.
+// "aakash" → "Aakash", "HARI KRISHNA" → "Hari", "" → "Parent".
+function firstNameCapitalised(name) {
+  const first = String(name || "").trim().split(/\s+/)[0] || "Parent";
+  const letters = first.replace(/[^a-zA-Z]/g, "") || "Parent";
+  return letters.charAt(0).toUpperCase() + letters.slice(1).toLowerCase();
+}
+
+// Predictable, name-based parent password — "Aakash@123" style. SECURITY
+// CAVEAT: this is easily guessable; for a hardened deployment force a
+// password change on first login.
+function deriveParentPassword(studentName) {
+  return `${firstNameCapitalised(studentName)}@123`;
+}
+
+// Derive a parent login email when one wasn't explicitly supplied. New
+// format (2026-06-04): `parent.{slugged-name}@sanfort.com`. If a student
+// with the same slugged name already has an account, we append a 4-digit
+// tail from the student ID to disambiguate siblings or namesakes.
+async function deriveParentEmail(studentId, studentName) {
+  const base = slugifyName(studentName) || String(studentId).toLowerCase();
+  const candidate = `parent.${base}@sanfort.com`;
+  // Fast path — first student with this name gets the clean email.
+  try {
+    const existing = await getUserByEmail(candidate);
+    if (!existing) return candidate;
+  } catch {}
+  // Collision: append the numeric tail of the student id, e.g. "9499".
+  // Falls back to the full id if there are no digits.
+  const idTail = String(studentId).match(/\d+/)?.[0] || String(studentId).toLowerCase();
+  return `parent.${base}.${idTail}@sanfort.com`;
 }
 
 // Create a parent login linked to a student so the parent dashboard scopes to
@@ -1592,15 +1624,16 @@ function deriveParentEmail(studentId) {
 // null otherwise.
 export async function provisionParentLogin({ studentId, studentName, parentEmail }) {
   if (!studentId) return null;
-  const email = (parentEmail && String(parentEmail).trim().toLowerCase()) || deriveParentEmail(studentId);
+  const email = (parentEmail && String(parentEmail).trim().toLowerCase()) ||
+    await deriveParentEmail(studentId, studentName);
   try {
     const existing = await getUserByEmail(email);
     if (existing) return null;
-    const defaultPassword = COMMON_PARENT_PASSWORD;
+    const defaultPassword = deriveParentPassword(studentName);
     const { hashPassword } = require("./auth.js");
     const passwordHash = await hashPassword(defaultPassword);
     await createUser({
-      id: `USR-${Date.now().toString(36).toUpperCase()}`,
+      id: `USR-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 999)}`,
       email,
       passwordHash,
       role: "parent",

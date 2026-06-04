@@ -24,6 +24,10 @@ export default function ScreenStudents({ E, refresh, role, session }) {
   const [search, setSearch] = useState("");
   const [showAdmission, setShowAdmission] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  // After a bulk import succeeds, hold the array of generated parent
+  // credentials here so we can render a "download CSV" modal — gives the
+  // admin one shareable file with every parent's email + password.
+  const [importLogins, setImportLogins] = useState(null);
   const [profileOf, setProfileOf] = useState(null);
   const [editingOf, setEditingOf] = useState(null); // student being edited, or null
   const [phoneEditingOf, setPhoneEditingOf] = useState(null); // student whose phone is being edited inline
@@ -167,9 +171,14 @@ export default function ScreenStudents({ E, refresh, role, session }) {
         body: JSON.stringify({ csv }),
       });
       if (ok) {
-        flash(`Imported ${json.count} students`);
+        const loginCount = (json.logins || []).length;
+        flash(`Imported ${json.count} students · ${loginCount} parent logins created`);
         await refresh?.();
         setShowImport(false);
+        // Surface the generated credentials in a modal so the admin can
+        // download them as CSV and hand to parents. Falls back to a
+        // simple "no logins" toast if for some reason none were issued.
+        if (loginCount > 0) setImportLogins(json.logins);
       } else {
         flash(json.error || "Import failed", "bad");
       }
@@ -587,6 +596,13 @@ export default function ScreenStudents({ E, refresh, role, session }) {
         />
       )}
       {showImport && <ImportModal onClose={() => setShowImport(false)} onFile={handleImportFile} />}
+      {importLogins && (
+        <BulkLoginsModal
+          logins={importLogins}
+          onClose={() => setImportLogins(null)}
+          flash={flash}
+        />
+      )}
       {profileOf && (
         <ProfileModal
           student={profileOf}
@@ -1203,6 +1219,98 @@ function AdmissionModal({ classes = [], routes = [], students = [], onClose, onS
           </button>
         </div>
       </form>
+    </ModalShell>
+  );
+}
+
+// Shown right after a successful bulk import. Lists every generated
+// parent login (email + password) and offers a one-click CSV download
+// so the admin can distribute credentials to parents via WhatsApp /
+// email / printed slip. The credentials only appear here once — after
+// closing, the password is no longer recoverable (it's hashed in the
+// users table), so admins are encouraged to download before dismissing.
+function BulkLoginsModal({ logins, onClose, flash }) {
+  const count = logins.length;
+
+  const downloadCsv = () => {
+    const escape = (v) => {
+      const s = String(v ?? "");
+      // Quote anything that has a comma / quote / newline, double internal quotes.
+      if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+      return s;
+    };
+    const header = "Student ID,Student Name,Class,Parent Email,Password";
+    const rows = logins.map((l) =>
+      [l.studentId, l.studentName, l.cls, l.email, l.password].map(escape).join(",")
+    );
+    const csv = [header, ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href = url;
+    a.download = `parent-logins-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    flash?.(`Downloaded ${count} parent login${count === 1 ? "" : "s"}`);
+  };
+
+  return (
+    <ModalShell
+      title={`${count} parent login${count === 1 ? "" : "s"} created`}
+      subtitle="Download the CSV now — passwords are hashed after this dialog closes and can't be recovered."
+      onClose={onClose}
+    >
+      <div style={{ padding: "16px 20px 8px", display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{
+          background: "var(--warn-soft, #fff4e2)",
+          border: "1px solid var(--warn, #d4944e)",
+          color: "var(--ink-2)",
+          fontSize: 12, lineHeight: 1.45,
+          padding: "10px 12px", borderRadius: 8,
+        }}>
+          <strong>Security note:</strong> these passwords follow a predictable
+          <code style={{ margin: "0 4px", fontSize: 11 }}>FirstName@123</code>
+          pattern. Ask each parent to change their password after first sign-in.
+        </div>
+
+        <div style={{
+          maxHeight: 320, overflowY: "auto",
+          border: "1px solid var(--rule)", borderRadius: 8,
+        }}>
+          <table className="table" style={{ width: "100%", fontSize: 12 }}>
+            <thead>
+              <tr style={{ position: "sticky", top: 0, background: "var(--bg)", zIndex: 1 }}>
+                <th style={{ textAlign: "left", padding: "8px 10px" }}>Student</th>
+                <th style={{ textAlign: "left", padding: "8px 10px" }}>Class</th>
+                <th style={{ textAlign: "left", padding: "8px 10px" }}>Email</th>
+                <th style={{ textAlign: "left", padding: "8px 10px" }}>Password</th>
+              </tr>
+            </thead>
+            <tbody>
+              {logins.map((l) => (
+                <tr key={l.studentId} style={{ borderTop: "1px solid var(--rule-2)" }}>
+                  <td style={{ padding: "7px 10px" }}>
+                    <div style={{ fontWeight: 500 }}>{l.studentName}</div>
+                    <div className="mono" style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{l.studentId}</div>
+                  </td>
+                  <td style={{ padding: "7px 10px" }}>{l.cls}</td>
+                  <td style={{ padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 11.5 }}>{l.email}</td>
+                  <td style={{ padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 11.5 }}>{l.password}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, paddingTop: 4 }}>
+          <button className="btn ghost" onClick={onClose}>I've saved these</button>
+          <button className="btn accent" onClick={downloadCsv}>
+            <Icon name="download" size={13} />Download CSV
+          </button>
+        </div>
+      </div>
     </ModalShell>
   );
 }

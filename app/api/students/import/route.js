@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { addStudent, addPendingFee, logAudit } from "@/lib/db";
+import { addStudent, addPendingFee, logAudit, provisionParentLogin } from "@/lib/db";
 
 // Tiny CSV parser — handles quoted cells with commas inside.
 function parseCsv(text) {
@@ -59,6 +59,11 @@ export async function POST(req) {
 
   const created = [];
   const errors = [];
+  // Parent logins auto-provisioned alongside each imported student. The
+  // admin needs these to hand to parents, so they're collected here and
+  // returned in the import response (the Students screen surfaces them
+  // as a downloadable CSV after the import modal closes).
+  const logins = [];
   for (let r = 1; r < rows.length; r++) {
     const cells = rows[r];
     const name = (cells[ni] || "").trim();
@@ -78,11 +83,39 @@ export async function POST(req) {
         id: row.id, name: row.name, cls: row.cls,
         amount: termFeeFor(row.cls), due: "in 7 days", overdue: false,
       });
+      // Mirror the single-admission flow: each imported student gets a
+      // parent login scoped to their own child. Failures here are
+      // non-fatal — the student row is already saved, the admin can
+      // re-issue the login from the Students screen.
+      try {
+        const cred = await provisionParentLogin({
+          studentId: row.id,
+          studentName: row.name,
+          parentEmail: null,
+        });
+        if (cred) {
+          logins.push({
+            studentId: row.id,
+            studentName: row.name,
+            cls: row.cls,
+            email: cred.email,
+            password: cred.defaultPassword,
+          });
+        }
+      } catch (e) {
+        console.warn(`[import] login provisioning failed for ${row.id}: ${e.message}`);
+      }
       created.push(row);
     } catch (e) {
       errors.push({ row: r + 1, name, reason: e.message || "Failed" });
     }
   }
-  try { await logAudit("Rashmi Iyer", "Bulk import", `${created.length} students added${errors.length ? ` · ${errors.length} skipped` : ""}`); } catch {}
-  return NextResponse.json({ ok: true, count: created.length, students: created, errors });
+  try {
+    await logAudit(
+      "Rashmi Iyer",
+      "Bulk import",
+      `${created.length} students added · ${logins.length} parent logins issued${errors.length ? ` · ${errors.length} skipped` : ""}`
+    );
+  } catch {}
+  return NextResponse.json({ ok: true, count: created.length, students: created, logins, errors });
 }
