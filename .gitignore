@@ -12,3 +12,4 @@ data/db.json
 Stansford CRM/
 # Working note, not part of the deploy.
 DEPLOYMENT.md
+data/db.json.backup-*
