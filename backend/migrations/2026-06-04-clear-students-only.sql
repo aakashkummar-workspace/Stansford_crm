@@ -53,8 +53,10 @@ delete from leave_requests;
 -- leave_requests if staff-recognition rows live alongside.
 delete from remarks_rewards;
 
--- Fee reminders queued up for nightly send.
-delete from notifications where type = 'fee_reminder';
+-- Notifications don't need an explicit delete here — the notifications
+-- table has `user_id references users(id) on delete cascade`, so when
+-- we delete parent users below, every notification tied to those
+-- users (fee reminders, broadcast pings, etc.) goes with them.
 
 -- --- Parent logins ---
 -- Each imported student got one parent account. They're scoped to a
