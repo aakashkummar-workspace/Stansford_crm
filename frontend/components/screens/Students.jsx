@@ -160,11 +160,26 @@ export default function ScreenStudents({ E, refresh, role, session }) {
     }
   };
 
-  const handleImportFile = (file) => {
-    const reader = new FileReader();
-    reader.onload = async (ev) => {
-      const csv = ev.target?.result;
-      if (typeof csv !== "string") { flash("Could not read file", "bad"); return; }
+  // Convert an .xlsx / .xls file to a CSV string using the already-
+  // bundled `xlsx` library. Reads the first sheet and emits comma-
+  // delimited rows that the existing /api/students/import endpoint
+  // already understands — server stays unchanged.
+  const xlsxToCsv = async (file) => {
+    const XLSX = await import("xlsx");
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: "array" });
+    const firstSheet = wb.Sheets[wb.SheetNames[0]];
+    if (!firstSheet) throw new Error("Workbook has no sheets");
+    return XLSX.utils.sheet_to_csv(firstSheet);
+  };
+
+  const handleImportFile = async (file) => {
+    try {
+      const name = String(file.name || "").toLowerCase();
+      const isExcel = name.endsWith(".xlsx") || name.endsWith(".xls");
+      const csv = isExcel
+        ? await xlsxToCsv(file)
+        : await file.text();
       const { ok, json } = await safeFetch("/api/students/import", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -182,9 +197,9 @@ export default function ScreenStudents({ E, refresh, role, session }) {
       } else {
         flash(json.error || "Import failed", "bad");
       }
-    };
-    reader.onerror = () => flash("Could not read file", "bad");
-    reader.readAsText(file);
+    } catch (e) {
+      flash(e.message || "Could not read file", "bad");
+    }
   };
 
   const submitAdmission = async (form) => {
@@ -1327,7 +1342,7 @@ function ImportModal({ onClose, onFile }) {
     URL.revokeObjectURL(url);
   };
   return (
-    <ModalShell title="Import students" sub="Bulk-add via CSV · headers required (Name, Class, Parent, Transport)" onClose={onClose} width={520}>
+    <ModalShell title="Import students" sub="Bulk-add via CSV or Excel · headers required (Name, Class, Parent, Transport)" onClose={onClose} width={520}>
       <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div
           onClick={() => inputRef.current?.click()}
@@ -1338,15 +1353,19 @@ function ImportModal({ onClose, onFile }) {
         >
           <Icon name="upload" size={22} />
           <div style={{ marginTop: 8, fontSize: 13, fontWeight: 500 }}>
-            {file ? file.name : "Click to select a CSV file"}
+            {file ? file.name : "Click to select a CSV or Excel file"}
           </div>
           <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 4 }}>
-            {file ? `${(file.size / 1024).toFixed(1)} KB` : ".csv up to a few hundred rows"}
+            {file ? `${(file.size / 1024).toFixed(1)} KB` : ".csv / .xlsx up to a few hundred rows"}
           </div>
           <input
             ref={inputRef}
             type="file"
-            accept=".csv,text/csv"
+            // Accept both CSV and Excel formats. The handler in
+            // Students.jsx converts xlsx to CSV client-side via the
+            // already-bundled `xlsx` lib before posting to the
+            // import endpoint.
+            accept=".csv,text/csv,.xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
             style={{ display: "none" }}
             onChange={(e) => setFile(e.target.files?.[0] || null)}
           />
