@@ -1332,6 +1332,13 @@ function BulkLoginsModal({ logins, onClose, flash }) {
 
 function ImportModal({ onClose, onFile }) {
   const [file, setFile] = useState(null);
+  // Three-state progress so the user knows the import is actually
+  // running: 'idle' before they click Import, 'importing' while the
+  // server is processing, 'done' after the parent re-fetches data.
+  // Modal stays open while busy and ignores backdrop clicks via the
+  // disabled Cancel button — large imports take 20s+ and accidental
+  // dismissal would lose the progress signal + the parent-logins CSV.
+  const [phase, setPhase] = useState("idle");
   const inputRef = useRef(null);
   const sampleCsv = "Name,Class,Parent,Transport\nIsha Sharma,3-A,+91 9876543210,R1\nKabir Khan,5-B,+91 9988776655,—\n";
   const downloadSample = () => {
@@ -1373,10 +1380,59 @@ function ImportModal({ onClose, onFile }) {
         <div style={{ fontSize: 11.5, color: "var(--ink-3)" }}>
           Need a starting point? <a onClick={downloadSample} style={{ color: "var(--accent)", cursor: "pointer", textDecoration: "underline" }}>Download a sample template</a>.
         </div>
+        {phase === "importing" && (
+          <div style={{
+            display: "flex", alignItems: "center", gap: 10,
+            padding: "10px 12px", borderRadius: 8,
+            background: "var(--accent-soft)", color: "var(--accent-2)",
+            fontSize: 12.5, fontWeight: 500,
+          }}>
+            <span className="spinner" style={{
+              width: 14, height: 14, borderRadius: "50%",
+              border: "2px solid var(--accent)", borderTopColor: "transparent",
+              animation: "spin 0.8s linear infinite",
+            }} />
+            Importing students and creating parent logins… this may take up to a minute for large files.
+            <style jsx>{`
+              @keyframes spin { to { transform: rotate(360deg); } }
+            `}</style>
+          </div>
+        )}
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-          <button className="btn ghost" onClick={onClose}>Cancel</button>
-          <button className="btn accent" disabled={!file} onClick={() => onFile(file)}>
-            <Icon name="upload" size={13} />Import {file ? "" : "(pick a file)"}
+          <button className="btn ghost" onClick={onClose} disabled={phase === "importing"}>
+            {phase === "importing" ? "Please wait…" : "Cancel"}
+          </button>
+          <button
+            className="btn accent"
+            disabled={!file || phase === "importing"}
+            onClick={async () => {
+              if (!file) return;
+              setPhase("importing");
+              try {
+                await onFile(file);
+                // The parent closes the modal on success; this line is
+                // only reached if onFile rejected (which it doesn't —
+                // it handles errors internally via flash).
+                setPhase("idle");
+              } catch {
+                setPhase("idle");
+              }
+            }}
+          >
+            {phase === "importing" ? (
+              <>
+                <span className="spinner-inline" style={{
+                  width: 12, height: 12, borderRadius: "50%",
+                  border: "2px solid currentColor", borderTopColor: "transparent",
+                  display: "inline-block", animation: "spin 0.8s linear infinite",
+                }} />
+                Importing…
+              </>
+            ) : (
+              <>
+                <Icon name="upload" size={13} />Import {file ? "" : "(pick a file)"}
+              </>
+            )}
           </button>
         </div>
       </div>
