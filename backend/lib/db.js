@@ -522,9 +522,21 @@ export async function addStudent(row) {
   return row;
 }
 
+// Pretty label for a class number — pre-school slots use named buckets
+// so the Classes screen shows "PRE-MONT", "MONT 1", "MONT 2" instead
+// of "Class 13" etc. Stays in sync with parseClassValue in
+// app/api/students/import/route.js where 13/14/15 are reserved for
+// pre-school labels (positive ints so cls.split("-")[0] stays numeric).
+function labelForClass(n) {
+  if (n === 13) return "PRE-MONT";
+  if (n === 14) return "MONT 1";
+  if (n === 15) return "MONT 2";
+  return `Class ${n}`;
+}
+
 // Ensure a class number + section letter exist in the classes table.
-// Accepts either "5-A" or { n, s } shape. Idempotent — does nothing when
-// both already present.
+// Accepts "5-A" / "13-A" (PRE-MONT, section A) / etc.
+// Idempotent — does nothing when both already present.
 async function ensureClassSection(clsKey) {
   if (!clsKey) return;
   const [nStr, sec] = String(clsKey).split("-");
@@ -555,7 +567,7 @@ async function ensureClassSection(clsKey) {
 
   if (!foundAnywhere) {
     const sections = section ? [section] : ["A"];
-    try { await addClass({ n, label: `Class ${n}`, sections }); } catch {}
+    try { await addClass({ n, label: labelForClass(n), sections }); } catch {}
     return;
   }
   if (section && !sectionSet.has(section)) {

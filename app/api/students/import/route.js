@@ -31,8 +31,71 @@ const monthYear = () =>
   new Date().toLocaleDateString("en-IN", { month: "short", year: "numeric" });
 const newId = () => `STN-${9000 + Math.floor(Math.random() * 999)}`;
 function termFeeFor(cls) {
-  const n = Number(String(cls).split("-")[0]) || 1;
+  // Use absolute value so MONT/pre-school students (stored as negative n)
+  // still get a sensible fee structure rather than negative amounts.
+  const n = Math.abs(Number(String(cls).split(/(?<=^-?\d+)-/)[0]) || 1);
   return 14000 + n * 1000;
+}
+
+// Indian schools mix three notations for class levels in roster files:
+// numeric ("5"), Roman ("V"), and Montessori labels ("PRE-MONT", "MONT 1").
+// The on-disk students.cls field stays "N-X" (e.g. "5-A") because dozens
+// of screens parse that shape via cls.split("-"). We use HIGH positive
+// integers for pre-school so they don't collide with primary grades AND
+// don't break any "split('-')[0]" code that expects a number.
+//
+//   PRE-MONT / Nursery / Pre-KG    → 13   (label "PRE-MONT")
+//   MONT 1 / LKG                   → 14   (label "MONT 1")
+//   MONT 2 / UKG                   → 15   (label "MONT 2")
+//   I, II, III … XII               → 1..12
+//
+// addStudent → ensureClassSection auto-creates any missing class entry
+// using labelForClass below, so the Classes screen surfaces them
+// automatically the first time a student lands in that bucket.
+// Trade-off: pre-school cards sort AFTER Class 12 on the Classes screen.
+// That's acceptable for the first launch; can be reordered later with
+// an explicit display-order column.
+function romanToInt(s) {
+  if (!s || !/^[IVXLCDM]+$/i.test(s)) return null;
+  const m = { I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000 };
+  let total = 0;
+  const u = s.toUpperCase();
+  for (let i = 0; i < u.length; i++) {
+    const cur = m[u[i]];
+    const nxt = m[u[i + 1]];
+    if (nxt && cur < nxt) total -= cur;
+    else total += cur;
+  }
+  return total || null;
+}
+
+function classNumFromText(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim().toUpperCase().replace(/\s+/g, " ");
+  if (!s) return null;
+  if (/^-?\d+$/.test(s)) return Number(s);
+  const r = romanToInt(s);
+  if (r !== null && r > 0 && r < 100) return r;
+  // Pre-school synonyms — common spellings/aliases collapsed to one bucket each.
+  if (/^(PRE[- ]?MONT|PRE[- ]?KG|NURSERY|NUR|PLAY ?GROUP|PG)$/.test(s)) return 13;
+  if (/^(LKG|KG1|MONT ?1)$/.test(s)) return 14;
+  if (/^(UKG|KG2|MONT ?2)$/.test(s)) return 15;
+  return null;
+}
+
+export function parseClassValue(raw) {
+  const s = String(raw || "").trim().toUpperCase().replace(/\s+/g, " ");
+  if (!s) return "1-A";
+  // "<class><sep><section>" where sep is space or dash and section is one
+  // uppercase letter. Lets "III-A", "V B", "1-A" all work.
+  const sep = s.match(/^(.+?)[ -]([A-Z])$/);
+  if (sep) {
+    const n = classNumFromText(sep[1]);
+    if (n !== null) return `${n}-${sep[2]}`;
+  }
+  const n = classNumFromText(s);
+  if (n !== null) return `${n}-A`;
+  return "1-A";
 }
 
 export async function POST(req) {
@@ -68,8 +131,7 @@ export async function POST(req) {
     const cells = rows[r];
     const name = (cells[ni] || "").trim();
     if (!name) continue;
-    const clsRaw = (cells[ci] || "1-A").trim();
-    const cls = /^\d/.test(clsRaw) ? (clsRaw.includes("-") ? clsRaw : `${clsRaw}-A`) : "1-A";
+    const cls = parseClassValue(cells[ci]);
     const row = {
       id: newId(), name, cls,
       parent: (cells[pi] || "—").trim(),
