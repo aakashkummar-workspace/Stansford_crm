@@ -116,6 +116,17 @@ export default function ScreenUsers({ E, role, session, refresh }) {
   // parent role + linkedId == student id. Falls back to "—" when the
   // login hasn't been provisioned yet (e.g. legacy students admitted
   // before the auto-provisioning was wired up).
+  //
+  // The PASSWORD is derived from the student name using the same rule
+  // as backend/lib/db.js → deriveParentPassword: take the first word of
+  // the name, capitalise first letter + lowercase rest, append "@123".
+  // Shown alongside the email so admins can hand parents their initial
+  // credentials. Only admins see this column (authUsers gated above).
+  const derivePassword = (name) => {
+    const first = String(name || "").trim().split(/\s+/)[0] || "Parent";
+    const letters = first.replace(/[^a-zA-Z]/g, "") || "Parent";
+    return `${letters.charAt(0).toUpperCase()}${letters.slice(1).toLowerCase()}@123`;
+  };
   const parents = useMemo(() => {
     const parentLogins = new Map();
     for (const u of authUsers) {
@@ -130,6 +141,9 @@ export default function ScreenUsers({ E, role, session, refresh }) {
         childCls: s.cls,
         // Phone column on the student record is the parent's number.
         phone: s.parent || "—",
+        // Default password derived from the student name. Only meaningful
+        // if a login was actually provisioned (login present below).
+        password: login ? derivePassword(s.name) : "—",
         // The actual login email from the auth users table. Empty for
         // non-admin viewers because `authUsers` is only fetched for admin.
         email: login?.email || "—",
@@ -310,10 +324,12 @@ export default function ScreenUsers({ E, role, session, refresh }) {
         { key: "childCls",  label: "Class",      align: "center", width: "70px" },
         { key: "phone",     label: "Phone",      align: "right" },
         { key: "email",     label: "Email" },
+        { key: "password",  label: "Password" },
       ];
       rows = filteredParents.map((p, i) => ({
         i: i + 1, childId: p.childId, childName: p.childName,
         childCls: p.childCls, phone: p.phone || "—", email: p.email || "—",
+        password: p.password || "—",
       }));
       summary = [
         { label: "Parent records", value: rows.length },
@@ -678,11 +694,17 @@ export default function ScreenUsers({ E, role, session, refresh }) {
             <div style={{ overflowX: "auto" }}>
               <table className="table">
                 <thead>
-                  <tr><th>Parent of</th><th>Child class</th><th>Phone</th><th>Login email</th></tr>
+                  <tr>
+                    <th>Parent of</th>
+                    <th>Child class</th>
+                    <th>Phone</th>
+                    <th>Login email</th>
+                    <th>Password</th>
+                  </tr>
                 </thead>
                 <tbody>
                   {filteredParents.length === 0 && (
-                    <tr><td colSpan={4} className="empty">
+                    <tr><td colSpan={5} className="empty">
                       {parents.length === 0 ? "Parents are auto-provisioned on student admission." : "No matches."}
                     </td></tr>
                   )}
@@ -700,6 +722,23 @@ export default function ScreenUsers({ E, role, session, refresh }) {
                       <td><span className="chip">{p.childCls}</span></td>
                       <td style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{p.phone}</td>
                       <td style={{ fontSize: 11.5, color: "var(--ink-3)", fontFamily: "var(--font-mono)" }}>{p.email}</td>
+                      <td style={{ fontSize: 11.5, color: "var(--ink-3)", fontFamily: "var(--font-mono)" }}>
+                        {p.password !== "—" ? (
+                          <span
+                            title="Click to copy"
+                            onClick={() => {
+                              if (p.password === "—") return;
+                              navigator.clipboard?.writeText(p.password).then(
+                                () => flashOk(`Copied ${p.password}`),
+                                () => {}
+                              );
+                            }}
+                            style={{ cursor: "pointer" }}
+                          >
+                            {p.password}
+                          </span>
+                        ) : "—"}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
