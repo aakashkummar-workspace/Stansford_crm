@@ -199,10 +199,21 @@ export default function ScreenStudents({ E, refresh, role, session }) {
       });
       if (ok) {
         const loginCount = (json.logins || []).length;
+        const errorCount = Array.isArray(json.errors) ? json.errors.length : 0;
         const feeMsg = typeof json.feesIssued === "number"
           ? ` · ${json.feesIssued} fees set${json.feesSkipped ? ` (${json.feesSkipped} blank)` : ""}`
           : "";
-        flash(`Imported ${json.count} students · ${loginCount} parent logins created${feeMsg}`);
+        // Show the partial-import warning prominently if any rows failed —
+        // previously the toast only mentioned the success count, so users
+        // didn't notice silent drops (e.g. student-id collisions).
+        if (errorCount > 0) {
+          const sample = json.errors.slice(0, 3).map((e) => e.name || `row ${e.row}`).join(", ");
+          const more = errorCount > 3 ? ` +${errorCount - 3} more` : "";
+          flash(`Imported ${json.count} · ${errorCount} row${errorCount === 1 ? "" : "s"} skipped: ${sample}${more}`, "warn");
+          console.warn("[import] skipped rows", json.errors);
+        } else {
+          flash(`Imported ${json.count} students · ${loginCount} parent logins created${feeMsg}`);
+        }
         await refresh?.();
         setShowImport(false);
         // Surface the generated credentials in a modal so the admin can

@@ -29,7 +29,28 @@ function parseCsv(text) {
 
 const monthYear = () =>
   new Date().toLocaleDateString("en-IN", { month: "short", year: "numeric" });
-const newId = () => `STN-${9000 + Math.floor(Math.random() * 999)}`;
+
+// Generate a student id that's unique within this import batch. We pull
+// from a 6-digit pool (STN-100000 … STN-999999) so collisions are rare
+// even at school-wide imports, and we de-dupe against a Set the caller
+// passes in so the same batch can't issue STN-123456 twice. Previously
+// this helper used `9000 + random(999)` — only 999 slots — which gave
+// ~30 collisions on a 249-row import (birthday paradox), silently
+// dropping every duplicate to the errors[] array.
+function newId(taken) {
+  for (let i = 0; i < 50; i++) {
+    const id = `STN-${100000 + Math.floor(Math.random() * 900000)}`;
+    if (!taken || !taken.has(id)) {
+      taken?.add(id);
+      return id;
+    }
+  }
+  // Extremely unlikely fallback: append a timestamp-derived suffix to
+  // guarantee uniqueness even if the random pool somehow saturates.
+  const id = `STN-${100000 + Math.floor(Math.random() * 900000)}-${Date.now().toString(36).slice(-4)}`;
+  taken?.add(id);
+  return id;
+}
 
 // Parse a "Fees" cell from the CSV. Accepts plain numbers, currency
 // strings ("₹50,000"), and locale-formatted numbers ("50,000.00").
@@ -138,6 +159,10 @@ export async function POST(req) {
   // returned in the import response (the Students screen surfaces them
   // as a downloadable CSV after the import modal closes).
   const logins = [];
+  // Tracks every student id issued during this batch so newId() can't
+  // hand out the same id twice — fixes the silent-collision bug that
+  // dropped ~12% of a 249-row import.
+  const issuedIds = new Set();
   let feesIssued = 0;
   let feesSkipped = 0;
   for (let r = 1; r < rows.length; r++) {
@@ -151,7 +176,7 @@ export async function POST(req) {
     // can add later via "Add fee" on the Fees screen.
     const feeAmount = fi !== -1 ? parseFeeValue(cells[fi]) : null;
     const row = {
-      id: newId(), name, cls,
+      id: newId(issuedIds), name, cls,
       parent: (cells[pi] || "—").trim(),
       // student.fee is the rollup status: "pending" when there's an
       // outstanding amount, "paid" when fully paid, "—" when no fee
