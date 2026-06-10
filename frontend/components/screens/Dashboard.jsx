@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Icon from "../Icon";
 import { KPI, BarChart, LineBarChart, Ring, AvatarChip } from "../ui";
-import { money, moneyK } from "@/lib/format";
+import { money, moneyK, formatClassLabel } from "@/lib/format";
 
 export default function ScreenDashboard({ E, role, session }) {
   const { KPIS, CLASS_STRENGTH, RECENT_FEES, PENDING_FEES, ACTIVITIES, ROUTES, INCOME_SERIES } = E;
@@ -133,10 +133,10 @@ export default function ScreenDashboard({ E, role, session }) {
               puck="mint" puckIcon="students"
               details={{
                 title: `Students · ${studentCount} on roll`,
-                sub: "Breakdown by class-section",
+                sub: "Breakdown by class",
                 items: Object.entries(studentsByClass)
                   .sort((a, b) => a[0].localeCompare(b[0]))
-                  .map(([cls, n]) => ({ label: `Class ${cls}`, value: n, sub: `${n} student${n === 1 ? "" : "s"}` })),
+                  .map(([cls, n]) => ({ label: formatClassLabel(cls), value: n, sub: `${n} student${n === 1 ? "" : "s"}` })),
               }}
             />
             <KPI
@@ -147,7 +147,7 @@ export default function ScreenDashboard({ E, role, session }) {
                 title: `Fees · ${moneyK(collected)} collected`,
                 sub: `${(RECENT_FEES || []).length} receipts · ${moneyK(pendingTotal)} still outstanding`,
                 items: (RECENT_FEES || []).slice(0, 8).map((f) => ({
-                  label: `${f.name} · ${f.cls}`,
+                  label: `${f.name} · ${formatClassLabel(f.cls)}`,
                   value: `₹${(f.amount || 0).toLocaleString("en-IN")}`,
                   sub: `${f.method} · ${f.time}`,
                   tone: "ok",
@@ -463,7 +463,7 @@ export default function ScreenDashboard({ E, role, session }) {
                     </div>
                   </td>
                   <td>
-                    <span className="chip">{f.cls}</span>
+                    <span className="chip">{formatClassLabel(f.cls)}</span>
                   </td>
                   <td className="num">{money(f.amount)}</td>
                   <td style={{ color: "var(--ink-3)", fontSize: 12 }}>{f.time}</td>
@@ -501,7 +501,7 @@ export default function ScreenDashboard({ E, role, session }) {
                   <td>
                     <div style={{ fontSize: 12.5, fontWeight: 500 }}>
                       {f.name}{" "}
-                      <span style={{ color: "var(--ink-4)", fontWeight: 400, marginLeft: 4 }}>{f.cls}</span>
+                      <span style={{ color: "var(--ink-4)", fontWeight: 400, marginLeft: 4 }}>{formatClassLabel(f.cls)}</span>
                     </div>
                     <div className="mono" style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{f.id}</div>
                   </td>
@@ -787,7 +787,7 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
               class (no point showing an empty grid otherwise). */}
           {childToday.length > 0 && (
             <TodayScheduleCard
-              title={`Today · Class ${child.cls}`}
+              title={`Today · ${formatClassLabel(child.cls)}`}
               sub={`${childToday.length} period${childToday.length === 1 ? "" : "s"} · ${todayDayName}`}
               entries={childToday}
               mode="parent"
@@ -821,7 +821,7 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
               {myFees.map((f) => (
                 <tr key={`p-${f.id}-${f.due}`}>
                   <td><span className={`chip ${f.overdue ? "bad" : "warn"}`}><span className="dot" />{f.overdue ? "Overdue" : "Pending"}</span></td>
-                  <td style={{ fontSize: 13 }}>Tuition · Class {f.cls}</td>
+                  <td style={{ fontSize: 13 }}>Tuition · {formatClassLabel(f.cls)}</td>
                   <td className="num" style={{ fontWeight: 500 }}>₹{(f.amount || 0).toLocaleString("en-IN")}</td>
                   <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{f.due}</td>
                 </tr>
@@ -829,7 +829,7 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
               {myPaid.slice(0, 5).map((f, i) => (
                 <tr key={`r-${f.id}-${i}`}>
                   <td><span className="chip ok"><span className="dot" />Paid</span></td>
-                  <td style={{ fontSize: 13 }}>Tuition · Class {f.cls} <span style={{ color: "var(--ink-4)", fontSize: 11 }}>({f.method})</span></td>
+                  <td style={{ fontSize: 13 }}>Tuition · {formatClassLabel(f.cls)} <span style={{ color: "var(--ink-4)", fontSize: 11 }}>({f.method})</span></td>
                   <td className="num" style={{ fontWeight: 500 }}>₹{(f.amount || 0).toLocaleString("en-IN")}</td>
                   <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{f.time}</td>
                 </tr>
@@ -904,7 +904,7 @@ function TodayScheduleCard({ title, sub, entries, mode }) {
                 </div>
                 <div style={{ fontSize: 10.5, color: "var(--ink-3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                   {mode === "teacher"
-                    ? <>Class {e.cls}{e.room ? ` · Room ${e.room}` : ""}</>
+                    ? <>{formatClassLabel(e.cls)}{e.room ? ` · Room ${e.room}` : ""}</>
                     : <>{e.teacherName || "Teacher TBA"}{e.room ? ` · Room ${e.room}` : ""}</>}
                 </div>
               </div>

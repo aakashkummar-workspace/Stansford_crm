@@ -86,9 +86,11 @@ function classNumFromText(raw) {
   const r = romanToInt(s);
   if (r !== null && r > 0 && r < 100) return r;
   // Pre-school synonyms — common spellings/aliases collapsed to one bucket each.
+  // Accepts both Arabic (MONT 1, MONT 2) and Roman (MONT I, MONT II) variants
+  // since the actual school uses Roman in their printed roster.
   if (/^(PRE[- ]?MONT|PRE[- ]?KG|NURSERY|NUR|PLAY ?GROUP|PG)$/.test(s)) return 13;
-  if (/^(LKG|KG1|MONT ?1)$/.test(s)) return 14;
-  if (/^(UKG|KG2|MONT ?2)$/.test(s)) return 15;
+  if (/^(LKG|KG1|MONT ?1|MONT ?I)$/.test(s)) return 14;
+  if (/^(UKG|KG2|MONT ?2|MONT ?II)$/.test(s)) return 15;
   return null;
 }
 

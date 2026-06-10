@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI } from "../ui";
+import { formatClassLabel, classNameFromNumber } from "@/lib/format";
 
 // Channels the compose form offers. In-app delivers via the parent's
 // dashboard (no external dependency). WhatsApp actually fires the message
@@ -437,7 +438,7 @@ function AudiencePicker({ value, onChange, classes, students, pending, role }) {
                       >
                         <input type="checkbox" checked={checked} onChange={() => toggleStudent(s.id)} />
                         <span style={{ flex: 1, fontWeight: 500 }}>{s.name}</span>
-                        <span style={{ color: "var(--ink-4)", fontSize: 11 }}>Class {s.cls}</span>
+                        <span style={{ color: "var(--ink-4)", fontSize: 11 }}>{formatClassLabel(s.cls)}</span>
                       </label>
                     );
                   })}
@@ -506,7 +507,7 @@ function audienceLabelOf(value) {
   if (value.mode === "all") return "All parents";
   if (value.mode === "pending") return "Pending fees only";
   const classesLabel = value.selectedClasses.length
-    ? value.selectedClasses.map((c) => `Class ${c}`).join(", ")
+    ? value.selectedClasses.map((c) => formatClassLabel(String(c))).join(", ")
     : "No class selected";
   const n = value.selectedStudentIds.length;
   return `${classesLabel} · ${n} student${n === 1 ? "" : "s"}`;

@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI, LineBarChart } from "../ui";
-import { money, moneyK } from "@/lib/format";
+import { money, moneyK, formatClassLabel } from "@/lib/format";
 
 const EXPENSE_CATEGORIES = [
   "Salary", "Utilities", "Supplies", "Maintenance", "Transport", "Events",
@@ -367,7 +367,7 @@ export default function ScreenMoney({ E, refresh, role }) {
                 title: `Pending receivables · ${money(pendingTotal)}`,
                 sub: `${pendingRows.length} student${pendingRows.length === 1 ? "" : "s"} · highest-balance first`,
                 items: pendingRows.slice(0, 12).map((f) => ({
-                  label: `${f.name || "—"} · ${f.cls || "—"}`,
+                  label: `${f.name || "—"} · ${f.cls ? formatClassLabel(f.cls) : "—"}`,
                   value: money(f.amount || 0),
                   sub: f.overdue ? "overdue" : `due ${f.due || "—"}`,
                   tone: f.overdue ? "bad" : "warn",

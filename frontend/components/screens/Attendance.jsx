@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI, AvatarChip } from "../ui";
+import { formatClassLabel } from "@/backend/lib/format.js";
 
 function Toast({ msg, tone, onClose }) {
   if (!msg) return null;
@@ -237,13 +238,13 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
                     borderColor: active ? "var(--accent)" : "var(--rule)",
                   }}
                 >
-                  Class {key}
+                  {formatClassLabel(key)}
                 </button>
               );
             })}
           </div>
           <span style={{ fontSize: 11.5, color: "var(--ink-3)", marginLeft: "auto" }}>
-            {roster.length} student{roster.length === 1 ? "" : "s"} on roll · {cls}-{sec}
+            {roster.length} student{roster.length === 1 ? "" : "s"} on roll · {formatClassLabel(`${cls}-${sec}`)}
           </span>
         </div>
       ) : (
@@ -260,29 +261,14 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
                 borderColor: cls === c.n ? "var(--ink)" : "var(--rule)",
               }}
             >
-              Class {c.n}
-            </button>
-          ))}
-          <span style={{ width: 1, height: 16, background: "var(--rule)", margin: "0 6px" }} />
-          {((E.CLASSES || []).find((c) => c.n === cls)?.sections || ["A", "B"]).map((s) => (
-            <button
-              key={s}
-              onClick={() => setSec(s)}
-              className="btn sm"
-              style={{
-                background: sec === s ? "var(--accent-soft)" : "var(--card)",
-                color: sec === s ? "var(--accent-2)" : "var(--ink-2)",
-                borderColor: sec === s ? "var(--accent)" : "var(--rule)",
-              }}
-            >
-              Section {s}
+              {c.label || formatClassLabel(String(c.n))}
             </button>
           ))}
         </div>
       )}
 
       <div className="grid g-4" style={{ marginBottom: 14 }}>
-        <KPI label="On roll" value={roster.length} sub={`Class ${cls}-${sec} · ${unmarkedCount} not marked`} puck="mint" puckIcon="students" />
+        <KPI label="On roll" value={roster.length} sub={`${formatClassLabel(`${cls}-${sec}`)} · ${unmarkedCount} not marked`} puck="mint" puckIcon="students" />
         <KPI label="Present" value={presentCount} sub={roster.length ? `${Math.round((presentCount / roster.length) * 100)}%` : "—"} puck="cream" puckIcon="check" />
         <KPI label="Late" value={lateCount} sub={lateCount ? "with reasons" : "—"} puck="peach" puckIcon="clock" />
         <KPI label="Absent / leave" value={absentCount + leaveCount} sub={`${absentCount} absent · ${leaveCount} on leave`} puck="rose" puckIcon="x" />
@@ -297,7 +283,7 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
         }}>
           <Icon name="check" size={14} />
           <span>
-            Attendance for <b>Class {cls}-{sec}</b> is already recorded for today
+            Attendance for <b>{formatClassLabel(`${cls}-${sec}`)}</b> is already recorded for today
             ({todayLabel || todayIso}). The roster is locked — it will reopen automatically tomorrow.
           </span>
         </div>
@@ -306,7 +292,7 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
       <div className="card">
         <div className="card-head">
           <div>
-            <div className="card-title">Roster · {cls}-{sec}</div>
+            <div className="card-title">Roster · {formatClassLabel(`${cls}-${sec}`)}</div>
             <div className="card-sub">
               {lockedForToday
                 ? "Today's attendance is locked. Buttons reopen tomorrow."

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { resolveSchool, downloadPdf } from "@/lib/export";
 import { KPI, AvatarChip } from "../ui";
+import { formatClassLabel } from "@/lib/format";
 
 const SOURCES = ["Website", "Walk-in", "Referral", "Phone", "Instagram", "Facebook", "Google", "Other"];
 const COLUMNS = [
@@ -188,7 +189,8 @@ export default function ScreenEnquiries({ E, refresh, role, session }) {
       ],
       rows: data.map((e, i) => ({
         i: i + 1, id: e.id, name: e.name || "—", parent: e.parent || "—",
-        phone: e.phone || "—", cls: e.cls || "—",
+        phone: e.phone || "—",
+        cls: e.cls ? formatClassLabel(`${e.cls}-A`) : "—",
         source: e.source || "—", status: e.status || "—",
         date: e.date || "—",
       })),
@@ -223,7 +225,7 @@ export default function ScreenEnquiries({ E, refresh, role, session }) {
           const open = [...byStatus("New"), ...byStatus("Contacted")];
           const itemFor = (e, tone) => ({
             label: e.name,
-            value: `Class ${e.cls}`,
+            value: e.cls ? formatClassLabel(`${e.cls}-A`) : "—",
             sub: `${e.source || "—"} · ${e.date || ""}${e.phone ? ` · ${e.phone}` : ""}`,
             tone,
           });
@@ -402,7 +404,7 @@ function EnquiryCard({ enquiry, status, canEdit, onSetStatus, onCall, onWhatsApp
         )}
       </div>
       <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 6, lineHeight: 1.5 }}>
-        Class {e.cls} · {e.source}
+        {e.cls ? formatClassLabel(`${e.cls}-A`) : "—"} · {e.source}
         <br />
         {e.parent} · <span className="mono">{e.phone}</span>
       </div>
@@ -566,8 +568,8 @@ function NewEnquiryModal({ classes, onClose, onSubmit }) {
         <Field label="Class applying for *">
           <select className="select" value={form.cls} onChange={(e) => set("cls", e.target.value)}>
             <option value="">— select class —</option>
-            {(classes.length ? classes : [{ n: 1, label: "Class 1" }, { n: 2, label: "Class 2" }, { n: 3, label: "Class 3" }, { n: 4, label: "Class 4" }, { n: 5, label: "Class 5" }, { n: 6, label: "Class 6" }, { n: 7, label: "Class 7" }, { n: 8, label: "Class 8" }]).map((c) => (
-              <option key={c.n} value={c.n}>{c.label || `Class ${c.n}`}</option>
+            {(classes.length ? classes : [{ n: 1 }, { n: 2 }, { n: 3 }, { n: 4 }, { n: 5 }, { n: 6 }, { n: 7 }, { n: 8 }]).map((c) => (
+              <option key={c.n} value={c.n}>{c.label || formatClassLabel(String(c.n))}</option>
             ))}
           </select>
         </Field>
@@ -597,7 +599,7 @@ function ParentCredentialsModal({ info, onClose, onToast }) {
   const { enquiry, student, email, tempPassword, alreadyExisted } = info;
   const phoneDigits = (enquiry?.phone || "").replace(/\D/g, "");
   const message =
-    `Welcome to Sanfort International — admission confirmed for ${student.name} (${student.cls}).\n\n` +
+    `Welcome to Sanfort International — admission confirmed for ${student.name} (${formatClassLabel(student.cls)}).\n\n` +
     `Parent portal login:\n` +
     `Email: ${email}\n` +
     (tempPassword ? `Temporary password: ${tempPassword}\n\n` : "") +
@@ -625,7 +627,7 @@ function ParentCredentialsModal({ info, onClose, onToast }) {
   return (
     <ModalShell
       title={alreadyExisted ? "Parent already provisioned" : "Parent login created"}
-      sub={`${student.name} · ${student.id} · ${student.cls}`}
+      sub={`${student.name} · ${student.id} · ${formatClassLabel(student.cls)}`}
       onClose={onClose}
       width={520}
     >
@@ -723,7 +725,7 @@ function ConvertConfirmModal({ enquiry, onCancel, onConfirm }) {
         <div className="card-head">
           <div>
             <div className="card-title">Convert {enquiry.name} to admission?</div>
-            <div className="card-sub">{enquiry.id} · Class {enquiry.cls}</div>
+            <div className="card-sub">{enquiry.id} · {enquiry.cls ? formatClassLabel(`${enquiry.cls}-A`) : "—"}</div>
           </div>
           <button className="icon-btn" onClick={onCancel}><Icon name="x" size={14} /></button>
         </div>
@@ -735,7 +737,7 @@ function ConvertConfirmModal({ enquiry, onCancel, onConfirm }) {
             background: "var(--card-2)", border: "1px solid var(--rule)",
             borderRadius: 9, padding: 12, fontSize: 12, color: "var(--ink-2)", lineHeight: 1.7,
           }}>
-            <div>• Create a student record (auto-assigned ID, Class {enquiry.cls})</div>
+            <div>• Create a student record (auto-assigned ID, {enquiry.cls ? formatClassLabel(`${enquiry.cls}-A`) : "—"})</div>
             <div>• Raise the term fee against the new student</div>
             <div>• Generate a parent login email + temporary password</div>
             <div>• Lock this enquiry — it can't be moved to another column afterwards</div>

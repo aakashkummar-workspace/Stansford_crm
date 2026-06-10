@@ -3,7 +3,7 @@
 import React, { useMemo, useState } from "react";
 import Icon from "../Icon";
 import { KPI } from "../ui";
-import { money, moneyK } from "@/lib/format";
+import { money, moneyK, formatClassLabel } from "@/lib/format";
 import { resolveSchool } from "@/lib/export";
 
 // Single screen that aggregates the four most-asked-for reports:
@@ -399,12 +399,12 @@ export default function ScreenReports({ E, session }) {
     } else if (tab === "strength") {
       title = "Student Strength by Grade";
       body = renderTable(
-        ["Grade", "Total students", "Sections", "Share %"],
+        ["Grade", "Total students", "Share %"],
         strength.map((g) => {
           const pct = students.length > 0 ? Math.round((g.total / students.length) * 100) : 0;
-          return [`Class ${g.grade}`, g.total, g.sections, `${pct}%`];
+          return [formatClassLabel(String(g.grade)), g.total, `${pct}%`];
         }),
-        ["", "num", "", "num"],
+        ["", "num", "num"],
       );
       body += summaryRow("Totals", [
         ["Total on roll", students.length],
@@ -633,7 +633,7 @@ export default function ScreenReports({ E, session }) {
                         <td style={{ width: 28, textAlign: "center", color: "var(--ink-3)" }}>
                           <Icon name={isOpen ? "chevronDown" : "chevronRight"} size={12} />
                         </td>
-                        <td style={{ fontSize: 12.5, fontWeight: 500 }}>{r.cls}</td>
+                        <td style={{ fontSize: 12.5, fontWeight: 500 }}>{formatClassLabel(r.cls)}</td>
                         <td className="num">{r.students}</td>
                         <td className="num" style={{ color: "var(--ok)" }}>{money(r.collected)}</td>
                         <td className="num" style={{ color: r.pending > 0 ? "var(--bad)" : "var(--ink-3)" }}>{money(r.pending)}</td>
@@ -872,7 +872,7 @@ export default function ScreenReports({ E, session }) {
                   {examPerf.map((e) => (
                     <tr key={e.id}>
                       <td style={{ fontSize: 11.5, color: "var(--ink-3)", whiteSpace: "nowrap" }}>{e.date}</td>
-                      <td><span className="chip">{e.cls}</span></td>
+                      <td><span className="chip">{formatClassLabel(e.cls)}</span></td>
                       <td>
                         <div style={{ fontSize: 12.5, fontWeight: 500 }}>{e.subject} — {e.name}</div>
                         <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{e.type} · max {e.maxMarks}</div>
@@ -1012,12 +1012,12 @@ function ReportsKpiStrip({ pl, expensesCount, donationSummary, studentsCount, st
           .filter((s) => String(s.cls || "").split("-")[0] === String(g.grade))
           .sort((a, b) => (a.cls || "").localeCompare(b.cls || ""));
         return {
-          label: `Class ${g.grade}`,
+          label: formatClassLabel(String(g.grade)),
           value: g.total,
           sub: g.sections,
           children: inGrade.map((s) => ({
             label: s.name,
-            value: s.cls,
+            value: formatClassLabel(s.cls),
             sub: `${s.id}${s.parent && s.parent !== "—" ? ` · ${s.parent}` : ""}`,
           })),
         };

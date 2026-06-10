@@ -44,3 +44,45 @@ export function normalizeFeeType(raw) {
   const k = String(raw || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
   return FEE_TYPE_BY_KEY[k] ? k : "term1";
 }
+
+// Class-label rendering. The on-disk shape stays "N-X" (e.g. "5-A", "13-A")
+// because dozens of screens parse via cls.split("-"). The school in
+// production only runs one stream per grade (no Section A / Section B),
+// so we render display labels WITHOUT the section letter. The "-A"
+// becomes invisible plumbing — preserved in storage so the data model
+// can grow back into sections if a future school needs them.
+//
+// Roman numerals (I–XII) for primary, named buckets for pre-school
+// (PRE-MONT / MONT I / MONT II). These are exposed both server-side
+// (audit log entries, receipt particulars) and client-side (chips,
+// dropdowns, KPI sub-lines).
+
+const ROMAN_NUMERALS = ["", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"];
+
+// Class number → display name. 13/14/15 are the reserved positive
+// integers for pre-school (kept in sync with parseClassValue in
+// app/api/students/import/route.js).
+export function classNameFromNumber(n) {
+  const num = Number(n);
+  if (num === 13) return "PRE-MONT";
+  if (num === 14) return "MONT I";
+  if (num === 15) return "MONT II";
+  if (num >= 1 && num <= 12) return ROMAN_NUMERALS[num];
+  return String(num || "");
+}
+
+// Display label for a full class key ("5-A", "13-A") — drops the
+// section letter from the rendered string. Falls back gracefully on
+// malformed input. Examples:
+//   "5-A"  → "Class V"
+//   "13-A" → "PRE-MONT"
+//   "14"   → "MONT I"
+export function formatClassLabel(cls) {
+  if (!cls && cls !== 0) return "—";
+  const [head] = String(cls).split("-");
+  const n = Number(head);
+  if (!n || Number.isNaN(n)) return String(cls);
+  const name = classNameFromNumber(n);
+  if (n >= 13) return name; // pre-school labels already self-contained
+  return `Class ${name}`;
+}

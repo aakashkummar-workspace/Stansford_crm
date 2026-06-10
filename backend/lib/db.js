@@ -7,6 +7,7 @@
 
 import fs from "fs";
 import path from "path";
+import { formatClassLabel } from "./format.js";
 import {
   supabase, supabaseEnabled,
   toStudent, toPendingFee, toStaff, toInventory, toBroadcast, toTemplate,
@@ -94,10 +95,18 @@ export function fileWrite(data) {
 }
 
 // Empty arrays for tables not (yet) backed by Supabase.
+// The school runs one stream per grade (no Section A/B split). We keep
+// sections: ["A"] under the hood because dozens of screens parse cls
+// via split("-"), but the UI hides the section letter via
+// formatClassLabel(). 11 classes: PRE-MONT (13), MONT I (14),
+// MONT II (15), then I–VIII (1–8).
 const STATIC_EMPTIES = {
-  classes: [{ n: 1 }, { n: 2 }, { n: 3 }, { n: 4 }, { n: 5 }, { n: 6 }, { n: 7 }, { n: 8 }].map(
-    (c) => ({ n: c.n, label: `Class ${c.n}`, sections: ["A", "B"], students: 0 })
-  ),
+  classes: [
+    { n: 13 }, { n: 14 }, { n: 15 },
+    { n: 1 }, { n: 2 }, { n: 3 }, { n: 4 }, { n: 5 }, { n: 6 }, { n: 7 }, { n: 8 },
+  ].map((c) => ({
+    n: c.n, label: formatClassLabel(String(c.n)), sections: ["A"], students: 0,
+  })),
   kpis: {
     students: { value: 0, delta: "", deltaDir: "", sub: "" },
     collected: { value: 0, delta: "", deltaDir: "", sub: "" },
@@ -522,16 +531,12 @@ export async function addStudent(row) {
   return row;
 }
 
-// Pretty label for a class number — pre-school slots use named buckets
-// so the Classes screen shows "PRE-MONT", "MONT 1", "MONT 2" instead
-// of "Class 13" etc. Stays in sync with parseClassValue in
-// app/api/students/import/route.js where 13/14/15 are reserved for
-// pre-school labels (positive ints so cls.split("-")[0] stays numeric).
+// Pretty label for a class number — delegates to the shared display
+// helper. Primary classes render as "Class V" / "Class VI" etc.
+// (Roman numerals), pre-school buckets as "PRE-MONT" / "MONT I" / "MONT II".
+// Storage shape (cls = "N-A") is unaffected — this is presentation only.
 function labelForClass(n) {
-  if (n === 13) return "PRE-MONT";
-  if (n === 14) return "MONT 1";
-  if (n === 15) return "MONT 2";
-  return `Class ${n}`;
+  return formatClassLabel(String(n));
 }
 
 // Ensure a class number + section letter exist in the classes table.

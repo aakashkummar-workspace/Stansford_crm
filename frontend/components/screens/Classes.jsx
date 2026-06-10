@@ -3,6 +3,14 @@
 import { useEffect, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI } from "../ui";
+import { formatClassLabel } from "@/backend/lib/format.js";
+
+// The school runs one stream per grade (no Section A / Section B split),
+// so this screen renders ONE class card per grade with a single class
+// teacher picker. The on-disk cls field is still "N-A" — the "A" is
+// invisible plumbing carried for compatibility with the dozens of
+// places that parse cls.split("-").
+const ONLY_SECTION = "A";
 
 export default function ScreenClasses({ E, refresh, role }) {
   const canAssign = role === "principal" || role === "admin" || role === "academic_director";
@@ -74,8 +82,13 @@ export default function ScreenClasses({ E, refresh, role }) {
     } catch (e) { flash(e.message || "Failed", "bad"); }
   };
 
-  // Count students per class/section for the header chips.
-  const countByCls = (cls) => addedStudents.filter((s) => s.cls === cls).length;
+  // Count students per class for the card header. We match by the leading
+  // class number (the part before the "-") so legacy rows with "N-B" or
+  // "N-C" section letters still roll up to the right card.
+  const countByCls = (cls) => {
+    const head = String(cls).split("-")[0];
+    return addedStudents.filter((s) => String(s.cls).split("-")[0] === head).length;
+  };
 
   // ---------- handlers ----------
   const call = async (method, body) => {
@@ -110,35 +123,6 @@ export default function ScreenClasses({ E, refresh, role }) {
     else flash(res.error || "Failed to update", "bad");
   };
 
-  const handleAddSection = async (cls, letter) => {
-    const upper = String(letter || "").trim().toUpperCase();
-    if (!upper) return;
-    if ((cls.sections || []).includes(upper)) { flash(`Section ${upper} already exists in ${cls.label}`, "warn"); return; }
-    const res = await call("PATCH", { n: cls.n, sections: [...(cls.sections || []), upper].sort() });
-    if (res.ok) { flash(`Added section ${upper} to ${cls.label}`); await refresh?.(); }
-    else flash(res.error || "Failed", "bad");
-  };
-
-  // Confirm before removing a section. Surface the student count if any.
-  const handleRemoveSection = (cls, letter) => {
-    const sectionKey = `${cls.n}-${letter}`;
-    const count = addedStudents.filter((s) => s.cls === sectionKey).length;
-    setConfirmAsk({
-      title: `Remove section ${letter} from ${cls.label}?`,
-      body: count > 0
-        ? `This section currently has ${count} student${count === 1 ? "" : "s"} on roll. Their records stay but the section disappears from dropdowns.`
-        : "This section is empty — safe to remove.",
-      danger: count > 0,
-      confirmLabel: "Remove section",
-      onConfirm: async () => {
-        const next = (cls.sections || []).filter((s) => s !== letter);
-        const res = await call("PATCH", { n: cls.n, sections: next });
-        if (res.ok) { flash(`Removed section ${letter} from ${cls.label}`); await refresh?.(); }
-        else flash(res.error || "Failed", "bad");
-      },
-    });
-  };
-
   // Always confirm before deleting a whole class.
   const handleRemoveClass = (cls) => {
     const count = addedStudents.filter((s) => s.cls.startsWith(`${cls.n}-`)).length;
@@ -157,8 +141,6 @@ export default function ScreenClasses({ E, refresh, role }) {
     });
   };
 
-  const totalSections = classes.reduce((a, c) => a + (c.sections?.length || 0), 0);
-
   return (
     <div className="page">
       <Toast toast={toast} />
@@ -166,8 +148,8 @@ export default function ScreenClasses({ E, refresh, role }) {
       <div className="page-head">
         <div>
           <div className="page-eyebrow">People · Setup</div>
-          <div className="page-title">Classes &amp; <span className="amber">sections</span></div>
-          <div className="page-sub">Define the grades and sections your school runs. Changes here flow through to admissions, the academic tracker, and every dropdown in the app.</div>
+          <div className="page-title">Classes</div>
+          <div className="page-sub">Each grade runs as a single class. Assign one class teacher per grade — changes here flow through to admissions, the academic tracker, and every dropdown in the app.</div>
         </div>
         <div className="page-actions">
           <button className="btn accent" onClick={() => setShowAdd(true)}>
@@ -176,11 +158,18 @@ export default function ScreenClasses({ E, refresh, role }) {
         </div>
       </div>
 
-      <div className="grid g-4" style={{ marginBottom: 18 }}>
+      <div className="grid g-3" style={{ marginBottom: 18 }}>
         {(() => {
-          const empty = classes.filter((c) => !(c.sections || []).length);
           const enrolledByCls = {};
           for (const s of addedStudents) enrolledByCls[s.cls] = (enrolledByCls[s.cls] || 0) + 1;
+          // Total = sum across every class card (storage uses "N-A" so we
+          // collapse on the leading number to match how cards count below).
+          const enrolledByClassNum = {};
+          for (const [k, n] of Object.entries(enrolledByCls)) {
+            const head = String(k).split("-")[0];
+            enrolledByClassNum[head] = (enrolledByClassNum[head] || 0) + n;
+          }
+          const assignedTeacherCount = classes.filter((c) => teacherFor(`${c.n}-${ONLY_SECTION}`)).length;
           return (
             <>
               <KPI
@@ -189,40 +178,12 @@ export default function ScreenClasses({ E, refresh, role }) {
                 puck="mint" puckIcon="academic"
                 details={{
                   title: `Classes · ${classes.length} defined`,
-                  sub: "Sections + enrolment per class",
+                  sub: "Enrolment per class",
                   items: classes.map((c) => ({
-                    label: c.label || `Class ${c.n}`,
-                    value: (c.sections || []).join(", ") || "—",
-                    sub: `${(c.sections || []).reduce((a, sec) => a + (enrolledByCls[`${c.n}-${sec}`] || 0), 0)} enrolled`,
+                    label: c.label || formatClassLabel(String(c.n)),
+                    value: enrolledByClassNum[String(c.n)] || 0,
+                    sub: (enrolledByClassNum[String(c.n)] || 0) === 1 ? "1 student" : `${enrolledByClassNum[String(c.n)] || 0} students`,
                   })),
-                }}
-              />
-              <KPI
-                label="Total sections" value={totalSections} sub="across all classes"
-                puck="peach" puckIcon="users"
-                details={{
-                  title: `Sections · ${totalSections} total`,
-                  sub: "Click a section to see the students",
-                  items: classes.flatMap((c) =>
-                    (c.sections || []).map((sec) => {
-                      const key = `${c.n}-${sec}`;
-                      const inSec = addedStudents
-                        .filter((s) => s.cls === key)
-                        .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-                      return {
-                        label: `${c.label || `Class ${c.n}`} · ${sec}`,
-                        value: inSec.length,
-                        sub: inSec.length
-                          ? `${inSec.length} student${inSec.length === 1 ? "" : "s"} · click to expand`
-                          : "no students yet",
-                        children: inSec.map((s) => ({
-                          label: s.name,
-                          value: s.id,
-                          sub: [s.parent, s.transport].filter(Boolean).join(" · ") || null,
-                        })),
-                      };
-                    })
-                  ),
                 }}
               />
               <KPI
@@ -231,16 +192,18 @@ export default function ScreenClasses({ E, refresh, role }) {
                 puck="cream" puckIcon="students"
                 details={{
                   title: `Enrolled · ${addedStudents.length} students`,
-                  sub: "Click a class-section to see the students",
-                  items: Object.entries(enrolledByCls).sort((a, b) => a[0].localeCompare(b[0])).map(([cls, n]) => {
-                    const studentsInCls = addedStudents
-                      .filter((s) => s.cls === cls)
+                  sub: "Click a class to see the students",
+                  items: classes.map((c) => {
+                    const inCls = addedStudents
+                      .filter((s) => String(s.cls).split("-")[0] === String(c.n))
                       .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
                     return {
-                      label: `Class ${cls}`,
-                      value: n,
-                      sub: `${n} student${n === 1 ? "" : "s"} · click to expand`,
-                      children: studentsInCls.map((s) => ({
+                      label: c.label || formatClassLabel(String(c.n)),
+                      value: inCls.length,
+                      sub: inCls.length
+                        ? `${inCls.length} student${inCls.length === 1 ? "" : "s"} · click to expand`
+                        : "no students yet",
+                      children: inCls.map((s) => ({
                         label: s.name,
                         value: s.id,
                         sub: [s.parent, s.transport].filter(Boolean).join(" · ") || null,
@@ -250,17 +213,21 @@ export default function ScreenClasses({ E, refresh, role }) {
                 }}
               />
               <KPI
-                label="Empty classes" value={empty.length} sub="need at least one section"
-                puck="rose" puckIcon="warning"
+                label="Class teachers" value={assignedTeacherCount}
+                sub={`of ${classes.length} assigned`}
+                puck="peach" puckIcon="users"
                 details={{
-                  title: `Empty classes · ${empty.length}`,
-                  sub: empty.length === 0 ? "Every class has at least one section" : "Add a section to start enrolling",
-                  items: empty.map((c) => ({
-                    label: c.label || `Class ${c.n}`,
-                    value: "—",
-                    sub: "no sections defined",
-                    tone: "bad",
-                  })),
+                  title: `Class teacher · ${assignedTeacherCount}/${classes.length} assigned`,
+                  sub: "One teacher per class",
+                  items: classes.map((c) => {
+                    const t = teacherFor(`${c.n}-${ONLY_SECTION}`);
+                    return {
+                      label: c.label || formatClassLabel(String(c.n)),
+                      value: t ? t.name : "—",
+                      sub: t ? t.email : "unassigned",
+                      tone: t ? undefined : "bad",
+                    };
+                  }),
                 }}
               />
             </>
@@ -282,8 +249,6 @@ export default function ScreenClasses({ E, refresh, role }) {
               canAssign={canAssign}
               onAssignTeacher={handleAssignTeacher}
               onUnassignTeacher={handleUnassignTeacher}
-              onAddSection={(letter) => handleAddSection(c, letter)}
-              onRemoveSection={(letter) => handleRemoveSection(c, letter)}
               onRemoveClass={() => handleRemoveClass(c)}
               onEditClass={canAssign ? (() => setEditing(c)) : undefined}
             />
@@ -312,25 +277,22 @@ export default function ScreenClasses({ E, refresh, role }) {
 }
 
 // ---------- class card ----------
-function ClassCard({ cls, studentCount, teachers, teacherFor, canAssign, onAssignTeacher, onUnassignTeacher, onAddSection, onRemoveSection, onRemoveClass, onEditClass }) {
-  const [adding, setAdding] = useState(false);
-  const [letter, setLetter] = useState("");
-  const total = (cls.sections || []).reduce((a, s) => a + studentCount(`${cls.n}-${s}`), 0);
-
-  const submit = async (e) => {
-    e?.preventDefault();
-    if (!letter.trim()) return;
-    await onAddSection(letter);
-    setLetter("");
-    setAdding(false);
-  };
+// One card per grade. Storage key is "${n}-A" but the section letter is
+// never shown to the user — this screen treats each grade as a single
+// class with one class teacher.
+function ClassCard({ cls, studentCount, teachers, teacherFor, canAssign, onAssignTeacher, onUnassignTeacher, onRemoveClass, onEditClass }) {
+  const sectionKey = `${cls.n}-${ONLY_SECTION}`;
+  // Some legacy student rows may still carry "N-B" / "N-C" cls keys (from
+  // older imports), so count by grade number, not section, for honesty.
+  const total = studentCount(sectionKey);
+  const teacher = teacherFor ? teacherFor(sectionKey) : null;
 
   return (
     <div className="card">
       <div className="card-head" style={{ paddingBottom: 14 }}>
         <div>
           <div className="card-title">{cls.label}</div>
-          <div className="card-sub">{(cls.sections || []).length} section{(cls.sections || []).length === 1 ? "" : "s"} · {total} student{total === 1 ? "" : "s"}</div>
+          <div className="card-sub">{total} student{total === 1 ? "" : "s"}</div>
         </div>
         <div className="card-actions" style={{ display: "flex", gap: 4 }}>
           {onEditClass && (
@@ -345,60 +307,23 @@ function ClassCard({ cls, studentCount, teachers, teacherFor, canAssign, onAssig
       </div>
 
       <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        {(cls.sections || []).length === 0 ? (
-          <span style={{ fontSize: 12, color: "var(--ink-4)" }}>No sections yet — add one below.</span>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {(cls.sections || []).map((s) => {
-              const sectionKey = `${cls.n}-${s}`;
-              const count = studentCount(sectionKey);
-              const t = teacherFor ? teacherFor(sectionKey) : null;
-              return (
-                <SectionRow
-                  key={s}
-                  sectionKey={sectionKey}
-                  letter={s}
-                  count={count}
-                  teacher={t}
-                  teachers={teachers || []}
-                  canAssign={canAssign}
-                  onAssign={(teacherId) => onAssignTeacher(sectionKey, teacherId)}
-                  onUnassign={() => t && onUnassignTeacher(t.id, sectionKey)}
-                  onRemoveSection={() => onRemoveSection(s)}
-                />
-              );
-            })}
-          </div>
-        )}
-
-        {adding ? (
-          <form onSubmit={submit} style={{ display: "flex", gap: 6 }}>
-            <input
-              className="input"
-              autoFocus
-              maxLength={2}
-              value={letter}
-              onChange={(e) => setLetter(e.target.value.toUpperCase().replace(/[^A-Z]/g, ""))}
-              placeholder="A / B / C …"
-              style={{ flex: 1, fontFamily: "var(--font-mono)", letterSpacing: "0.1em" }}
-            />
-            <button type="submit" className="btn sm accent" disabled={!letter.trim()}><Icon name="check" size={12} /></button>
-            <button type="button" className="btn sm ghost" onClick={() => { setAdding(false); setLetter(""); }}><Icon name="x" size={12} /></button>
-          </form>
-        ) : (
-          <button className="btn sm" onClick={() => setAdding(true)}>
-            <Icon name="plus" size={12} />Add section
-          </button>
-        )}
+        <TeacherRow
+          sectionKey={sectionKey}
+          teacher={teacher}
+          teachers={teachers || []}
+          canAssign={canAssign}
+          onAssign={(teacherId) => onAssignTeacher(sectionKey, teacherId)}
+          onUnassign={() => teacher && onUnassignTeacher(teacher.id, sectionKey)}
+        />
       </div>
     </div>
   );
 }
 
-// ---------- one row per section, with class-teacher picker ----------
-// Shows the section letter + roll count, plus the assigned teacher (or an
-// "Assign teacher" picker). Only principal/admin/director see the picker.
-function SectionRow({ sectionKey, letter, count, teacher, teachers, canAssign, onAssign, onUnassign, onRemoveSection }) {
+// ---------- class-teacher picker ----------
+// Single teacher per class. Storage uses the legacy "N-A" key under the
+// hood, but the row itself just says "Class teacher" — no "Section A" chip.
+function TeacherRow({ sectionKey, teacher, teachers, canAssign, onAssign, onUnassign }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const ref = useRef(null);
 
@@ -414,20 +339,9 @@ function SectionRow({ sectionKey, letter, count, teacher, teachers, canAssign, o
   return (
     <div style={{
       display: "flex", alignItems: "center", gap: 10,
-      padding: "8px 10px",
+      padding: "10px 12px",
       background: "var(--bg-2)", border: "1px solid var(--rule-2)", borderRadius: 8,
     }}>
-      <span style={{
-        display: "inline-flex", alignItems: "center", gap: 6,
-        height: 24, padding: "0 10px",
-        background: "var(--accent-soft)", color: "var(--accent-2)",
-        border: "1px solid var(--accent)",
-        borderRadius: 6, fontSize: 11.5, fontWeight: 500,
-      }}>
-        Section {letter}
-        <span className="mono" style={{ fontSize: 10.5, color: "var(--ink-3)" }}>· {count}</span>
-      </span>
-
       <div ref={ref} style={{ flex: 1, minWidth: 0, position: "relative" }}>
         {teacher ? (
           (() => {
@@ -436,32 +350,27 @@ function SectionRow({ sectionKey, letter, count, teacher, teachers, canAssign, o
             return (
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{
-                  width: 22, height: 22, borderRadius: "50%",
+                  width: 24, height: 24, borderRadius: "50%",
                   background: "linear-gradient(135deg, var(--ok), #2f6048)",
                   color: "#fff", display: "grid", placeItems: "center",
-                  fontSize: 9.5, fontWeight: 600, flexShrink: 0,
+                  fontSize: 10, fontWeight: 600, flexShrink: 0,
                 }}>{initials(teacher.name)}</span>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 12, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{teacher.name}</div>
+                  <div style={{ fontSize: 12.5, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{teacher.name}</div>
                   <div style={{ fontSize: 10.5, color: "var(--ink-4)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {teacher.email}{others.length ? ` · also teaches ${others.join(", ")}` : ""}
+                    Class teacher{others.length ? ` · also teaches ${others.join(", ")}` : ""}
                   </div>
                 </div>
                 {canAssign && (
-                  <>
-                    <button className="icon-btn" onClick={() => setPickerOpen((s) => !s)} title="Add another teacher" style={{ width: 24, height: 24 }}>
-                      <Icon name="plus" size={11} />
-                    </button>
-                    <button className="icon-btn" onClick={onUnassign} title={`Remove from ${sectionKey}`} style={{ width: 24, height: 24 }}>
-                      <Icon name="x" size={11} />
-                    </button>
-                  </>
+                  <button className="icon-btn" onClick={onUnassign} title="Unassign teacher" style={{ width: 24, height: 24 }}>
+                    <Icon name="x" size={11} />
+                  </button>
                 )}
               </div>
             );
           })()
         ) : canAssign ? (
-          <button className="btn sm" onClick={() => setPickerOpen((s) => !s)} style={{ height: 26 }}>
+          <button className="btn sm" onClick={() => setPickerOpen((s) => !s)} style={{ height: 28 }}>
             <Icon name="plus" size={11} />Assign class teacher
           </button>
         ) : (
@@ -523,22 +432,15 @@ function SectionRow({ sectionKey, letter, count, teacher, teachers, canAssign, o
           </div>
         )}
       </div>
-
-      <button
-        className="icon-btn"
-        style={{ width: 24, height: 24 }}
-        onClick={onRemoveSection}
-        title={`Remove section ${letter}`}
-      >
-        <Icon name="x" size={11} />
-      </button>
     </div>
   );
 }
 
 // ---------- add-class modal ----------
+// One class per grade — the section is fixed to "A" under the hood and not
+// surfaced in the UI.
 function AddClassModal({ existing, onClose, onSubmit }) {
-  const [form, setForm] = useState({ n: "", label: "", sections: "A, B" });
+  const [form, setForm] = useState({ n: "", label: "" });
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
@@ -557,9 +459,9 @@ function AddClassModal({ existing, onClose, onSubmit }) {
     e.preventDefault();
     if (!valid) return;
     setBusy(true);
-    const sections = form.sections.split(/[,\s]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
     try {
-      await onSubmit({ n: Number(form.n), label: form.label.trim() || `Class ${form.n}`, sections });
+      const defaultLabel = formatClassLabel(String(form.n));
+      await onSubmit({ n: Number(form.n), label: form.label.trim() || defaultLabel, sections: [ONLY_SECTION] });
     } finally { setBusy(false); }
   };
   return (
@@ -571,7 +473,7 @@ function AddClassModal({ existing, onClose, onSubmit }) {
         <div className="card-head">
           <div>
             <div className="card-title">Add a class</div>
-            <div className="card-sub">Class number, optional label, starting sections</div>
+            <div className="card-sub">Class number and an optional display label</div>
           </div>
           <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
         </div>
@@ -592,16 +494,7 @@ function AddClassModal({ existing, onClose, onSubmit }) {
               className="input"
               value={form.label}
               onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))}
-              placeholder={`Class ${form.n || "N"} — defaults to this if blank`}
-            />
-          </Field>
-          <Field label="Sections (comma-separated)">
-            <input
-              className="input"
-              value={form.sections}
-              onChange={(e) => setForm((f) => ({ ...f, sections: e.target.value.toUpperCase() }))}
-              placeholder="A, B, C"
-              style={{ fontFamily: "var(--font-mono)", letterSpacing: "0.05em" }}
+              placeholder={form.n ? `${formatClassLabel(String(form.n))} — defaults to this if blank` : "Class IX — defaults to this if blank"}
             />
           </Field>
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
@@ -619,8 +512,7 @@ function AddClassModal({ existing, onClose, onSubmit }) {
 // ---------- edit-class modal ----------
 function EditClassModal({ cls, onClose, onSubmit }) {
   const [form, setForm] = useState({
-    label: cls.label || `Class ${cls.n}`,
-    sections: (cls.sections || []).join(", "),
+    label: cls.label || formatClassLabel(String(cls.n)),
   });
   const [busy, setBusy] = useState(false);
   useEffect(() => {
@@ -631,9 +523,14 @@ function EditClassModal({ cls, onClose, onSubmit }) {
   const submit = async (e) => {
     e.preventDefault();
     setBusy(true);
-    const sections = form.sections.split(/[,\s]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
     try {
-      await onSubmit({ label: form.label.trim() || `Class ${cls.n}`, sections });
+      // Preserve the existing section list (always ["A"] under the hood)
+      // so we don't accidentally drop the invisible plumbing.
+      const existingSections = (cls.sections && cls.sections.length) ? cls.sections : [ONLY_SECTION];
+      await onSubmit({
+        label: form.label.trim() || formatClassLabel(String(cls.n)),
+        sections: existingSections,
+      });
     } finally { setBusy(false); }
   };
   return (
@@ -645,26 +542,14 @@ function EditClassModal({ cls, onClose, onSubmit }) {
         <div className="card-head">
           <div>
             <div className="card-title">Edit {cls.label}</div>
-            <div className="card-sub">Class number {cls.n} · rename or change its sections</div>
+            <div className="card-sub">Rename the display label</div>
           </div>
           <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
         </div>
         <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <Field label="Label">
-            <input className="input" autoFocus value={form.label} onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))} placeholder={`Class ${cls.n}`} />
+            <input className="input" autoFocus value={form.label} onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))} placeholder={formatClassLabel(String(cls.n))} />
           </Field>
-          <Field label="Sections (comma-separated)">
-            <input
-              className="input"
-              value={form.sections}
-              onChange={(e) => setForm((f) => ({ ...f, sections: e.target.value.toUpperCase() }))}
-              placeholder="A, B, C"
-              style={{ fontFamily: "var(--font-mono)", letterSpacing: "0.05em" }}
-            />
-          </Field>
-          <div style={{ fontSize: 11, color: "var(--ink-3)" }}>
-            Tip: removing a section here is the same as clicking × on its chip — students stay on the books, but the section won't appear in dropdowns.
-          </div>
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
             <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
             <button type="submit" className="btn accent" disabled={busy}>

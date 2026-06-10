@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "./Icon";
+import { formatClassLabel } from "@/lib/format";
 
 // Cross-entity client-side search. Matches against the data already in memory
 // (everything we render comes from `E`), so it's instantaneous and works
@@ -47,13 +48,13 @@ function buildIndex(E) {
   };
 
   // ---- People ----
-  (E.ADDED_STUDENTS || []).forEach((s) => push("student", s.id, s.name, `${s.id} · Class ${s.cls} · ${s.parent || "—"}`));
+  (E.ADDED_STUDENTS || []).forEach((s) => push("student", s.id, s.name, `${s.id} · ${formatClassLabel(s.cls)} · ${s.parent || "—"}`));
   (E.STAFF          || []).forEach((s) => push("staff",   s.id, s.name, `${s.id} · ${s.role || "—"}${s.dept ? ` · ${s.dept}` : ""}`));
-  (E.ENQUIRIES      || []).forEach((e) => push("enquiry", e.id, e.name, `${e.id} · Class ${e.cls} · ${e.status}`));
+  (E.ENQUIRIES      || []).forEach((e) => push("enquiry", e.id, e.name, `${e.id} · ${e.cls ? formatClassLabel(`${e.cls}-A`) : "—"} · ${e.status}`));
   (E.VOLUNTEERS     || []).forEach((v) => push("volunteer", v.id, v.name || v.id, `${v.id}${v.role ? ` · ${v.role}` : ""}`));
 
   // ---- Money ----
-  (E.PENDING_FEES   || []).forEach((f) => push("fee",     f.id, `₹${f.amount} pending — ${f.name}`, `${f.id} · Class ${f.cls} · due ${f.due}`));
+  (E.PENDING_FEES   || []).forEach((f) => push("fee",     f.id, `₹${f.amount} pending — ${f.name}`, `${f.id} · ${formatClassLabel(f.cls)} · due ${f.due}`));
   (E.RECENT_FEES    || []).forEach((f) => push("paid",    f.id, `₹${f.amount} paid — ${f.name}`,    `${f.id} · ${f.method} · ${f.time}`));
   (E.EXPENSES       || []).forEach((e) => push("expense", e.id, `${e.category}${e.vendor ? ` · ${e.vendor}` : ""}`, `${e.id} · ₹${e.amount} · ${e.scope || "school"}${e.date ? ` · ${e.date}` : ""}`));
   (E.DONORS         || []).forEach((d) => push("donor",   d.id, d.name, `${d.id} · ${d.type || "—"} · ₹${d.ytd || 0} YTD`));
@@ -82,8 +83,8 @@ function buildIndex(E) {
   // ---- Academics ----
   (E.COMPLAINTS || []).forEach((c) => push("complaint", c.id, c.student || c.id, `${c.id} · ${c.status} · ${(c.issue || "").slice(0, 60)}`));
   (E.TEMPLATES  || []).forEach((t) => push("template", t.id, t.name, `${t.channel || ""} · template`));
-  (E.CLASSES    || []).forEach((c) => push("klass", `class-${c.n}`, c.label || `Class ${c.n}`, `Sections: ${(c.sections || []).join(", ") || "—"}`));
-  (E.EXAMS      || []).forEach((e) => push("exam", e.id, e.name || e.subject || e.id, `${e.id}${e.cls ? ` · Class ${e.cls}` : ""}${e.date ? ` · ${e.date}` : ""}`));
+  (E.CLASSES    || []).forEach((c) => push("klass", `class-${c.n}`, c.label || formatClassLabel(String(c.n)), `Grade ${c.n}`));
+  (E.EXAMS      || []).forEach((e) => push("exam", e.id, e.name || e.subject || e.id, `${e.id}${e.cls ? ` · ${formatClassLabel(e.cls)}` : ""}${e.date ? ` · ${e.date}` : ""}`));
 
   return out;
 }

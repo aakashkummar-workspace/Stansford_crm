@@ -6,6 +6,12 @@ import { KPI, AvatarChip, StatusChip } from "../ui";
 import DocumentsPanel from "../DocumentsPanel";
 import CredentialsModal from "../CredentialsModal";
 import { resolveSchool, downloadPdf } from "@/lib/export";
+import { formatClassLabel } from "@/backend/lib/format.js";
+
+// Section is fixed to "A" under the hood — storage keeps "N-A" so the
+// dozens of split("-") readers across the app stay valid, but no UI
+// element ever shows or asks for a section letter.
+const ONLY_SECTION = "A";
 
 export default function ScreenStudents({ E, refresh, role, session }) {
   const school = resolveSchool(E?.SETTINGS);
@@ -68,8 +74,12 @@ export default function ScreenStudents({ E, refresh, role, session }) {
     return m;
   }, [E.TC_REQUESTS]);
 
+  // The class filter holds either "All" or a class-number string like "5"
+  // (no "Class " prefix, no section letter) — we compare by the leading
+  // digit of the student's cls field. Display labels come from
+  // formatClassLabel so chips and dropdowns show "Class V" / "PRE-MONT".
   const visible = roster.filter((s) => {
-    if (classFilter !== "All" && `Class ${s.cls.split("-")[0]}` !== classFilter) return false;
+    if (classFilter !== "All" && String(s.cls).split("-")[0] !== classFilter) return false;
     const q = search.trim().toLowerCase();
     if (!q) return true;
     // Numeric-only query → match the parent phone digits + the student id.
@@ -110,11 +120,12 @@ export default function ScreenStudents({ E, refresh, role, session }) {
   };
 
   const exportPdf = () => {
+    const filterLabel = classFilter === "All" ? "All classes" : formatClassLabel(classFilter);
     const opened = downloadPdf({
       title: "Students Roster",
-      subtitle: `${visible.length} student${visible.length === 1 ? "" : "s"}${classFilter !== "All" ? ` · ${classFilter}` : ""}`,
+      subtitle: `${visible.length} student${visible.length === 1 ? "" : "s"}${classFilter !== "All" ? ` · ${filterLabel}` : ""}`,
       school, actor,
-      dateRange: classFilter !== "All" ? classFilter : "All classes",
+      dateRange: filterLabel,
       orientation: "landscape",
       summary: [
         { label: "Students",     value: visible.length },
@@ -136,13 +147,14 @@ export default function ScreenStudents({ E, refresh, role, session }) {
         { key: "joined",     label: "Joined",     align: "right",  width: "80px" },
       ],
       rows: visible.map((s, i) => ({
-        i: i + 1, id: s.id, name: s.name || "—", cls: s.cls || "—",
+        i: i + 1, id: s.id, name: s.name || "—",
+        cls: s.cls ? formatClassLabel(s.cls) : "—",
         parent: s.parent || "—", transport: s.transport || "—",
         fee: s.fee || "—",
         attendance: s.attendance != null ? `${s.attendance}%` : "—",
         joined: s.joined || "—",
       })),
-      filename: `${school.name.replace(/\s+/g, "-").toLowerCase()}-students-${classFilter.replace(/\s+/g, "-").toLowerCase()}-${new Date().toISOString().slice(0, 10)}`,
+      filename: `${school.name.replace(/\s+/g, "-").toLowerCase()}-students-${filterLabel.replace(/\s+/g, "-").toLowerCase()}-${new Date().toISOString().slice(0, 10)}`,
     });
     if (opened === false) flash("Pop-up blocked — please allow pop-ups for this site", "bad");
     else flash(`Opened PDF preview · ${visible.length} students`);
@@ -275,7 +287,7 @@ export default function ScreenStudents({ E, refresh, role, session }) {
         <div>
           <div className="page-eyebrow">People · Roster</div>
           <div className="page-title">Students <span className="amber">at school</span></div>
-          <div className="page-sub">{roster.length} {roster.length === 1 ? "child" : "children"} on roll · classes 1–8</div>
+          <div className="page-sub">{roster.length} {roster.length === 1 ? "child" : "children"} on roll · {(E.CLASSES || []).length} classes</div>
         </div>
         <div className="page-actions">
           <button className="btn" onClick={() => setShowImport(true)}><Icon name="upload" size={13} />Import</button>
@@ -286,14 +298,14 @@ export default function ScreenStudents({ E, refresh, role, session }) {
 
       <div className="grid g-4" style={{ marginBottom: 14 }}>
         <KPI
-          label="Enrolled" value={roster.length} sub="across 8 classes"
+          label="Enrolled" value={roster.length} sub={`across ${(E.CLASSES || []).length} classes`}
           puck="mint" puckIcon="students"
           details={{
             title: `Enrolled · ${roster.length} students`,
             sub: "Click a student in the table to open their profile",
             items: roster.slice(0, 12).map((s) => ({
               label: s.name,
-              value: s.cls,
+              value: formatClassLabel(s.cls),
               sub: `${s.id} · ${s.parent}`,
             })),
           }}
@@ -307,7 +319,7 @@ export default function ScreenStudents({ E, refresh, role, session }) {
             items: roster.slice(0, 10).map((s) => ({
               label: s.name,
               value: s.joined,
-              sub: `${s.cls} · ${s.id}`,
+              sub: `${formatClassLabel(s.cls)} · ${s.id}`,
             })),
           }}
         />
@@ -333,7 +345,7 @@ export default function ScreenStudents({ E, refresh, role, session }) {
                   items: sortedAtt.slice(0, 12).map((s) => ({
                     label: s.name,
                     value: `${s.attendance || 0}%`,
-                    sub: `${s.cls} · ${s.id}`,
+                    sub: `${formatClassLabel(s.cls)} · ${s.id}`,
                     tone: (s.attendance || 0) < 75 ? "bad" : (s.attendance || 0) < 85 ? "warn" : "ok",
                   })),
                 }}
@@ -349,7 +361,7 @@ export default function ScreenStudents({ E, refresh, role, session }) {
                   items: tcs.length === 0 ? [] : tcs.slice(0, 12).map((t) => ({
                     label: t.studentName || t.student || t.studentId,
                     value: t.status || "requested",
-                    sub: `${t.cls || "—"} · ${t.requestedAt ? String(t.requestedAt).slice(0, 10) : ""}`,
+                    sub: `${t.cls ? formatClassLabel(t.cls) : "—"} · ${t.requestedAt ? String(t.requestedAt).slice(0, 10) : ""}`,
                     tone: t.status === "issued" ? "ok" : t.status === "rejected" ? "bad" : "warn",
                   })),
                 }}
@@ -417,17 +429,26 @@ export default function ScreenStudents({ E, refresh, role, session }) {
               </button>
             </div>
             <div className="segmented" style={{ flexWrap: "wrap" }}>
-              {["All", "Class 1", "Class 2", "Class 3", "Class 4", "Class 5", "Class 6", "Class 7", "Class 8"].map((f) => (
-                <button key={f} className={classFilter === f ? "active" : ""} onClick={() => setClassFilter(f)}>{f}</button>
+              <button className={classFilter === "All" ? "active" : ""} onClick={() => setClassFilter("All")}>All</button>
+              {(E.CLASSES || []).map((c) => (
+                <button
+                  key={c.n}
+                  className={classFilter === String(c.n) ? "active" : ""}
+                  onClick={() => setClassFilter(String(c.n))}
+                  title={c.label || formatClassLabel(String(c.n))}
+                >
+                  {c.label || formatClassLabel(String(c.n))}
+                </button>
               ))}
             </div>
             <div style={{ position: "relative" }}>
               <button className={`btn sm ${classFilter !== "All" ? "accent" : ""}`} onClick={() => setFilterOpen((v) => !v)}>
                 <Icon name="filter" size={12} />
-                {classFilter === "All" ? "Filter" : classFilter}
+                {classFilter === "All" ? "Filter" : formatClassLabel(classFilter)}
               </button>
               {filterOpen && (
                 <FilterMenu
+                  classes={E.CLASSES || []}
                   value={classFilter}
                   onClose={() => setFilterOpen(false)}
                   onPick={(v) => { setClassFilter(v); setFilterOpen(false); }}
@@ -527,7 +548,7 @@ export default function ScreenStudents({ E, refresh, role, session }) {
                     </div>
                   </td>
                   <td style={{ fontFamily: "var(--font-mono)", fontSize: 11.5, color: "var(--ink-3)" }}>{s.id}</td>
-                  <td><span className="chip">{s.cls}</span></td>
+                  <td><span className="chip">{formatClassLabel(s.cls)}</span></td>
                   <td style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--ink-3)" }}>
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                       <span>{s.parent}</span>
@@ -679,7 +700,7 @@ function Toast({ toast }) {
   );
 }
 
-function FilterMenu({ value, onPick, onClose }) {
+function FilterMenu({ classes = [], value, onPick, onClose }) {
   useEffect(() => {
     const onDoc = (e) => {
       if (!e.target.closest(".filter-menu") && !e.target.closest(".btn")) onClose();
@@ -687,7 +708,10 @@ function FilterMenu({ value, onPick, onClose }) {
     setTimeout(() => document.addEventListener("click", onDoc), 0);
     return () => document.removeEventListener("click", onDoc);
   }, [onClose]);
-  const opts = ["All", "Class 1", "Class 2", "Class 3", "Class 4", "Class 5", "Class 6", "Class 7", "Class 8"];
+  // Value space matches classFilter — "All" or a stringified class number.
+  const opts = [{ key: "All", label: "All" }, ...classes.map((c) => ({
+    key: String(c.n), label: c.label || formatClassLabel(String(c.n)),
+  }))];
   return (
     <div className="filter-menu" style={{
       position: "absolute", top: "calc(100% + 6px)", right: 0, zIndex: 50,
@@ -698,13 +722,13 @@ function FilterMenu({ value, onPick, onClose }) {
         Filter by class
       </div>
       {opts.map((o) => (
-        <button key={o} onClick={() => onPick(o)} className="btn ghost"
+        <button key={o.key} onClick={() => onPick(o.key)} className="btn ghost"
           style={{
             width: "100%", justifyContent: "flex-start", height: 30, padding: "0 10px",
-            fontSize: 12.5, background: value === o ? "var(--accent-soft)" : "transparent",
-            color: value === o ? "var(--accent-2)" : "var(--ink)", fontWeight: value === o ? 500 : 400,
+            fontSize: 12.5, background: value === o.key ? "var(--accent-soft)" : "transparent",
+            color: value === o.key ? "var(--accent-2)" : "var(--ink)", fontWeight: value === o.key ? 500 : 400,
           }}>
-          {o}
+          {o.label}
         </button>
       ))}
     </div>
@@ -807,34 +831,26 @@ function ModalShell({ title, sub, onClose, children, width = 460 }) {
 // Edit an existing student's core details. Mirrors the validation used by the
 // admission form so back-and-forth edits don't smuggle in bad phone numbers.
 function EditStudentModal({ student, classes = [], onClose, onSubmit }) {
-  const classList = classes.length ? classes : [{ n: 1, label: "Class 1", sections: ["A", "B"] }];
-  const sectionsFor = (n) => {
-    const c = classList.find((x) => String(x.n) === String(n));
-    return (c && c.sections && c.sections.length) ? c.sections : ["A"];
-  };
-  const [initialClsN, initialSec] = (() => {
-    const [a, b] = String(student.cls || "1-A").split("-");
-    return [a || "1", (b || "A").toUpperCase()];
+  const classList = classes.length ? classes : [{ n: 1, label: formatClassLabel("1"), sections: [ONLY_SECTION] }];
+  const [initialClsN] = (() => {
+    const [a] = String(student.cls || "1-A").split("-");
+    return [a || "1"];
   })();
   const initialPhoneDigits = (student.parent || "").replace(/\D/g, "").slice(-10);
 
+  // The school runs one stream per grade. Section stays "A" under the hood
+  // so the cls field can keep its "N-A" shape, but we no longer ask the
+  // admin to pick a section.
   const [form, setForm] = useState({
     name: student.name || "",
     cls: initialClsN,
-    section: initialSec,
+    section: ONLY_SECTION,
     phoneDigits: initialPhoneDigits.length === 10 && /^[6-9]/.test(initialPhoneDigits) ? initialPhoneDigits : "",
   });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [touched, setTouched] = useState({});
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
-
-  // Keep the section valid when the class changes.
-  useEffect(() => {
-    const avail = sectionsFor(form.cls);
-    if (!avail.includes(form.section)) setForm((f) => ({ ...f, section: avail[0] }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.cls]);
 
   const onPhoneChange = (e) => {
     const d = e.target.value.replace(/\D/g, "").slice(0, 10);
@@ -885,18 +901,11 @@ function EditStudentModal({ student, classes = [], onClose, onSubmit }) {
           )}
         </Field>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <Field label="Class">
-            <select className="select" value={form.cls} onChange={(e) => set("cls", e.target.value)}>
-              {classList.map((c) => <option key={c.n} value={c.n}>{c.label || `Class ${c.n}`}</option>)}
-            </select>
-          </Field>
-          <Field label="Section">
-            <select className="select" value={form.section} onChange={(e) => set("section", e.target.value)}>
-              {sectionsFor(form.cls).map((s) => <option key={s} value={s}>Section {s}</option>)}
-            </select>
-          </Field>
-        </div>
+        <Field label="Class">
+          <select className="select" value={form.cls} onChange={(e) => set("cls", e.target.value)}>
+            {classList.map((c) => <option key={c.n} value={c.n}>{c.label || formatClassLabel(String(c.n))}</option>)}
+          </select>
+        </Field>
 
         <Field label="Parent mobile (10 digits, Indian)">
           <div style={{
@@ -957,25 +966,16 @@ const suggestedTermFee = (clsN) => 14000 + (Number(clsN) || 1) * 1000;
 
 function AdmissionModal({ classes = [], routes = [], students = [], onClose, onSubmit }) {
   // Fall back to class 1 if the configured list is empty.
-  const classList = classes.length ? classes : [{ n: 1, label: "Class 1", sections: ["A", "B"] }];
+  const classList = classes.length ? classes : [{ n: 1, label: formatClassLabel("1"), sections: [ONLY_SECTION] }];
   const initialCls = String(classList[0].n);
-  const sectionsFor = (n) => {
-    const c = classList.find((x) => String(x.n) === String(n));
-    return (c && c.sections && c.sections.length) ? c.sections : ["A"];
-  };
+  // Section is fixed to "A" — the school doesn't split grades into sections.
   const [form, setForm] = useState({
-    name: "", cls: initialCls, section: sectionsFor(initialCls)[0],
+    name: "", cls: initialCls, section: ONLY_SECTION,
     phoneDigits: "", transport: "—", pickupStop: "",
     // Fee starts blank → uses the auto-suggested per-class amount on submit.
     // The admin can type a value to override (scholarship, sibling discount, etc).
     feeAmount: "",
   });
-  // Keep the section valid when the class changes.
-  useEffect(() => {
-    const avail = sectionsFor(form.cls);
-    if (!avail.includes(form.section)) setForm((f) => ({ ...f, section: avail[0] }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.cls]);
   const [busy, setBusy] = useState(false);
   const [touched, setTouched] = useState({});
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
@@ -1039,18 +1039,11 @@ function AdmissionModal({ classes = [], routes = [], students = [], onClose, onS
           )}
         </Field>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <Field label="Class">
-            <select className="select" value={form.cls} onChange={(e) => set("cls", e.target.value)}>
-              {classList.map((c) => <option key={c.n} value={c.n}>{c.label || `Class ${c.n}`}</option>)}
-            </select>
-          </Field>
-          <Field label="Section">
-            <select className="select" value={form.section} onChange={(e) => set("section", e.target.value)}>
-              {sectionsFor(form.cls).map((s) => <option key={s} value={s}>Section {s}</option>)}
-            </select>
-          </Field>
-        </div>
+        <Field label="Class">
+          <select className="select" value={form.cls} onChange={(e) => set("cls", e.target.value)}>
+            {classList.map((c) => <option key={c.n} value={c.n}>{c.label || formatClassLabel(String(c.n))}</option>)}
+          </select>
+        </Field>
 
         <Field label="Term fee (₹)">
           <div style={{
@@ -1091,7 +1084,7 @@ function AdmissionModal({ classes = [], routes = [], students = [], onClose, onS
           </div>
           <span style={{ fontSize: 11, color: "var(--ink-4)" }}>
             {form.feeAmount === ""
-              ? <>Suggested ₹{suggestedFee.toLocaleString("en-IN")} for Class {form.cls}. Type to override (scholarship, sibling discount, etc).</>
+              ? <>Suggested ₹{suggestedFee.toLocaleString("en-IN")} for {formatClassLabel(form.cls)}. Type to override (scholarship, sibling discount, etc).</>
               : feeNum === 0
                 ? <>No pending fee will be raised for this admission.</>
                 : <>Outstanding will be set to ₹{feeNum.toLocaleString("en-IN")}.</>}
@@ -1313,7 +1306,7 @@ function BulkLoginsModal({ logins, onClose, flash }) {
                     <div style={{ fontWeight: 500 }}>{l.studentName}</div>
                     <div className="mono" style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{l.studentId}</div>
                   </td>
-                  <td style={{ padding: "7px 10px" }}>{l.cls}</td>
+                  <td style={{ padding: "7px 10px" }}>{formatClassLabel(l.cls)}</td>
                   <td style={{ padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 11.5 }}>{l.email}</td>
                   <td style={{ padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 11.5 }}>{l.password}</td>
                 </tr>
@@ -1471,7 +1464,7 @@ function ConfirmArchive({ student, onCancel, onConfirm }) {
         <div className="card-head">
           <div>
             <div className="card-title">Withdraw {student.name}?</div>
-            <div className="card-sub">{student.id} · Class {student.cls}</div>
+            <div className="card-sub">{student.id} · {formatClassLabel(student.cls)}</div>
           </div>
           <button className="icon-btn" onClick={onCancel}><Icon name="x" size={14} /></button>
         </div>
@@ -1560,7 +1553,7 @@ function ProfileModal({ student, onClose, onMessage, onTC }) {
             <div style={{ color: "var(--ink-3)", fontSize: 12.5, marginTop: 4, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
               <span className="mono">{student.id}</span>
               <span className="meta-dot">·</span>
-              <span>Class {student.cls}</span>
+              <span>{formatClassLabel(student.cls)}</span>
               <span className="meta-dot">·</span>
               <span>Joined {student.joined}</span>
             </div>
@@ -1575,7 +1568,7 @@ function ProfileModal({ student, onClose, onMessage, onTC }) {
           <Stat label="Attendance" value={`${student.attendance}%`} tone={student.attendance < 85 ? "warn" : "ok"} />
           <Stat label="Fee" value={student.fee.charAt(0).toUpperCase() + student.fee.slice(1)} tone={feeTone} />
           <Stat label="Transport" value={student.transport} />
-          <Stat label="Section" value={student.cls.split("-")[1] || "—"} />
+          <Stat label="Class" value={formatClassLabel(student.cls)} />
         </div>
 
         {/* Body — two columns */}
@@ -1806,15 +1799,15 @@ function MessageParentModal({ student, onClose, flash }) {
   const TEMPLATES = [
     {
       label: "General check-in",
-      body: `Dear Parent,\n\nThis is a quick note from Sanfort International School regarding ${student.name} (Class ${student.cls}). Please feel free to reach out if you have any questions.\n\n— Sanfort International School`,
+      body: `Dear Parent,\n\nThis is a quick note from Sanfort International School regarding ${student.name} (${formatClassLabel(student.cls)}). Please feel free to reach out if you have any questions.\n\n— Sanfort International School`,
     },
     {
       label: "Request a meeting",
-      body: `Dear Parent,\n\nWe would like to meet with you regarding ${student.name} (Class ${student.cls}). Please let us know a convenient time this week.\n\n— Sanfort International School`,
+      body: `Dear Parent,\n\nWe would like to meet with you regarding ${student.name} (${formatClassLabel(student.cls)}). Please let us know a convenient time this week.\n\n— Sanfort International School`,
     },
     {
       label: "Attendance follow-up",
-      body: `Dear Parent,\n\n${student.name} (Class ${student.cls}) was marked absent recently. Kindly let us know the reason or share an update.\n\n— Sanfort International School`,
+      body: `Dear Parent,\n\n${student.name} (${formatClassLabel(student.cls)}) was marked absent recently. Kindly let us know the reason or share an update.\n\n— Sanfort International School`,
     },
   ];
   const [body, setBody] = useState(TEMPLATES[0].body);
@@ -1856,7 +1849,7 @@ function MessageParentModal({ student, onClose, flash }) {
         <div className="card-head">
           <div>
             <div className="card-title">Message {student.name}'s parent</div>
-            <div className="card-sub">{student.id} · Class {student.cls} · delivered to the parent dashboard</div>
+            <div className="card-sub">{student.id} · {formatClassLabel(student.cls)} · delivered to the parent dashboard</div>
           </div>
           <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
         </div>
@@ -1935,7 +1928,7 @@ function IssueTcModal({ student, onClose, onIssued, flash }) {
         <div className="card-head">
           <div>
             <div className="card-title">Issue TC for {student.name}?</div>
-            <div className="card-sub">{student.id} · Class {student.cls}</div>
+            <div className="card-sub">{student.id} · {formatClassLabel(student.cls)}</div>
           </div>
           <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
         </div>

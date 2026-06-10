@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { AvatarChip, FakeQR, StatusChip, UpiQR, buildUpiUri } from "../ui";
-import { money, moneyK, FEE_TYPES, feeTypeLabel } from "@/lib/format";
+import { money, moneyK, FEE_TYPES, feeTypeLabel, formatClassLabel } from "@/lib/format";
 import { resolveSchool, downloadPdf } from "@/lib/export";
 
 const DEMO_PARENT_PHONE = "+919876543210";
@@ -415,7 +415,7 @@ export default function ScreenFees({ E, refresh, role, session }) {
   };
   const sendEmail = () => {
     const subject = encodeURIComponent(`Fee receipt · ${selected.id} · ${selected.name}`);
-    const body = encodeURIComponent(`Dear Parent,\n\nThis is to confirm receipt of ₹${selected.amount} towards fees for ${selected.name} (Class ${selected.cls}, Reg ID ${selected.id}).\nMethod: ${method}\n\nThank you,\nSanfort International School\nRun by Sanvi Educational and Charitable Trust`);
+    const body = encodeURIComponent(`Dear Parent,\n\nThis is to confirm receipt of ₹${selected.amount} towards fees for ${selected.name} (${formatClassLabel(selected.cls)}, Reg ID ${selected.id}).\nMethod: ${method}\n\nThank you,\nSanfort International School\nRun by Sanvi Educational and Charitable Trust`);
     window.open(`mailto:parent@example.com?subject=${subject}&body=${body}`, "_self");
     flash("Opened email draft");
   };
@@ -528,7 +528,7 @@ export default function ScreenFees({ E, refresh, role, session }) {
       </div>
       <div class="row">
         <div class="cell-l"><span class="field">Name : <span class="val">${escapeHtml(selected.name)}</span></span></div>
-        <div class="cell-r"><span class="field">Class &amp; Sec. : <span class="val">${escapeHtml(selected.cls)}</span></span></div>
+        <div class="cell-r"><span class="field">Class : <span class="val">${escapeHtml(formatClassLabel(selected.cls))}</span></span></div>
       </div>
       <div class="row">
         <div class="cell-l"><span class="field">Month : <span class="val">${escapeHtml(monthStr)}</span></span></div>
@@ -742,7 +742,7 @@ export default function ScreenFees({ E, refresh, role, session }) {
                         </div>
                       </div>
                     </td>
-                    <td><span className="chip">{f.cls}</span></td>
+                    <td><span className="chip">{formatClassLabel(f.cls)}</span></td>
                     <td><span className="chip" style={{ background: "var(--accent-soft)", color: "var(--accent-2)" }}>{feeTypeLabel(f.feeType)}</span></td>
                     <td className="num">{money(f.amount)}</td>
                     <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{f.method}</td>
@@ -853,7 +853,7 @@ export default function ScreenFees({ E, refresh, role, session }) {
                   </div>
                   <div style={{ flex: 1 }}>
                     <div style={{ fontWeight: 500, fontSize: 13.5 }}>{selected.name}</div>
-                    <div style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{selected.cls} · {selected.id} · {DEMO_PARENT_PHONE}</div>
+                    <div style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{formatClassLabel(selected.cls)} · {selected.id} · {DEMO_PARENT_PHONE}</div>
                   </div>
                 </div>
                 <div className="hr" style={{ margin: "10px 0" }} />
@@ -1058,7 +1058,7 @@ export default function ScreenFees({ E, refresh, role, session }) {
                       </div>
                       <div style={{ display: "flex", gap: 10, padding: "2px 0" }}>
                         <div style={{ flex: 1 }}>Name : <span style={dotted}>{selected.name}</span></div>
-                        <div style={{ flex: 1 }}>Class &amp; Sec. : <span style={dotted}>{selected.cls}</span></div>
+                        <div style={{ flex: 1 }}>Class : <span style={dotted}>{formatClassLabel(selected.cls)}</span></div>
                       </div>
                       <div style={{ display: "flex", gap: 10, padding: "2px 0" }}>
                         <div style={{ flex: 1 }}>Month : <span style={dotted}>{monthStr}</span></div>
@@ -1211,7 +1211,7 @@ function ParentFeesSummary({ scopedPending, scopedRecent, child, openReceipt, on
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 13, fontWeight: 500 }}>{child.name}</div>
-              <div style={{ fontSize: 11, color: "var(--ink-3)" }}>{child.cls} · {child.id}</div>
+              <div style={{ fontSize: 11, color: "var(--ink-3)" }}>{formatClassLabel(child.cls)} · {child.id}</div>
             </div>
           </div>
         )}
@@ -1302,7 +1302,7 @@ function PayOnlineModal({ order, busy, onClose, onConfirm }) {
           <div style={{ background: "var(--bg-2)", padding: 16, borderRadius: 10, textAlign: "center" }}>
             <div style={{ fontSize: 11, color: "var(--ink-4)", textTransform: "uppercase", letterSpacing: 0.5 }}>Amount</div>
             <div style={{ fontSize: 28, fontWeight: 600, color: "var(--ink)" }}>₹{order.amount.toLocaleString("en-IN")}</div>
-            <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 4 }}>For {order.studentName} · {order.cls}</div>
+            <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 4 }}>For {order.studentName} · {formatClassLabel(order.cls)}</div>
           </div>
           <div style={{ fontSize: 11.5, color: "var(--ink-3)", lineHeight: 1.5 }}>
             In production this opens the Razorpay / PhonePe checkout. For this demo, click <b>Confirm payment</b> to simulate
@@ -1351,7 +1351,7 @@ function EditFeeAmountModal({ fee, onClose, onSave }) {
         <div className="card-head">
           <div>
             <div className="card-title">Edit fee amount</div>
-            <div className="card-sub">{fee.name} · {fee.cls} · {fee.id}</div>
+            <div className="card-sub">{fee.name} · {formatClassLabel(fee.cls)} · {fee.id}</div>
           </div>
           <button type="button" className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
         </div>
@@ -1417,7 +1417,7 @@ function AddFeeItemModal({ students, onClose, onSave }) {
     const needle = q.trim().toLowerCase();
     if (!needle) return students;
     return students.filter((s) =>
-      `${s.name} ${s.id} ${s.cls}`.toLowerCase().includes(needle)
+      `${s.name} ${s.id} ${s.cls} ${formatClassLabel(s.cls)}`.toLowerCase().includes(needle)
     );
   }, [students, q]);
 
@@ -1510,7 +1510,7 @@ function AddFeeItemModal({ students, onClose, onSave }) {
                         {s.name}
                       </span>
                       <span style={{ display: "block", fontSize: 10.5, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>
-                        {s.id} · Class {s.cls}
+                        {s.id} · {formatClassLabel(s.cls)}
                       </span>
                     </span>
                     {active && <Icon name="check" size={13} />}
@@ -1564,7 +1564,7 @@ function AddFeeItemModal({ students, onClose, onSave }) {
 
           {selectedStudent && (
             <div style={{ fontSize: 11.5, color: "var(--ink-3)", padding: "8px 10px", background: "var(--bg-2)", borderRadius: 7 }}>
-              Adding <b>{feeTypeLabel(feeType)}</b> of <span className="mono">₹{num.toLocaleString("en-IN")}</span> for <b>{selectedStudent.name}</b> ({selectedStudent.cls}).
+              Adding <b>{feeTypeLabel(feeType)}</b> of <span className="mono">₹{num.toLocaleString("en-IN")}</span> for <b>{selectedStudent.name}</b> ({formatClassLabel(selectedStudent.cls)}).
               {" "}If a {feeTypeLabel(feeType)} row already exists for this student, it will be replaced.
             </div>
           )}
@@ -1668,7 +1668,7 @@ function CollectMenu({ items, onPick, onClose }) {
           </span>
           <span style={{ flex: 1, minWidth: 0, textAlign: "left" }}>
             <span style={{ display: "block", fontSize: 13, fontWeight: 500, color: "var(--ink)" }}>{f.name}</span>
-            <span style={{ display: "block", fontSize: 11, color: "var(--ink-3)" }}>{feeTypeLabel(f.feeType)} · {f.cls} · due {f.due}</span>
+            <span style={{ display: "block", fontSize: 11, color: "var(--ink-3)" }}>{feeTypeLabel(f.feeType)} · {formatClassLabel(f.cls)} · due {f.due}</span>
           </span>
           <span className="mono" style={{ fontSize: 12, fontWeight: 500, color: f.overdue ? "var(--bad)" : "var(--ink-2)" }}>
             ₹{f.amount.toLocaleString("en-IN")}
