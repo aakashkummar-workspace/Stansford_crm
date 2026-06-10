@@ -187,7 +187,10 @@ export default function ScreenStudents({ E, refresh, role, session }) {
       });
       if (ok) {
         const loginCount = (json.logins || []).length;
-        flash(`Imported ${json.count} students · ${loginCount} parent logins created`);
+        const feeMsg = typeof json.feesIssued === "number"
+          ? ` · ${json.feesIssued} fees set${json.feesSkipped ? ` (${json.feesSkipped} blank)` : ""}`
+          : "";
+        flash(`Imported ${json.count} students · ${loginCount} parent logins created${feeMsg}`);
         await refresh?.();
         setShowImport(false);
         // Surface the generated credentials in a modal so the admin can
@@ -1340,7 +1343,15 @@ function ImportModal({ onClose, onFile }) {
   // dismissal would lose the progress signal + the parent-logins CSV.
   const [phase, setPhase] = useState("idle");
   const inputRef = useRef(null);
-  const sampleCsv = "Name,Class,Parent,Transport\nIsha Sharma,3-A,+91 9876543210,R1\nKabir Khan,5-B,+91 9988776655,—\n";
+  // Sample CSV admins can download as a starting point. Includes every
+  // column the importer actually reads, with realistic examples:
+  //   - Class: Roman, numeric+section, and pre-school formats all work
+  //   - Fees:  per-student amounts; leave blank to skip fee creation
+  const sampleCsv =
+    "Name,Class,Parent,Transport,Fees\n" +
+    "Isha Sharma,3-A,+91 9876543210,R1,18000\n" +
+    "Kabir Khan,V,+91 9988776655,—,22000\n" +
+    "Aarav Patel,PRE-MONT,+91 9000011111,Yes,12000\n";
   const downloadSample = () => {
     const blob = new Blob([sampleCsv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -1349,7 +1360,7 @@ function ImportModal({ onClose, onFile }) {
     URL.revokeObjectURL(url);
   };
   return (
-    <ModalShell title="Import students" sub="Bulk-add via CSV or Excel · headers required (Name, Class, Parent, Transport)" onClose={onClose} width={520}>
+    <ModalShell title="Import students" sub="Bulk-add via CSV or Excel · columns: Name, Class, Parent, Transport, Fees (Fees optional)" onClose={onClose} width={520}>
       <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div
           onClick={() => inputRef.current?.click()}

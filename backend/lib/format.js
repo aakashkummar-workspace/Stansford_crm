@@ -14,6 +14,10 @@ export const moneyK = (n) => {
 // Reports breakdown. Both `key` (slug, used as the storage value) and `label`
 // (display text) are exported so server validation and UI rendering agree.
 export const FEE_TYPES = [
+  // 'annual' is the bucket the bulk Excel import drops every student's
+  // per-row Fees amount into — schools that quote a single yearly tuition
+  // number (rather than splitting into Term I/II/III) live here.
+  { key: "annual",      label: "Annual Fees" },
   { key: "application", label: "Application Fees" },
   { key: "kit",         label: "Kit Fees" },
   { key: "eca",         label: "ECA" },

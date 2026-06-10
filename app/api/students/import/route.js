@@ -30,11 +30,20 @@ function parseCsv(text) {
 const monthYear = () =>
   new Date().toLocaleDateString("en-IN", { month: "short", year: "numeric" });
 const newId = () => `STN-${9000 + Math.floor(Math.random() * 999)}`;
-function termFeeFor(cls) {
-  // Use absolute value so MONT/pre-school students (stored as negative n)
-  // still get a sensible fee structure rather than negative amounts.
-  const n = Math.abs(Number(String(cls).split(/(?<=^-?\d+)-/)[0]) || 1);
-  return 14000 + n * 1000;
+
+// Parse a "Fees" cell from the CSV. Accepts plain numbers, currency
+// strings ("₹50,000"), and locale-formatted numbers ("50,000.00").
+// Returns a positive integer, or null when the cell is blank, zero, or
+// not numeric — null tells the import loop to skip pending-fee creation
+// for that student (schools that don't issue a fee yet, scholarship
+// rows that are still pending paperwork, etc. The admin can add the
+// fee later via the Fees screen's "Add fee" button).
+function parseFeeValue(raw) {
+  if (raw == null) return null;
+  const digits = String(raw).replace(/[^\d]/g, "");
+  if (!digits) return null;
+  const n = parseInt(digits, 10);
+  return n > 0 ? n : null;
 }
 
 // Indian schools mix three notations for class levels in roster files:
@@ -115,7 +124,7 @@ export async function POST(req) {
   }
   const header = rows[0].map((h) => h.toLowerCase().trim());
   const idx = (k) => header.findIndex((h) => h.includes(k));
-  const ni = idx("name"), ci = idx("class"), pi = idx("parent"), ti = idx("transport");
+  const ni = idx("name"), ci = idx("class"), pi = idx("parent"), ti = idx("transport"), fi = idx("fee");
   if (ni === -1) {
     return NextResponse.json({ ok: false, error: "CSV needs a Name column" }, { status: 400 });
   }
@@ -127,24 +136,42 @@ export async function POST(req) {
   // returned in the import response (the Students screen surfaces them
   // as a downloadable CSV after the import modal closes).
   const logins = [];
+  let feesIssued = 0;
+  let feesSkipped = 0;
   for (let r = 1; r < rows.length; r++) {
     const cells = rows[r];
     const name = (cells[ni] || "").trim();
     if (!name) continue;
     const cls = parseClassValue(cells[ci]);
+    // Fees column is optional in the CSV. When present + numeric, the
+    // exact amount becomes the student's Annual Fees pending row.
+    // When blank/zero/missing, no pending-fee row is created — admin
+    // can add later via "Add fee" on the Fees screen.
+    const feeAmount = fi !== -1 ? parseFeeValue(cells[fi]) : null;
     const row = {
       id: newId(), name, cls,
       parent: (cells[pi] || "—").trim(),
-      fee: "pending", attendance: 0,
+      // student.fee is the rollup status: "pending" when there's an
+      // outstanding amount, "paid" when fully paid, "—" when no fee
+      // was issued for this student. Match the actual situation so the
+      // Students screen badge is honest.
+      fee: feeAmount ? "pending" : "—", attendance: 0,
       transport: (cells[ti] || "—").trim(),
       joined: monthYear(),
     };
     try {
       await addStudent(row);
-      await addPendingFee({
-        id: row.id, name: row.name, cls: row.cls,
-        amount: termFeeFor(row.cls), due: "in 7 days", overdue: false,
-      });
+      if (feeAmount) {
+        await addPendingFee({
+          id: row.id, name: row.name, cls: row.cls,
+          amount: feeAmount,
+          feeType: "annual",
+          due: "in 7 days", overdue: false,
+        });
+        feesIssued++;
+      } else {
+        feesSkipped++;
+      }
       // Mirror the single-admission flow: each imported student gets a
       // parent login scoped to their own child. Failures here are
       // non-fatal — the student row is already saved, the admin can
@@ -176,8 +203,16 @@ export async function POST(req) {
     await logAudit(
       "Rashmi Iyer",
       "Bulk import",
-      `${created.length} students added · ${logins.length} parent logins issued${errors.length ? ` · ${errors.length} skipped` : ""}`
+      `${created.length} students added · ${logins.length} parent logins issued · ${feesIssued} fees set${feesSkipped ? ` · ${feesSkipped} fee-blank` : ""}${errors.length ? ` · ${errors.length} skipped` : ""}`
     );
   } catch {}
-  return NextResponse.json({ ok: true, count: created.length, students: created, logins, errors });
+  return NextResponse.json({
+    ok: true,
+    count: created.length,
+    students: created,
+    logins,
+    errors,
+    feesIssued,
+    feesSkipped,
+  });
 }
