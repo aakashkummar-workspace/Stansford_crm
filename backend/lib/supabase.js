@@ -22,10 +22,17 @@ export const supabase = supabaseEnabled
   : null;
 
 // Mapping from snake_case columns to camelCase JSON shape used by screens.
+// `transport` + `pickupStop` are the MORNING route. Evening lives in
+// `transportEvening` + `pickupStopEvening` — added in a follow-up
+// schema migration. Older rows where the columns don't exist (or the
+// PostgREST cache hasn't picked them up yet) collapse to null, and the
+// UI treats null as "same as morning" so legacy students still board.
 export const fromStudent = (r) => r && {
   id: r.id, name: r.name, cls: r.cls, parent: r.parent,
   fee: r.fee, attendance: r.attendance, transport: r.transport,
   pickupStop: r.pickup_stop ?? r.pickupStop ?? null,
+  transportEvening: r.transport_evening ?? r.transportEvening ?? null,
+  pickupStopEvening: r.pickup_stop_evening ?? r.pickupStopEvening ?? null,
   joined: r.joined,
   status: r.status ?? "active", archivedAt: r.archived_at ?? null,
 };
@@ -34,6 +41,8 @@ export const toStudent = (r) => ({
   fee: r.fee ?? "pending", attendance: r.attendance ?? 0,
   transport: r.transport ?? "—",
   pickup_stop: r.pickupStop ?? null,
+  transport_evening: r.transportEvening ?? null,
+  pickup_stop_evening: r.pickupStopEvening ?? null,
   joined: r.joined,
   status: r.status ?? "active",
 });

@@ -209,10 +209,12 @@ export async function readAllData() {
       () => safeSelect("exam_marks",           (q) => q.order("recorded_at",{ ascending: false }).limit(5000)),
     ]);
     const stopMap = pickupStopsSafe();
+    const eveningStopMap = pickupStopsEveningSafe();
     const allStudents = s.map((row) => {
       const out = fromStudent(row);
-      // Overlay any pickup-stop assignment we have in the file side-store.
+      // Overlay any pickup-stop assignments we have in the file side-stores.
       if (out && !out.pickupStop && stopMap[out.id]) out.pickupStop = stopMap[out.id];
+      if (out && !out.pickupStopEvening && eveningStopMap[out.id]) out.pickupStopEvening = eveningStopMap[out.id];
       return out;
     });
     const liveClasses = cls.map((c) => ({
@@ -387,6 +389,10 @@ export async function readAllData() {
       // Per-class syllabus rows. Read via listSyllabus which itself unions
       // Supabase + file store, so a fresh install (no migration) still works.
       syllabus: await listSyllabus().catch(() => safeArr("syllabus")),
+      // Map studentId → snapshot of the previous fee state for any edit
+      // made in the last hour. The Students FeeCell uses this to surface
+      // an "Undo" button only while the snapshot is still valid.
+      feeEditSnapshots: listFeeEditSnapshots(),
     };
   }
   const db = fileRead();
@@ -403,6 +409,7 @@ export async function readAllData() {
     timetable: Array.isArray(db.timetable) ? db.timetable : [],
     syllabus: Array.isArray(db.syllabus) ? db.syllabus : [],
     appSettings: db.appSettings && typeof db.appSettings === "object" ? db.appSettings : {},
+    feeEditSnapshots: listFeeEditSnapshots(),
   };
 }
 
@@ -511,18 +518,22 @@ export async function addStudent(row) {
     const payload = toStudent(row);
     let ins = await supabase.from("students").insert(payload).select().single();
     // PostgREST schema cache can lag for newly-added columns. If the cache
-    // doesn't know about `status` / `archived_at`, retry with those fields
-    // stripped so the admission still succeeds.
-    if (ins.error && /status|archived_at|pickup_stop/.test(ins.error.message)) {
-      const { status, archived_at, pickup_stop, ...legacy } = payload;
+    // doesn't know about a column, retry with the unknown fields stripped
+    // so the admission still succeeds. Anything stripped goes to a file
+    // side-store so the data isn't lost.
+    if (ins.error && /status|archived_at|pickup_stop|transport_evening/.test(ins.error.message)) {
+      const { status, archived_at, pickup_stop, transport_evening, pickup_stop_evening, ...legacy } = payload;
       ins = await supabase.from("students").insert(legacy).select().single();
     }
     if (ins.error) throw new Error(ins.error.message);
-    // If we stripped pickup_stop, persist it locally so the per-stop boarding
-    // view still works. The file is keyed by student id; readAllData merges.
+    // Persist the stripped fields locally so per-stop boarding + evening
+    // route logic continues to work without the schema migration.
     if (payload.pickup_stop) savePickupStop(payload.id, payload.pickup_stop);
+    if (payload.pickup_stop_evening) savePickupStopEvening(payload.id, payload.pickup_stop_evening);
     const out = fromStudent(ins.data);
     if (payload.pickup_stop && !out.pickupStop) out.pickupStop = payload.pickup_stop;
+    if (payload.pickup_stop_evening && !out.pickupStopEvening) out.pickupStopEvening = payload.pickup_stop_evening;
+    if (payload.transport_evening && !out.transportEvening) out.transportEvening = payload.transport_evening;
     return out;
   }
   const db = fileRead();
@@ -592,16 +603,24 @@ async function ensureClassSection(clsKey) {
 export async function updateStudent(id, patch) {
   if (!id) return null;
   const fields = {};
-  if (typeof patch.name === "string")      fields.name      = patch.name;
-  if (typeof patch.cls === "string")       fields.cls       = patch.cls;
-  if (typeof patch.parent === "string")    fields.parent    = patch.parent;
-  if (typeof patch.transport === "string") fields.transport = patch.transport || "—";
-  // pickupStop is handled separately via the side-store so it always sticks.
+  if (typeof patch.name === "string")             fields.name      = patch.name;
+  if (typeof patch.cls === "string")              fields.cls       = patch.cls;
+  if (typeof patch.parent === "string")           fields.parent    = patch.parent;
+  if (typeof patch.transport === "string")        fields.transport = patch.transport || "—";
+  if (typeof patch.transportEvening === "string") fields.transport_evening = patch.transportEvening || null;
+  // Stops are handled separately via the side-stores so they always stick
+  // even when the matching columns don't exist on the Supabase table.
   const wantsStop = "pickupStop" in patch;
+  const wantsEveningStop = "pickupStopEvening" in patch;
 
   if (supabaseEnabled) {
     if (Object.keys(fields).length > 0) {
-      const upd = await supabase.from("students").update(fields).eq("id", id);
+      let upd = await supabase.from("students").update(fields).eq("id", id);
+      // If transport_evening column doesn't exist yet, retry without it.
+      if (upd.error && /transport_evening/.test(upd.error.message)) {
+        const { transport_evening, ...legacy } = fields;
+        upd = await supabase.from("students").update(legacy).eq("id", id);
+      }
       if (upd.error) {
         console.warn(`[db] student update fell back: ${upd.error.message}`);
       }
@@ -615,10 +634,15 @@ export async function updateStudent(id, patch) {
       }
     }
     if (wantsStop) {
-      // Try the column first; if cache is missing it, drop to side-store.
       const upd2 = await supabase.from("students").update({ pickup_stop: patch.pickupStop || null }).eq("id", id);
       if (upd2.error) {
         savePickupStop(id, patch.pickupStop);
+      }
+    }
+    if (wantsEveningStop) {
+      const upd3 = await supabase.from("students").update({ pickup_stop_evening: patch.pickupStopEvening || null }).eq("id", id);
+      if (upd3.error) {
+        savePickupStopEvening(id, patch.pickupStopEvening);
       }
     }
     // Return the merged record (read-back through the fromStudent mapper +
@@ -627,6 +651,8 @@ export async function updateStudent(id, patch) {
     if (sel.data) {
       const out = fromStudent(sel.data);
       if (wantsStop && !out.pickupStop) out.pickupStop = patch.pickupStop || null;
+      if (wantsEveningStop && !out.pickupStopEvening) out.pickupStopEvening = patch.pickupStopEvening || null;
+      if (fields.transport_evening && !out.transportEvening) out.transportEvening = fields.transport_evening;
       return out;
     }
   }
@@ -635,7 +661,9 @@ export async function updateStudent(id, patch) {
   const idx = (db.addedStudents || []).findIndex((s) => s.id === id);
   if (idx === -1) return null;
   const merged = { ...db.addedStudents[idx], ...fields };
+  if (fields.transport_evening !== undefined) merged.transportEvening = fields.transport_evening;
   if (wantsStop) merged.pickupStop = patch.pickupStop || null;
+  if (wantsEveningStop) merged.pickupStopEvening = patch.pickupStopEvening || null;
   db.addedStudents[idx] = merged;
   // Mirror name/cls onto any pending fees so list views stay consistent.
   if (fields.name || fields.cls) {
@@ -645,6 +673,7 @@ export async function updateStudent(id, patch) {
   }
   fileWrite(db);
   if (wantsStop) savePickupStop(id, patch.pickupStop);
+  if (wantsEveningStop) savePickupStopEvening(id, patch.pickupStopEvening);
   return merged;
 }
 
@@ -705,6 +734,63 @@ export async function restoreStudent(id) {
 // Backwards-compat alias so any older code paths that still call removeStudent
 // archive instead of cascade-deleting.
 export const removeStudent = archiveStudent;
+
+// ---------- fee edit snapshots (for single-step undo) ----------
+// One-hour transient store mapping studentId → { previousPending,
+// addedReceiptIds, editedAt, editedBy }. Backed by data/fee-edit-snapshots.json
+// (file-only, single-VPS deployment — no Supabase round-trip needed for a
+// store that auto-prunes within an hour). Only the MOST RECENT edit per
+// student is undoable; a fresh edit overwrites the prior snapshot.
+const SNAPSHOT_TTL_MS = 60 * 60 * 1000; // 1 hour
+const SNAPSHOT_PATH = path.join(DATA_DIR, "fee-edit-snapshots.json");
+
+function readFeeEditSnapshotsRaw() {
+  try {
+    if (!fs.existsSync(SNAPSHOT_PATH)) return {};
+    const raw = fs.readFileSync(SNAPSHOT_PATH, "utf8");
+    return JSON.parse(raw) || {};
+  } catch { return {}; }
+}
+function writeFeeEditSnapshotsRaw(obj) {
+  try {
+    fileEnsure();
+    fs.writeFileSync(SNAPSHOT_PATH, JSON.stringify(obj, null, 2));
+  } catch (e) {
+    console.warn(`[db] fee-edit-snapshots write failed: ${e.message}`);
+  }
+}
+function pruneExpiredSnapshots(snapshots) {
+  const now = Date.now();
+  let changed = false;
+  for (const id of Object.keys(snapshots)) {
+    const editedAt = Date.parse(snapshots[id]?.editedAt || "");
+    if (!editedAt || (now - editedAt) > SNAPSHOT_TTL_MS) {
+      delete snapshots[id];
+      changed = true;
+    }
+  }
+  return changed;
+}
+export function listFeeEditSnapshots() {
+  // Used by /api/data to ship the live-undoable set to the client so the
+  // FeeCell can render an Undo button only where one is actually valid.
+  const snapshots = readFeeEditSnapshotsRaw();
+  if (pruneExpiredSnapshots(snapshots)) writeFeeEditSnapshotsRaw(snapshots);
+  return snapshots;
+}
+function setFeeEditSnapshot(studentId, snapshot) {
+  const snapshots = readFeeEditSnapshotsRaw();
+  pruneExpiredSnapshots(snapshots);
+  snapshots[studentId] = snapshot;
+  writeFeeEditSnapshotsRaw(snapshots);
+}
+function clearFeeEditSnapshot(studentId) {
+  const snapshots = readFeeEditSnapshotsRaw();
+  if (snapshots[studentId]) {
+    delete snapshots[studentId];
+    writeFeeEditSnapshotsRaw(snapshots);
+  }
+}
 
 // ---------- fees ----------
 // Default fee type assigned when callers don't specify one — keeps behavior
@@ -845,6 +931,177 @@ export async function setPendingFeeAmount(studentId, amount) {
   db.addedStudents[sIdx] = { ...student, fee: nextStatus };
   fileWrite(db);
   return { fee: nextStatus, amount: amt };
+}
+
+// Edit a student's annual fee — supports raising the total AND/OR
+// recording that the parent has already paid some portion of it
+// (offline-cash, retroactive entry, etc.). Both numbers are
+// INCREASE-ONLY at the storage layer:
+//
+//   newTotal >= currentTotal   (currentTotal = currentPending + currentPaid)
+//   newPaid  >= currentPaid
+//
+// A successful edit takes a snapshot (previousPending + receiptIds added)
+// so the admin can undo within one hour via undoLastFeeEdit(). Any
+// receipts created here use feeType="annual" and method="offline-entry"
+// so they stand out from Collect-fee receipts in the ledger.
+//
+// Returns { previousTotal, previousPaid, newTotal, newPaid, newPending,
+// addedReceiptIds, undoableUntil }.
+export async function editStudentFee({ studentId, newTotal, newPaid, actor = "Staff" }) {
+  if (!studentId) throw new Error("studentId required");
+  const tgt = Math.max(0, Math.floor(Number(newTotal) || 0));
+  const tgtPaid = Math.max(0, Math.floor(Number(newPaid) || 0));
+  if (tgtPaid > tgt) {
+    throw new Error(`Already-paid (₹${tgtPaid}) cannot exceed total (₹${tgt})`);
+  }
+
+  // Read current annual-fee state. The annual fee row's id === studentId
+  // (set this way at import in app/api/students/import/route.js). Receipts
+  // for the annual fee are matched by student_id + feeType="annual".
+  let currentPending = 0;
+  let currentPaid = 0;
+  let receipts = []; // raw receipt rows we'll need to filter for undo math
+
+  if (supabaseEnabled) {
+    const pSel = await supabase.from("pending_fees").select("*").eq("id", studentId).maybeSingle();
+    if (pSel.data) currentPending = Number(pSel.data.amount) || 0;
+    const rSel = await supabase.from("recent_fees")
+      .select("*")
+      .or(`student_id.eq.${studentId},id.eq.${studentId}`);
+    receipts = (rSel.data || []).filter((r) => (r.fee_type || r.feeType || "annual") === "annual");
+    currentPaid = receipts.reduce((a, r) => a + (Number(r.amount) || 0), 0);
+  } else {
+    const db = fileRead();
+    const f = (db.pendingFees || []).find((x) => x.id === studentId);
+    if (f) currentPending = Number(f.amount) || 0;
+    receipts = (db.recentFees || []).filter((r) =>
+      ((r.studentId || r.student_id) === studentId)
+      && ((r.feeType || r.fee_type || "annual") === "annual")
+    );
+    currentPaid = receipts.reduce((a, r) => a + (Number(r.amount) || 0), 0);
+  }
+
+  const currentTotal = currentPending + currentPaid;
+  if (tgt < currentTotal) {
+    throw new Error(`Cannot reduce total fees. Current total is ₹${currentTotal.toLocaleString("en-IN")}; you tried to set ₹${tgt.toLocaleString("en-IN")}.`);
+  }
+  if (tgtPaid < currentPaid) {
+    throw new Error(`Cannot reduce already-paid. Currently paid ₹${currentPaid.toLocaleString("en-IN")}; you tried to set ₹${tgtPaid.toLocaleString("en-IN")}.`);
+  }
+
+  const paidDelta = tgtPaid - currentPaid;
+  const newPending = tgt - tgtPaid;
+  const addedReceiptIds = [];
+
+  // 1) Record the extra paid amount as a receipt so it lands in the ledger
+  //    and the Reports / Money screens see it. Skipped when paidDelta = 0.
+  if (paidDelta > 0) {
+    const receiptId = `RCP-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 999)}`;
+    const paidAt = new Date().toISOString();
+    // Look up student for name + class on the receipt row.
+    let student = null;
+    if (supabaseEnabled) {
+      const sSel = await supabase.from("students").select("*").eq("id", studentId).maybeSingle();
+      if (sSel.data) student = fromStudent(sSel.data);
+    }
+    if (!student) {
+      const db = fileRead();
+      student = (db.addedStudents || []).find((s) => s.id === studentId);
+    }
+    if (!student) throw new Error("Student not found");
+
+    if (supabaseEnabled) {
+      const ins = await supabase.from("recent_fees").insert({
+        id: receiptId, student_id: studentId,
+        name: student.name, cls: student.cls, amount: paidDelta,
+        method: "offline-entry", time: "just now", paid_at: paidAt,
+        fee_type: "annual", status: "partial",
+      });
+      // PostgREST cache lag → fall back to file
+      if (ins.error) {
+        const db = fileRead();
+        if (!Array.isArray(db.recentFees)) db.recentFees = [];
+        db.recentFees.unshift({
+          id: receiptId, studentId, student_id: studentId,
+          name: student.name, cls: student.cls, amount: paidDelta,
+          method: "offline-entry", time: "just now", paidAt,
+          feeType: "annual", status: "partial",
+        });
+        fileWrite(db);
+      }
+    } else {
+      const db = fileRead();
+      if (!Array.isArray(db.recentFees)) db.recentFees = [];
+      db.recentFees.unshift({
+        id: receiptId, studentId, student_id: studentId,
+        name: student.name, cls: student.cls, amount: paidDelta,
+        method: "offline-entry", time: "just now", paidAt,
+        feeType: "annual", status: "partial",
+      });
+      fileWrite(db);
+    }
+    addedReceiptIds.push(receiptId);
+  }
+
+  // 2) Set the outstanding pending row to newPending. setPendingFeeAmount
+  //    handles "create when missing, delete when zero" so a fully-paid
+  //    student's row disappears the same way a Collect-fee clearance does.
+  await setPendingFeeAmount(studentId, newPending);
+
+  // 3) Snapshot for one-step undo (only the most recent edit per student).
+  const editedAt = new Date().toISOString();
+  setFeeEditSnapshot(studentId, {
+    previousPending: currentPending,
+    addedReceiptIds,
+    editedAt,
+    editedBy: actor,
+    previousTotal: currentTotal,
+    previousPaid: currentPaid,
+  });
+
+  return {
+    previousTotal: currentTotal, previousPaid: currentPaid,
+    newTotal: tgt, newPaid: tgtPaid, newPending,
+    addedReceiptIds,
+    undoableUntil: new Date(Date.now() + SNAPSHOT_TTL_MS).toISOString(),
+  };
+}
+
+// Undo the most recent editStudentFee call for a student. Only valid for
+// one hour after the edit. Returns the restored state, or null if no
+// snapshot exists (already undone, never edited, or TTL expired).
+export async function undoLastFeeEdit({ studentId }) {
+  if (!studentId) throw new Error("studentId required");
+  const snapshots = readFeeEditSnapshotsRaw();
+  pruneExpiredSnapshots(snapshots);
+  const snap = snapshots[studentId];
+  if (!snap) return null;
+
+  // Delete any receipts the edit added. Try Supabase first, fall through
+  // to file store if the receipt actually lived there (cache-lag path).
+  for (const rid of (snap.addedReceiptIds || [])) {
+    if (supabaseEnabled) {
+      try { await supabase.from("recent_fees").delete().eq("id", rid); } catch {}
+    }
+    const db = fileRead();
+    if (Array.isArray(db.recentFees)) {
+      const before = db.recentFees.length;
+      db.recentFees = db.recentFees.filter((r) => r.id !== rid);
+      if (db.recentFees.length !== before) fileWrite(db);
+    }
+  }
+
+  // Restore the pending_fees outstanding to whatever it was before the edit.
+  await setPendingFeeAmount(studentId, snap.previousPending);
+
+  clearFeeEditSnapshot(studentId);
+
+  return {
+    restoredPending: snap.previousPending,
+    restoredPaid: snap.previousPaid,
+    restoredTotal: snap.previousTotal,
+  };
 }
 
 // Pay a pending fee — supports partial payments. Pass `amount` to take just
@@ -1732,11 +1989,23 @@ function fileTemplatesSafe() {
 // students table doesn't yet have a pickup_stop column — we still want the
 // per-stop boarding roster to work, so we keep the assignment in the file
 // store and merge it back in readAllData.
+//
+// `pickupStops` carries the morning stop; the evening stop lives in
+// `pickupStopsEvening`. Two flat maps (rather than a nested {morning,
+// evening}) means existing morning-only callers don't break and the
+// migration is purely additive.
 function savePickupStop(studentId, stopName) {
   if (!studentId) return;
   const db = fileRead();
   if (!db.pickupStops || typeof db.pickupStops !== "object") db.pickupStops = {};
   db.pickupStops[studentId] = stopName || null;
+  fileWrite(db);
+}
+function savePickupStopEvening(studentId, stopName) {
+  if (!studentId) return;
+  const db = fileRead();
+  if (!db.pickupStopsEvening || typeof db.pickupStopsEvening !== "object") db.pickupStopsEvening = {};
+  db.pickupStopsEvening[studentId] = stopName || null;
   fileWrite(db);
 }
 function pickupStopsSafe() {
@@ -1745,6 +2014,14 @@ function pickupStopsSafe() {
     const raw = fs.readFileSync(DB_PATH, "utf8");
     const data = JSON.parse(raw);
     return (data.pickupStops && typeof data.pickupStops === "object") ? data.pickupStops : {};
+  } catch { return {}; }
+}
+function pickupStopsEveningSafe() {
+  try {
+    if (!fs.existsSync(DB_PATH)) return {};
+    const raw = fs.readFileSync(DB_PATH, "utf8");
+    const data = JSON.parse(raw);
+    return (data.pickupStopsEvening && typeof data.pickupStopsEvening === "object") ? data.pickupStopsEvening : {};
   } catch { return {}; }
 }
 

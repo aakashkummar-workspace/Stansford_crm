@@ -60,6 +60,24 @@ export default function ScreenStudents({ E, refresh, role, session }) {
   const archivedRoster = (E.ARCHIVED_STUDENTS || []).map((s) => ({ ...s, __added: true, __status: "archived" }));
   const roster = view === "archived" ? archivedRoster : activeRoster;
 
+  // Undoable fee edits — map of studentId → snapshot. Populated by
+  // /api/data; the API serves only the unexpired ones (entries TTL at
+  // 1 hour). Used by FeeCell to decide whether to render the Undo button.
+  const feeEditSnapshots = E.FEE_EDIT_SNAPSHOTS || {};
+  const undoFeeEdit = async (s) => {
+    const { ok, json } = await safeFetch("/api/fees/undo", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: s.id }),
+    });
+    if (ok) {
+      flash(`Reverted ${s.name}'s fees · total ₹${(json.restoredTotal || 0).toLocaleString("en-IN")}`);
+      await refresh?.();
+    } else {
+      flash(json.error || "Undo failed", "bad");
+    }
+  };
+
   // Per-student fee summary: outstanding + paid + total. The pending row's
   // id === student id (annual fee created at import). Receipts in
   // recent_fees link back via studentId / student_id. We sum across all
@@ -607,9 +625,13 @@ export default function ScreenStudents({ E, refresh, role, session }) {
                       summary={summaryFor(s.id)}
                       canEdit={canEdit && s.__status !== "archived"}
                       onEdit={() => setFeeEditFor(s)}
+                      undoable={Boolean(feeEditSnapshots[s.id])}
+                      onUndo={() => undoFeeEdit(s)}
                     />
                   </td>
-                  <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{s.transport}</td>
+                  <td style={{ fontSize: 12, color: "var(--ink-3)" }}>
+                    <TransportCell student={s} />
+                  </td>
                   <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{s.joined}</td>
                   <td>
                     <button
@@ -706,16 +728,14 @@ export default function ScreenStudents({ E, refresh, role, session }) {
           student={feeEditFor}
           summary={summaryFor(feeEditFor.id)}
           onClose={() => setFeeEditFor(null)}
-          onSubmit={async (newTotal) => {
-            const { paid } = summaryFor(feeEditFor.id);
-            const newOutstanding = newTotal - paid;
-            const { ok, json } = await safeFetch("/api/fees/amount", {
-              method: "PATCH",
+          onSubmit={async ({ newTotal, newPaid }) => {
+            const { ok, json } = await safeFetch("/api/fees/edit", {
+              method: "POST",
               headers: { "content-type": "application/json" },
-              body: JSON.stringify({ id: feeEditFor.id, amount: newOutstanding }),
+              body: JSON.stringify({ id: feeEditFor.id, total: newTotal, paid: newPaid }),
             });
             if (ok) {
-              flash(`Updated ${feeEditFor.name}'s fees to ₹${newTotal.toLocaleString("en-IN")}`);
+              flash(`Updated ${feeEditFor.name}'s fees · total ₹${newTotal.toLocaleString("en-IN")} · paid ₹${newPaid.toLocaleString("en-IN")} · undo available for 1 hour`);
               await refresh?.();
               setFeeEditFor(null);
             } else {
@@ -728,6 +748,8 @@ export default function ScreenStudents({ E, refresh, role, session }) {
         <EditStudentModal
           student={editingOf}
           classes={E.CLASSES || []}
+          routes={E.ROUTES || []}
+          students={E.ADDED_STUDENTS || []}
           onClose={() => setEditingOf(null)}
           onSubmit={submitEdit}
         />
@@ -761,72 +783,95 @@ function Toast({ toast }) {
 
 // Render the fee cell in the Students table. Shows the outstanding amount
 // (big), with a small breakdown line "₹X paid of ₹Y" if any payments have
-// landed. Click-to-edit when the caller passes canEdit + onEdit — the
-// API enforces increase-only so a slip on the modal can't reduce the
-// outstanding accidentally.
-function FeeCell({ student, summary, canEdit, onEdit }) {
+// landed. Click-to-edit when the caller passes canEdit + onEdit. When a
+// recent (unexpired) snapshot exists for this student, an Undo affordance
+// renders to the right — clicking reverses the last fee edit. Both the
+// modal and the API enforce increase-only so the Undo button is the only
+// way to legitimately shrink fees, and only within the 1-hour window.
+function FeeCell({ student, summary, canEdit, onEdit, undoable, onUndo }) {
   const { outstanding, paid } = summary;
   const total = outstanding + paid;
   const fmt = (n) => "₹" + Number(n).toLocaleString("en-IN");
   const status = total === 0 ? "—" : outstanding === 0 ? "paid" : paid > 0 ? "partial" : "pending";
   const tone = status === "paid" ? "var(--ok)" : status === "partial" ? "var(--warn)" : status === "pending" ? "var(--warn)" : "var(--ink-4)";
 
-  if (total === 0) {
+  if (total === 0 && !undoable) {
     return (
       <span style={{ fontSize: 12, color: "var(--ink-4)" }}>—</span>
     );
   }
 
   return (
-    <button
-      type="button"
-      onClick={canEdit ? onEdit : undefined}
-      disabled={!canEdit}
-      title={canEdit ? "Click to edit · fees can only be increased" : undefined}
-      style={{
-        background: "transparent", border: 0, padding: 0,
-        cursor: canEdit ? "pointer" : "default",
-        textAlign: "left", display: "inline-flex", flexDirection: "column", gap: 1,
-        color: "var(--ink)",
-      }}
-    >
-      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-        <span style={{ fontSize: 12.5, fontWeight: 500, fontFamily: "var(--font-mono)" }}>
-          {fmt(outstanding)}
+    <div style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+      <button
+        type="button"
+        onClick={canEdit ? onEdit : undefined}
+        disabled={!canEdit}
+        title={canEdit ? "Click to edit · fees can only be increased" : undefined}
+        style={{
+          background: "transparent", border: 0, padding: 0,
+          cursor: canEdit ? "pointer" : "default",
+          textAlign: "left", display: "inline-flex", flexDirection: "column", gap: 1,
+          color: "var(--ink)",
+        }}
+      >
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontSize: 12.5, fontWeight: 500, fontFamily: "var(--font-mono)" }}>
+            {fmt(outstanding)}
+          </span>
+          <span style={{
+            height: 16, padding: "0 6px",
+            display: "inline-flex", alignItems: "center",
+            fontSize: 9.5, fontWeight: 500,
+            color: tone, background: "transparent",
+            border: `1px solid ${tone}`,
+            borderRadius: 999,
+            textTransform: "uppercase", letterSpacing: 0.4,
+          }}>
+            {status === "paid" ? "Paid" : status === "partial" ? "Partial" : "Due"}
+          </span>
+          {canEdit && (
+            <Icon name="pencil" size={10} style={{ color: "var(--ink-4)" }} />
+          )}
         </span>
-        <span style={{
-          height: 16, padding: "0 6px",
-          display: "inline-flex", alignItems: "center",
-          fontSize: 9.5, fontWeight: 500,
-          color: tone, background: "transparent",
-          border: `1px solid ${tone}`,
-          borderRadius: 999,
-          textTransform: "uppercase", letterSpacing: 0.4,
-        }}>
-          {status === "paid" ? "Paid" : status === "partial" ? "Partial" : "Due"}
-        </span>
-        {canEdit && (
-          <Icon name="pencil" size={10} style={{ color: "var(--ink-4)" }} />
+        {paid > 0 && (
+          <span style={{ fontSize: 10.5, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>
+            {fmt(paid)} paid of {fmt(total)}
+          </span>
         )}
-      </span>
-      {paid > 0 && (
-        <span style={{ fontSize: 10.5, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>
-          {fmt(paid)} paid of {fmt(total)}
-        </span>
+      </button>
+      {undoable && canEdit && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onUndo?.(); }}
+          title="Undo the last fee edit · available for 1 hour after the change"
+          style={{
+            height: 22, padding: "0 8px",
+            display: "inline-flex", alignItems: "center", gap: 4,
+            fontSize: 10.5, fontWeight: 500,
+            color: "var(--accent-2)", background: "var(--accent-soft)",
+            border: "1px solid var(--accent)", borderRadius: 6,
+            cursor: "pointer",
+          }}
+        >
+          <Icon name="refresh" size={10} />Undo
+        </button>
       )}
-    </button>
+    </div>
   );
 }
 
-// Edit the student's TOTAL annual fee. Floor = current total — the modal
-// blocks reductions in the UI, and the API rejects them server-side too.
-// To raise the fee from ₹25,710 to ₹27,500: type "27500" and save. The
-// difference (₹1,790) gets added to the outstanding pending row; any
-// previously-paid receipts stay as-is.
+// Edit a student's annual fee. Two inputs:
+//   - Total fees: must be >= current total. Increase-only.
+//   - Already paid: must be >= currently-recorded paid. Increase-only.
+// Outstanding is derived (total − paid). The modal blocks shrinking
+// either number, the API also rejects it server-side, and a one-hour
+// undo is available via the FeeCell once an edit lands.
 function EditFeeModal({ student, summary, onClose, onSubmit }) {
   const { outstanding, paid } = summary;
   const currentTotal = outstanding + paid;
-  const [value, setValue] = useState(String(currentTotal));
+  const [totalStr, setTotalStr] = useState(String(currentTotal));
+  const [paidStr,  setPaidStr]  = useState(String(paid));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -837,23 +882,35 @@ function EditFeeModal({ student, summary, onClose, onSubmit }) {
   }, [onClose]);
 
   const fmt = (n) => "₹" + Number(n).toLocaleString("en-IN");
-  const parsed = (() => {
-    const digits = String(value).replace(/[^\d]/g, "");
-    if (!digits) return null;
+  const parsePositive = (s, { allowZero = false } = {}) => {
+    const digits = String(s).replace(/[^\d]/g, "");
+    if (!digits && !allowZero) return null;
+    if (!digits) return 0;
     const n = parseInt(digits, 10);
-    return Number.isFinite(n) && n > 0 ? n : null;
-  })();
-  const isReduction = parsed != null && parsed < currentTotal;
-  const isSame      = parsed != null && parsed === currentTotal;
-  const canSubmit   = parsed != null && parsed > currentTotal && !busy;
-  const delta = parsed != null ? parsed - currentTotal : 0;
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  };
+  const newTotal = parsePositive(totalStr, { allowZero: true });
+  const newPaid  = parsePositive(paidStr,  { allowZero: true });
+
+  const totalReduced = newTotal != null && newTotal < currentTotal;
+  const paidReduced  = newPaid  != null && newPaid  < paid;
+  const paidExceedsTotal = newTotal != null && newPaid != null && newPaid > newTotal;
+  const nothingChanged = newTotal === currentTotal && newPaid === paid;
+  const valid =
+    newTotal != null && newPaid != null
+    && !totalReduced && !paidReduced && !paidExceedsTotal && !nothingChanged;
+  const canSubmit = valid && !busy;
+
+  const totalDelta = (newTotal ?? currentTotal) - currentTotal;
+  const paidDelta  = (newPaid  ?? paid) - paid;
+  const projectedOutstanding = (newTotal ?? currentTotal) - (newPaid ?? paid);
 
   const submit = async (e) => {
     e?.preventDefault();
     if (!canSubmit) return;
     setBusy(true); setErr("");
     try {
-      await onSubmit(parsed);
+      await onSubmit({ newTotal, newPaid });
     } catch (ex) {
       setErr(ex?.message || "Update failed");
       setBusy(false);
@@ -868,11 +925,11 @@ function EditFeeModal({ student, summary, onClose, onSubmit }) {
         display: "grid", placeItems: "center", zIndex: 250, padding: 16,
       }}
     >
-      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 460 }}>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 480 }}>
         <div className="card-head">
           <div>
             <div className="card-title">Edit fees · {student.name}</div>
-            <div className="card-sub">{student.id} · fees can only be increased</div>
+            <div className="card-sub">{student.id} · entries are increase-only · 1-hour undo after save</div>
           </div>
           <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
         </div>
@@ -883,48 +940,79 @@ function EditFeeModal({ student, summary, onClose, onSubmit }) {
             display: "flex", flexDirection: "column", gap: 6, fontSize: 12.5,
           }}>
             <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <span style={{ color: "var(--ink-3)" }}>Already paid</span>
+              <span style={{ color: "var(--ink-3)" }}>Current total</span>
+              <span style={{ fontFamily: "var(--font-mono)", color: "var(--ink)" }}>{fmt(currentTotal)}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: "var(--ink-3)" }}>Recorded as paid</span>
               <span style={{ fontFamily: "var(--font-mono)", color: paid > 0 ? "var(--ok)" : "var(--ink-3)" }}>{fmt(paid)}</span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between" }}>
               <span style={{ color: "var(--ink-3)" }}>Outstanding</span>
               <span style={{ fontFamily: "var(--font-mono)", color: outstanding > 0 ? "var(--warn)" : "var(--ink-3)" }}>{fmt(outstanding)}</span>
             </div>
-            <div style={{ display: "flex", justifyContent: "space-between", paddingTop: 6, borderTop: "1px solid var(--rule-2)" }}>
-              <span style={{ fontWeight: 500, color: "var(--ink)" }}>Current total</span>
-              <span style={{ fontFamily: "var(--font-mono)", fontWeight: 500, color: "var(--ink)" }}>{fmt(currentTotal)}</span>
-            </div>
           </div>
 
-          <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>
-              New total fees (₹)
-            </span>
-            <input
-              className="input"
-              autoFocus
-              inputMode="numeric"
-              value={value}
-              onChange={(e) => setValue(e.target.value.replace(/[^\d]/g, ""))}
-              placeholder={String(currentTotal)}
-              style={isReduction ? { borderColor: "var(--bad)" } : undefined}
-            />
-            {isReduction && (
-              <span style={{ fontSize: 11, color: "var(--bad)" }}>
-                Cannot reduce. The total can only stay the same or go up.
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>
+                Total fees (₹)
               </span>
-            )}
-            {isSame && (
-              <span style={{ fontSize: 11, color: "var(--ink-4)" }}>
-                Same as current total — type a higher number to save.
+              <input
+                className="input"
+                autoFocus
+                inputMode="numeric"
+                value={totalStr}
+                onChange={(e) => setTotalStr(e.target.value.replace(/[^\d]/g, ""))}
+                placeholder={String(currentTotal)}
+                style={totalReduced ? { borderColor: "var(--bad)" } : undefined}
+              />
+              <span style={{ fontSize: 11, color: totalReduced ? "var(--bad)" : "var(--ink-4)" }}>
+                {totalReduced
+                  ? `Cannot reduce. Floor is ${fmt(currentTotal)}.`
+                  : `Floor ${fmt(currentTotal)} · type a higher number to add charges.`}
               </span>
-            )}
-            {delta > 0 && (
-              <span style={{ fontSize: 11, color: "var(--ink-3)" }}>
-                Adds <strong style={{ color: "var(--ink-2)" }}>{fmt(delta)}</strong> to the outstanding. New outstanding will be <strong style={{ color: "var(--warn)" }}>{fmt(outstanding + delta)}</strong>.
+            </label>
+
+            <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>
+                Already paid (₹)
               </span>
-            )}
-          </label>
+              <input
+                className="input"
+                inputMode="numeric"
+                value={paidStr}
+                onChange={(e) => setPaidStr(e.target.value.replace(/[^\d]/g, ""))}
+                placeholder={String(paid)}
+                style={paidReduced || paidExceedsTotal ? { borderColor: "var(--bad)" } : undefined}
+              />
+              <span style={{ fontSize: 11, color: (paidReduced || paidExceedsTotal) ? "var(--bad)" : "var(--ink-4)" }}>
+                {paidReduced
+                  ? `Cannot reduce. Floor is ${fmt(paid)}.`
+                  : paidExceedsTotal
+                    ? "Already paid can't exceed total."
+                    : `Floor ${fmt(paid)} · raise to record offline cash.`}
+              </span>
+            </label>
+          </div>
+
+          {valid && (
+            <div style={{
+              background: "var(--accent-soft)", border: "1px solid var(--accent)",
+              borderRadius: 8, padding: "10px 12px", fontSize: 12, color: "var(--ink-2)",
+              lineHeight: 1.55,
+            }}>
+              {totalDelta > 0 && (
+                <div>↑ Total +{fmt(totalDelta)} added as a new charge.</div>
+              )}
+              {paidDelta > 0 && (
+                <div>✓ Recording ₹{fmt(paidDelta).replace("₹", "")} as paid (method <strong>offline-entry</strong>).</div>
+              )}
+              <div style={{ marginTop: 4, color: "var(--ink-2)", fontWeight: 500 }}>
+                New outstanding: <span style={{ color: projectedOutstanding > 0 ? "var(--warn)" : "var(--ok)", fontFamily: "var(--font-mono)" }}>{fmt(projectedOutstanding)}</span>
+              </div>
+            </div>
+          )}
 
           {err && (
             <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "9px 12px", borderRadius: 7, fontSize: 12 }}>{err}</div>
@@ -933,7 +1021,7 @@ function EditFeeModal({ student, summary, onClose, onSubmit }) {
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
             <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
             <button type="submit" className="btn accent" disabled={!canSubmit}>
-              <Icon name="check" size={13} />{busy ? "Saving…" : "Save new total"}
+              <Icon name="check" size={13} />{busy ? "Saving…" : "Save changes"}
             </button>
           </div>
         </form>
@@ -1072,7 +1160,7 @@ function ModalShell({ title, sub, onClose, children, width = 460 }) {
 
 // Edit an existing student's core details. Mirrors the validation used by the
 // admission form so back-and-forth edits don't smuggle in bad phone numbers.
-function EditStudentModal({ student, classes = [], onClose, onSubmit }) {
+function EditStudentModal({ student, classes = [], routes = [], students = [], onClose, onSubmit }) {
   const classList = classes.length ? classes : [{ n: 1, label: formatClassLabel("1"), sections: [ONLY_SECTION] }];
   const [initialClsN] = (() => {
     const [a] = String(student.cls || "1-A").split("-");
@@ -1088,6 +1176,10 @@ function EditStudentModal({ student, classes = [], onClose, onSubmit }) {
     cls: initialClsN,
     section: ONLY_SECTION,
     phoneDigits: initialPhoneDigits.length === 10 && /^[6-9]/.test(initialPhoneDigits) ? initialPhoneDigits : "",
+    transport: student.transport || "—",
+    pickupStop: student.pickupStop || "",
+    transportEvening: student.transportEvening || "—",
+    pickupStopEvening: student.pickupStopEvening || "",
   });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -1121,6 +1213,10 @@ function EditStudentModal({ student, classes = [], onClose, onSubmit }) {
         parent: form.phoneDigits
           ? `+91 ${form.phoneDigits.slice(0, 5)} ${form.phoneDigits.slice(5)}`
           : "—",
+        transport: form.transport,
+        pickupStop: form.transport && form.transport !== "—" ? form.pickupStop || "" : "",
+        transportEvening: form.transportEvening,
+        pickupStopEvening: form.transportEvening && form.transportEvening !== "—" ? form.pickupStopEvening || "" : "",
       });
     } catch (ex) { setErr(ex.message || String(ex)); }
     finally { setBusy(false); }
@@ -1187,6 +1283,28 @@ function EditStudentModal({ student, classes = [], onClose, onSubmit }) {
           )}
         </Field>
 
+        <TransportPicker
+          label="Morning route"
+          direction="morning"
+          routes={routes}
+          students={students}
+          routeValue={form.transport}
+          stopValue={form.pickupStop}
+          onRouteChange={(v) => { set("transport", v); set("pickupStop", ""); }}
+          onStopChange={(v) => set("pickupStop", v)}
+        />
+        <TransportPicker
+          label="Evening route"
+          direction="evening"
+          routes={routes}
+          students={students}
+          routeValue={form.transportEvening}
+          stopValue={form.pickupStopEvening}
+          onRouteChange={(v) => { set("transportEvening", v); set("pickupStopEvening", ""); }}
+          onStopChange={(v) => set("pickupStopEvening", v)}
+          hint="If the evening van is the same as morning, just pick the same route here."
+        />
+
         {err && (
           <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "9px 12px", borderRadius: 7, fontSize: 12 }}>{err}</div>
         )}
@@ -1213,7 +1331,12 @@ function AdmissionModal({ classes = [], routes = [], students = [], onClose, onS
   // Section is fixed to "A" — the school doesn't split grades into sections.
   const [form, setForm] = useState({
     name: "", cls: initialCls, section: ONLY_SECTION,
-    phoneDigits: "", transport: "—", pickupStop: "",
+    phoneDigits: "",
+    // Morning + evening transport are independent — the school runs different
+    // buses for the two trips. Default both to "—" (no transport); the admin
+    // assigns each separately. setting evening = "—" is a valid state.
+    transport: "—", pickupStop: "",
+    transportEvening: "—", pickupStopEvening: "",
     // Fee starts blank → uses the auto-suggested per-class amount on submit.
     // The admin can type a value to override (scholarship, sibling discount, etc).
     feeAmount: "",
@@ -1255,6 +1378,8 @@ function AdmissionModal({ classes = [], routes = [], students = [], onClose, onS
         parent: form.phoneDigits ? formattedPhone : "",
         transport: form.transport,
         pickupStop: form.transport && form.transport !== "—" ? form.pickupStop || "" : "",
+        transportEvening: form.transportEvening,
+        pickupStopEvening: form.transportEvening && form.transportEvening !== "—" ? form.pickupStopEvening || "" : "",
         // Omit when blank so the API uses the auto-derived per-class fee.
         feeAmount: feeNum === null ? undefined : feeNum,
       });
@@ -1389,81 +1514,27 @@ function AdmissionModal({ classes = [], routes = [], students = [], onClose, onS
           )}
         </Field>
 
-        {(() => {
-          // Compute live availability per route from current student assignments.
-          // free = totalCap (sum of stop caps) − number of students already on that route.
-          const routeStats = routes.map((r) => {
-            const totalCap = (r.stops || []).reduce((a, s) => a + (Number(s.cap) || 0), 0);
-            const taken    = students.filter((s) => s.transport === r.code).length;
-            const free     = Math.max(0, totalCap - taken);
-            return { route: r, totalCap, taken, free };
-          });
-          const anyFree = routeStats.some((rs) => rs.free > 0);
-          return (
-            <Field
-              label="Transport route"
-              hint={routes.length === 0
-                ? "No routes set up yet — add routes from Transport screen"
-                : anyFree ? "Only routes with free seats are selectable" : "All routes are full — capacity has to be increased on Transport"}
-            >
-              <select
-                className="select"
-                value={form.transport}
-                onChange={(e) => { set("transport", e.target.value); set("pickupStop", ""); }}
-              >
-                <option value="—">No transport</option>
-                {routeStats.map(({ route: r, totalCap, free }) => (
-                  <option
-                    key={r.code}
-                    value={r.code}
-                    disabled={totalCap > 0 && free === 0}
-                  >
-                    {r.code} · {r.name}
-                    {totalCap > 0
-                      ? ` · ${free === 0 ? "FULL" : `${free} seats free`} (of ${totalCap})`
-                      : " · capacity not set"}
-                  </option>
-                ))}
-              </select>
-            </Field>
-          );
-        })()}
-
-        {form.transport && form.transport !== "—" && (() => {
-          const route = routes.find((r) => r.code === form.transport);
-          const stops = route?.stops || [];
-          if (stops.length === 0) return null;
-          // Per-stop availability: how many students are already pinned to this exact stop.
-          const stopStats = stops.map((s) => {
-            const taken = students.filter((st) => st.transport === route.code && st.pickupStop === s.name).length;
-            const cap   = Number(s.cap) || 0;
-            const free  = cap > 0 ? Math.max(0, cap - taken) : null; // null = no cap configured
-            return { stop: s, taken, cap, free };
-          });
-          return (
-            <Field label="Pickup stop" hint="Stops marked FULL have already hit their per-stop capacity">
-              <select
-                className="select"
-                value={form.pickupStop}
-                onChange={(e) => set("pickupStop", e.target.value)}
-              >
-                <option value="">— pick a stop —</option>
-                {stopStats.map(({ stop: s, cap, free }) => (
-                  <option
-                    key={s.name}
-                    value={s.name}
-                    disabled={free === 0}
-                  >
-                    {s.name} · {s.t}
-                    {cap > 0
-                      ? ` · ${free === 0 ? "FULL" : `${free} of ${cap} free`}`
-                      : " · open"}
-                  </option>
-                ))}
-              </select>
-            </Field>
-          );
-        })()}
+        <TransportPicker
+          label="Morning route"
+          direction="morning"
+          routes={routes}
+          students={students}
+          routeValue={form.transport}
+          stopValue={form.pickupStop}
+          onRouteChange={(v) => { set("transport", v); set("pickupStop", ""); }}
+          onStopChange={(v) => set("pickupStop", v)}
+        />
+        <TransportPicker
+          label="Evening route"
+          direction="evening"
+          routes={routes}
+          students={students}
+          routeValue={form.transportEvening}
+          stopValue={form.pickupStopEvening}
+          onRouteChange={(v) => { set("transportEvening", v); set("pickupStopEvening", ""); }}
+          onStopChange={(v) => set("pickupStopEvening", v)}
+          hint="If the evening van is the same as morning, just pick the same route here."
+        />
 
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
           <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
@@ -1473,6 +1544,108 @@ function AdmissionModal({ classes = [], routes = [], students = [], onClose, onS
         </div>
       </form>
     </ModalShell>
+  );
+}
+
+// Render the Transport column in the Students table. Collapses to a
+// single line when morning == evening (or evening is unset); shows
+// "AM RT-1 · PM RT-2" when the two trips use different routes — the
+// common case for schools that pool buses across the catchment.
+function TransportCell({ student }) {
+  const am = student.transport && student.transport !== "—" ? student.transport : null;
+  const pm = student.transportEvening && student.transportEvening !== "—" ? student.transportEvening : null;
+
+  if (!am && !pm) return "—";
+  if (am && (!pm || am === pm)) return am;
+  if (!am && pm) return <><span style={{ color: "var(--ink-4)" }}>PM</span> {pm}</>;
+  return (
+    <span style={{ display: "inline-flex", flexDirection: "column", gap: 1 }}>
+      <span><span style={{ color: "var(--ink-4)", fontSize: 10.5, marginRight: 4 }}>AM</span>{am}</span>
+      <span><span style={{ color: "var(--ink-4)", fontSize: 10.5, marginRight: 4 }}>PM</span>{pm}</span>
+    </span>
+  );
+}
+
+// Reusable route + stop picker. Counts seat occupancy across BOTH morning
+// and evening assignments — a student riding RT-1 in the morning and RT-2
+// in the evening occupies one seat on each route. The `direction` arg
+// drives which side of each student row to read for occupancy.
+function TransportPicker({
+  label, direction = "morning",
+  routes = [], students = [],
+  routeValue, stopValue,
+  onRouteChange, onStopChange,
+  hint,
+}) {
+  const routeOf  = (s) => direction === "evening" ? s.transportEvening : s.transport;
+  const stopOf   = (s) => direction === "evening" ? s.pickupStopEvening : s.pickupStop;
+  const routeStats = routes.map((r) => {
+    const totalCap = (r.stops || []).reduce((a, s) => a + (Number(s.cap) || 0), 0);
+    const taken    = students.filter((s) => routeOf(s) === r.code).length;
+    const free     = Math.max(0, totalCap - taken);
+    return { route: r, totalCap, taken, free };
+  });
+  const anyFree = routeStats.some((rs) => rs.free > 0);
+  const fallbackHint = routes.length === 0
+    ? "No routes set up yet — add routes from Transport screen"
+    : anyFree ? "Only routes with free seats are selectable" : "All routes are full — capacity has to be increased on Transport";
+
+  const activeRoute = routes.find((r) => r.code === routeValue);
+  const stops = activeRoute?.stops || [];
+  const stopStats = stops.map((s) => {
+    const taken = students.filter((st) => routeOf(st) === activeRoute.code && stopOf(st) === s.name).length;
+    const cap   = Number(s.cap) || 0;
+    const free  = cap > 0 ? Math.max(0, cap - taken) : null;
+    return { stop: s, taken, cap, free };
+  });
+
+  return (
+    <>
+      <Field label={label} hint={hint || fallbackHint}>
+        <select
+          className="select"
+          value={routeValue}
+          onChange={(e) => onRouteChange(e.target.value)}
+        >
+          <option value="—">No transport</option>
+          {routeStats.map(({ route: r, totalCap, free }) => (
+            <option
+              key={r.code}
+              value={r.code}
+              disabled={totalCap > 0 && free === 0}
+            >
+              {r.code} · {r.name}
+              {totalCap > 0
+                ? ` · ${free === 0 ? "FULL" : `${free} seats free`} (of ${totalCap})`
+                : " · capacity not set"}
+            </option>
+          ))}
+        </select>
+      </Field>
+      {routeValue && routeValue !== "—" && stops.length > 0 && (
+        <Field label={`Pickup stop · ${label.toLowerCase()}`} hint="Stops marked FULL have already hit their per-stop capacity">
+          <select
+            className="select"
+            value={stopValue || ""}
+            onChange={(e) => onStopChange(e.target.value)}
+          >
+            <option value="">— pick a stop —</option>
+            {stopStats.map(({ stop: s, cap, free }) => (
+              <option
+                key={s.name}
+                value={s.name}
+                disabled={free === 0}
+              >
+                {s.name} · {s.t}
+                {cap > 0
+                  ? ` · ${free === 0 ? "FULL" : `${free} of ${cap} free`}`
+                  : " · open"}
+              </option>
+            ))}
+          </select>
+        </Field>
+      )}
+    </>
   );
 }
 

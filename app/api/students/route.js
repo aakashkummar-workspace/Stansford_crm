@@ -41,6 +41,17 @@ export async function POST(req) {
   }
   const cls = Number(body.cls) || 1;
   const section = (body.section || "A").toUpperCase();
+  // Evening transport is separate from morning. A null/"—" value means
+  // "no evening route assigned" — the school floor practice when only
+  // morning pickup is being used. The UI defaults the evening field to
+  // match morning so single-pickup students can be admitted in one form.
+  const transportEvening = body.transportEvening && body.transportEvening !== "—"
+    ? body.transportEvening
+    : null;
+  const pickupStopEvening = transportEvening
+    ? (String(body.pickupStopEvening || "").trim() || null)
+    : null;
+
   const row = {
     id: newId(),
     name: body.name.trim(),
@@ -50,6 +61,8 @@ export async function POST(req) {
     attendance: 0,
     transport: body.transport || "—",
     pickupStop: String(body.pickupStop || "").trim() || null,
+    transportEvening,
+    pickupStopEvening,
     joined: monthYear(),
   };
 
@@ -105,8 +118,10 @@ export async function PATCH(req) {
   if (!body?.id) return NextResponse.json({ ok: false, error: "id required" }, { status: 400 });
 
   const patch = {};
-  if ("transport" in body)  patch.transport  = body.transport;
-  if ("pickupStop" in body) patch.pickupStop = body.pickupStop;
+  if ("transport" in body)         patch.transport         = body.transport;
+  if ("pickupStop" in body)        patch.pickupStop        = body.pickupStop;
+  if ("transportEvening" in body)  patch.transportEvening  = body.transportEvening;
+  if ("pickupStopEvening" in body) patch.pickupStopEvening = body.pickupStopEvening;
   if ("name" in body) {
     const n = String(body.name || "").trim();
     if (!n) return NextResponse.json({ ok: false, error: "Name cannot be empty" }, { status: 400 });
