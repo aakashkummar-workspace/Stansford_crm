@@ -1,11 +1,15 @@
 import { NextResponse } from "next/server";
-import { setPendingFeeAmount, addActivity, logAudit } from "@/lib/db";
+import { setPendingFeeAmount, addActivity, logAudit, readAllData } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 
 // PATCH /api/fees/amount { id, amount }
 // Edits the outstanding pending-fee balance for a student. Used by the
-// Fees screen's "Edit amount" action — for scholarship adjustments,
-// correcting an admission-time mistake, applying a discount, etc.
+// Students screen's fee cell — admins can bump the amount UP (e.g.,
+// add extra charges like late fee, books) but can NEVER reduce it.
+// The "no reductions" rule is enforced server-side so a power-user
+// with direct API access can't write a smaller number either. If a
+// school legitimately needs to refund / discount, that's a future
+// receipt-side action, not an edit to the outstanding.
 // Parents are read-only; staff (any non-parent role) may edit.
 export async function PATCH(req) {
   const session = await getSession();
@@ -26,6 +30,20 @@ export async function PATCH(req) {
   const n = Math.floor(Number(body.amount));
   if (!Number.isFinite(n) || n < 0) {
     return NextResponse.json({ ok: false, error: "Amount must be 0 or more" }, { status: 400 });
+  }
+
+  // Read the current pending balance so we can enforce increase-only.
+  // The pending row's id === student id for the annual fee created at
+  // import time. If no pending row exists (student paid in full or
+  // never had a fee), any positive amount is an increase.
+  const all = await readAllData();
+  const existing = (all.pendingFees || []).find((f) => f.id === id);
+  const currentAmount = existing ? Number(existing.amount) || 0 : 0;
+  if (n < currentAmount) {
+    return NextResponse.json({
+      ok: false,
+      error: `Cannot reduce the fee amount. Current outstanding is ₹${currentAmount.toLocaleString("en-IN")}; you tried to set ₹${n.toLocaleString("en-IN")}.`,
+    }, { status: 400 });
   }
 
   const result = await setPendingFeeAmount(id, n);

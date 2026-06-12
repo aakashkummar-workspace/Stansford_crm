@@ -45,6 +45,7 @@ export default function ScreenStudents({ E, refresh, role, session }) {
   const [issuedLogin, setIssuedLogin] = useState(null); // parent login just provisioned
   const [messageStudent, setMessageStudent] = useState(null); // student whose parent we're messaging
   const [tcReasonFor, setTcReasonFor] = useState(null); // student we're raising a TC for
+  const [feeEditFor, setFeeEditFor] = useState(null); // student whose annual fee total is being edited
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
   const flash = (msg, tone = "ok") => {
@@ -58,6 +59,32 @@ export default function ScreenStudents({ E, refresh, role, session }) {
   const activeRoster   = (E.ADDED_STUDENTS    || []).map((s) => ({ ...s, __added: true, __status: "active" }));
   const archivedRoster = (E.ARCHIVED_STUDENTS || []).map((s) => ({ ...s, __added: true, __status: "archived" }));
   const roster = view === "archived" ? archivedRoster : activeRoster;
+
+  // Per-student fee summary: outstanding + paid + total. The pending row's
+  // id === student id (annual fee created at import). Receipts in
+  // recent_fees link back via studentId / student_id. We sum across all
+  // fee types so the Students cell shows one consolidated number.
+  const pendingFees = E.PENDING_FEES || [];
+  const recentFees  = E.RECENT_FEES  || [];
+  const feeSummary = useMemo(() => {
+    const m = new Map();
+    for (const f of pendingFees) {
+      const sid = f.studentId || f.id;
+      if (!sid) continue;
+      const entry = m.get(sid) || { outstanding: 0, paid: 0 };
+      entry.outstanding += Number(f.amount) || 0;
+      m.set(sid, entry);
+    }
+    for (const r of recentFees) {
+      const sid = r.studentId || r.student_id;
+      if (!sid) continue;
+      const entry = m.get(sid) || { outstanding: 0, paid: 0 };
+      entry.paid += Number(r.amount) || 0;
+      m.set(sid, entry);
+    }
+    return m;
+  }, [pendingFees, recentFees]);
+  const summaryFor = (studentId) => feeSummary.get(studentId) || { outstanding: 0, paid: 0 };
 
   // Map of studentId → TC status, so we can stamp a "TC" chip next to
   // any student whose transfer certificate has been approved or issued.
@@ -583,7 +610,14 @@ export default function ScreenStudents({ E, refresh, role, session }) {
                       <span className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>{s.attendance}%</span>
                     </div>
                   </td>
-                  <td><StatusChip status={s.fee}>{s.fee.charAt(0).toUpperCase() + s.fee.slice(1)}</StatusChip></td>
+                  <td>
+                    <FeeCell
+                      student={s}
+                      summary={summaryFor(s.id)}
+                      canEdit={canEdit && s.__status !== "archived"}
+                      onEdit={() => setFeeEditFor(s)}
+                    />
+                  </td>
                   <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{s.transport}</td>
                   <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{s.joined}</td>
                   <td>
@@ -676,6 +710,29 @@ export default function ScreenStudents({ E, refresh, role, session }) {
           flash={flash}
         />
       )}
+      {feeEditFor && canEdit && (
+        <EditFeeModal
+          student={feeEditFor}
+          summary={summaryFor(feeEditFor.id)}
+          onClose={() => setFeeEditFor(null)}
+          onSubmit={async (newTotal) => {
+            const { paid } = summaryFor(feeEditFor.id);
+            const newOutstanding = newTotal - paid;
+            const { ok, json } = await safeFetch("/api/fees/amount", {
+              method: "PATCH",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ id: feeEditFor.id, amount: newOutstanding }),
+            });
+            if (ok) {
+              flash(`Updated ${feeEditFor.name}'s fees to ₹${newTotal.toLocaleString("en-IN")}`);
+              await refresh?.();
+              setFeeEditFor(null);
+            } else {
+              flash(json.error || "Could not update fee amount", "bad");
+            }
+          }}
+        />
+      )}
       {editingOf && canEdit && (
         <EditStudentModal
           student={editingOf}
@@ -708,6 +765,189 @@ function Toast({ toast }) {
       zIndex: 300, background: bg, color: "#fff", padding: "10px 18px",
       borderRadius: 999, fontSize: 12.5, fontWeight: 500, boxShadow: "var(--shadow-lg)",
     }}>{toast.msg}</div>
+  );
+}
+
+// Render the fee cell in the Students table. Shows the outstanding amount
+// (big), with a small breakdown line "₹X paid of ₹Y" if any payments have
+// landed. Click-to-edit when the caller passes canEdit + onEdit — the
+// API enforces increase-only so a slip on the modal can't reduce the
+// outstanding accidentally.
+function FeeCell({ student, summary, canEdit, onEdit }) {
+  const { outstanding, paid } = summary;
+  const total = outstanding + paid;
+  const fmt = (n) => "₹" + Number(n).toLocaleString("en-IN");
+  const status = total === 0 ? "—" : outstanding === 0 ? "paid" : paid > 0 ? "partial" : "pending";
+  const tone = status === "paid" ? "var(--ok)" : status === "partial" ? "var(--warn)" : status === "pending" ? "var(--warn)" : "var(--ink-4)";
+
+  if (total === 0) {
+    return (
+      <span style={{ fontSize: 12, color: "var(--ink-4)" }}>—</span>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={canEdit ? onEdit : undefined}
+      disabled={!canEdit}
+      title={canEdit ? "Click to edit · fees can only be increased" : undefined}
+      style={{
+        background: "transparent", border: 0, padding: 0,
+        cursor: canEdit ? "pointer" : "default",
+        textAlign: "left", display: "inline-flex", flexDirection: "column", gap: 1,
+        color: "var(--ink)",
+      }}
+    >
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+        <span style={{ fontSize: 12.5, fontWeight: 500, fontFamily: "var(--font-mono)" }}>
+          {fmt(outstanding)}
+        </span>
+        <span style={{
+          height: 16, padding: "0 6px",
+          display: "inline-flex", alignItems: "center",
+          fontSize: 9.5, fontWeight: 500,
+          color: tone, background: "transparent",
+          border: `1px solid ${tone}`,
+          borderRadius: 999,
+          textTransform: "uppercase", letterSpacing: 0.4,
+        }}>
+          {status === "paid" ? "Paid" : status === "partial" ? "Partial" : "Due"}
+        </span>
+        {canEdit && (
+          <Icon name="pencil" size={10} style={{ color: "var(--ink-4)" }} />
+        )}
+      </span>
+      {paid > 0 && (
+        <span style={{ fontSize: 10.5, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>
+          {fmt(paid)} paid of {fmt(total)}
+        </span>
+      )}
+    </button>
+  );
+}
+
+// Edit the student's TOTAL annual fee. Floor = current total — the modal
+// blocks reductions in the UI, and the API rejects them server-side too.
+// To raise the fee from ₹25,710 to ₹27,500: type "27500" and save. The
+// difference (₹1,790) gets added to the outstanding pending row; any
+// previously-paid receipts stay as-is.
+function EditFeeModal({ student, summary, onClose, onSubmit }) {
+  const { outstanding, paid } = summary;
+  const currentTotal = outstanding + paid;
+  const [value, setValue] = useState(String(currentTotal));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const fmt = (n) => "₹" + Number(n).toLocaleString("en-IN");
+  const parsed = (() => {
+    const digits = String(value).replace(/[^\d]/g, "");
+    if (!digits) return null;
+    const n = parseInt(digits, 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  })();
+  const isReduction = parsed != null && parsed < currentTotal;
+  const isSame      = parsed != null && parsed === currentTotal;
+  const canSubmit   = parsed != null && parsed > currentTotal && !busy;
+  const delta = parsed != null ? parsed - currentTotal : 0;
+
+  const submit = async (e) => {
+    e?.preventDefault();
+    if (!canSubmit) return;
+    setBusy(true); setErr("");
+    try {
+      await onSubmit(parsed);
+    } catch (ex) {
+      setErr(ex?.message || "Update failed");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)",
+        display: "grid", placeItems: "center", zIndex: 250, padding: 16,
+      }}
+    >
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 460 }}>
+        <div className="card-head">
+          <div>
+            <div className="card-title">Edit fees · {student.name}</div>
+            <div className="card-sub">{student.id} · fees can only be increased</div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
+        <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{
+            background: "var(--bg-2)", border: "1px solid var(--rule-2)",
+            borderRadius: 9, padding: "12px 14px",
+            display: "flex", flexDirection: "column", gap: 6, fontSize: 12.5,
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: "var(--ink-3)" }}>Already paid</span>
+              <span style={{ fontFamily: "var(--font-mono)", color: paid > 0 ? "var(--ok)" : "var(--ink-3)" }}>{fmt(paid)}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: "var(--ink-3)" }}>Outstanding</span>
+              <span style={{ fontFamily: "var(--font-mono)", color: outstanding > 0 ? "var(--warn)" : "var(--ink-3)" }}>{fmt(outstanding)}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", paddingTop: 6, borderTop: "1px solid var(--rule-2)" }}>
+              <span style={{ fontWeight: 500, color: "var(--ink)" }}>Current total</span>
+              <span style={{ fontFamily: "var(--font-mono)", fontWeight: 500, color: "var(--ink)" }}>{fmt(currentTotal)}</span>
+            </div>
+          </div>
+
+          <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>
+              New total fees (₹)
+            </span>
+            <input
+              className="input"
+              autoFocus
+              inputMode="numeric"
+              value={value}
+              onChange={(e) => setValue(e.target.value.replace(/[^\d]/g, ""))}
+              placeholder={String(currentTotal)}
+              style={isReduction ? { borderColor: "var(--bad)" } : undefined}
+            />
+            {isReduction && (
+              <span style={{ fontSize: 11, color: "var(--bad)" }}>
+                Cannot reduce. The total can only stay the same or go up.
+              </span>
+            )}
+            {isSame && (
+              <span style={{ fontSize: 11, color: "var(--ink-4)" }}>
+                Same as current total — type a higher number to save.
+              </span>
+            )}
+            {delta > 0 && (
+              <span style={{ fontSize: 11, color: "var(--ink-3)" }}>
+                Adds <strong style={{ color: "var(--ink-2)" }}>{fmt(delta)}</strong> to the outstanding. New outstanding will be <strong style={{ color: "var(--warn)" }}>{fmt(outstanding + delta)}</strong>.
+              </span>
+            )}
+          </label>
+
+          {err && (
+            <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "9px 12px", borderRadius: 7, fontSize: 12 }}>{err}</div>
+          )}
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn accent" disabled={!canSubmit}>
+              <Icon name="check" size={13} />{busy ? "Saving…" : "Save new total"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
   );
 }
 
