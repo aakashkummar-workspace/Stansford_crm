@@ -453,9 +453,11 @@ export default function ScreenSyllabus({ E, refresh, role, session }) {
           defaultClass={selectedClass}
           onClose={() => setShowImport(false)}
           onSubmit={async (rows, replace) => {
-            const j = await handleImport(rows, replace);
-            if (!(j.errors && j.errors.length)) setShowImport(false);
-            return j;
+            // Do NOT auto-close — the modal stays open with a success
+            // card so the admin can read the counts and any
+            // skipped-row warnings before dismissing. The page behind
+            // has already refreshed.
+            return await handleImport(rows, replace);
           }}
         />
       )}
@@ -1155,22 +1157,45 @@ function ImportSyllabusModal({ onClose, onSubmit, rosterClasses = [], subjectSug
           </div>
         )}
 
-        {/* Result summary after submit */}
+        {/* Result summary after submit. Modal stays open once we land
+            here so the admin can read the counts and any skipped-row
+            errors before dismissing. The page behind has already
+            refreshed, so closing reveals the updated syllabus. */}
         {result && (
           <div style={{
-            background: result.errors?.length ? "var(--err-soft, #fbe1d8)" : "var(--ok-soft, #dfecd8)",
-            border: `1px solid ${result.errors?.length ? "var(--err, #b13c1c)" : "var(--ok)"}`,
-            borderRadius: 7, padding: "10px 12px", fontSize: 12,
+            display: "flex", flexDirection: "column", gap: 10,
+            padding: "14px 16px",
+            background: "var(--ok-soft, #e6f4ec)",
+            border: "1px solid var(--ok, #2f8854)",
+            borderRadius: 10,
           }}>
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>
-              Imported {result.imported?.length || 0} topic{(result.imported?.length || 0) === 1 ? "" : "s"}
-              {result.errors?.length ? ` · ${result.errors.length} skipped` : ""}
-              {result.wiped ? ` · replaced ${result.wiped} prior` : ""}
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{
+                width: 28, height: 28, borderRadius: "50%",
+                background: "var(--ok, #2f8854)", color: "#fff",
+                display: "grid", placeItems: "center", flexShrink: 0,
+              }}>
+                <Icon name="check" size={14} />
+              </span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink)" }}>Import successful</div>
+                <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 2 }}>
+                  {(result.imported?.length || 0)} topic{(result.imported?.length || 0) === 1 ? "" : "s"} added · the syllabus behind this dialog is already updated.
+                  {result.wiped ? ` · replaced ${result.wiped} prior row${result.wiped === 1 ? "" : "s"}.` : ""}
+                  {result.errors?.length ? ` · ${result.errors.length} row${result.errors.length === 1 ? "" : "s"} skipped — see below.` : ""}
+                </div>
+              </div>
             </div>
             {result.errors?.length > 0 && (
-              <div style={{ maxHeight: 100, overflow: "auto", fontSize: 11.5, marginTop: 4 }}>
+              <div style={{
+                background: "var(--warn-soft, #fff4e2)",
+                border: "1px solid var(--warn, #d4944e)",
+                borderRadius: 7, padding: "8px 10px",
+                fontSize: 11.5, color: "var(--ink-2)", lineHeight: 1.5,
+                maxHeight: 120, overflowY: "auto",
+              }}>
                 {result.errors.slice(0, 8).map((e, i) => (
-                  <div key={i} style={{ color: "var(--ink-3)" }}>Row {e.row}: {e.reason}</div>
+                  <div key={i}>Row {e.row}: {e.reason}</div>
                 ))}
                 {result.errors.length > 8 && (
                   <div style={{ color: "var(--ink-4)", marginTop: 4 }}>…and {result.errors.length - 8} more</div>
@@ -1187,26 +1212,34 @@ function ImportSyllabusModal({ onClose, onSubmit, rosterClasses = [], subjectSug
         )}
 
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-          <button type="button" className="btn ghost" onClick={onClose}>{result ? "Close" : "Cancel"}</button>
-          <button
-            type="submit"
-            className="btn accent"
-            disabled={
-              busy
-              || !rows.length
-              // Class can come from a column OR the Default-class override.
-              || (colMap.cls == null && !defaultCls)
-              // Same for Subject.
-              || (colMap.subject == null && !defaultSubj)
-              // Topic must always be mapped — there's no sensible default.
-              || colMap.topic == null
-            }
-          >
-            <Icon name="upload" size={13} />
-            {busy
-              ? "Importing…"
-              : `${replace ? "Replace + import" : "Import"} ${validCount} topic${validCount === 1 ? "" : "s"}`}
-          </button>
+          {result ? (
+            <button type="button" className="btn accent" onClick={onClose}>
+              <Icon name="check" size={13} />Done
+            </button>
+          ) : (
+            <>
+              <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+              <button
+                type="submit"
+                className="btn accent"
+                disabled={
+                  busy
+                  || !rows.length
+                  // Class can come from a column OR the Default-class override.
+                  || (colMap.cls == null && !defaultCls)
+                  // Same for Subject.
+                  || (colMap.subject == null && !defaultSubj)
+                  // Topic must always be mapped — there's no sensible default.
+                  || colMap.topic == null
+                }
+              >
+                <Icon name="upload" size={13} />
+                {busy
+                  ? "Importing…"
+                  : `${replace ? "Replace + import" : "Import"} ${validCount} topic${validCount === 1 ? "" : "s"}`}
+              </button>
+            </>
+          )}
         </div>
       </form>
     </ModalShell>

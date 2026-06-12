@@ -212,47 +212,38 @@ export default function ScreenStudents({ E, refresh, role, session }) {
     return XLSX.utils.sheet_to_csv(firstSheet);
   };
 
+  // Returns the import result so the ImportModal can render its own
+  // success card (counts, errors, "Done" button). The modal stays open
+  // until the admin dismisses it — that way they can read the summary
+  // and download the parent-logins CSV without the toast disappearing.
+  // Throws on failure so the modal can flip back to "idle".
   const handleImportFile = async (file) => {
-    try {
-      const name = String(file.name || "").toLowerCase();
-      const isExcel = name.endsWith(".xlsx") || name.endsWith(".xls");
-      const csv = isExcel
-        ? await xlsxToCsv(file)
-        : await file.text();
-      const { ok, json } = await safeFetch("/api/students/import", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ csv }),
-      });
-      if (ok) {
-        const loginCount = (json.logins || []).length;
-        const errorCount = Array.isArray(json.errors) ? json.errors.length : 0;
-        const feeMsg = typeof json.feesIssued === "number"
-          ? ` · ${json.feesIssued} fees set${json.feesSkipped ? ` (${json.feesSkipped} blank)` : ""}`
-          : "";
-        // Show the partial-import warning prominently if any rows failed —
-        // previously the toast only mentioned the success count, so users
-        // didn't notice silent drops (e.g. student-id collisions).
-        if (errorCount > 0) {
-          const sample = json.errors.slice(0, 3).map((e) => e.name || `row ${e.row}`).join(", ");
-          const more = errorCount > 3 ? ` +${errorCount - 3} more` : "";
-          flash(`Imported ${json.count} · ${errorCount} row${errorCount === 1 ? "" : "s"} skipped: ${sample}${more}`, "warn");
-          console.warn("[import] skipped rows", json.errors);
-        } else {
-          flash(`Imported ${json.count} students · ${loginCount} parent logins created${feeMsg}`);
-        }
-        await refresh?.();
-        setShowImport(false);
-        // Surface the generated credentials in a modal so the admin can
-        // download them as CSV and hand to parents. Falls back to a
-        // simple "no logins" toast if for some reason none were issued.
-        if (loginCount > 0) setImportLogins(json.logins);
-      } else {
-        flash(json.error || "Import failed", "bad");
-      }
-    } catch (e) {
-      flash(e.message || "Could not read file", "bad");
+    const name = String(file.name || "").toLowerCase();
+    const isExcel = name.endsWith(".xlsx") || name.endsWith(".xls");
+    const csv = isExcel
+      ? await xlsxToCsv(file)
+      : await file.text();
+    const { ok, json } = await safeFetch("/api/students/import", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ csv }),
+    });
+    if (!ok) {
+      const err = new Error(json.error || "Import failed");
+      flash(err.message, "bad");
+      throw err;
     }
+    const loginCount = (json.logins || []).length;
+    const errorCount = Array.isArray(json.errors) ? json.errors.length : 0;
+    if (errorCount > 0) console.warn("[import] skipped rows", json.errors);
+    // Surface the generated credentials in a separate modal once the
+    // import-success modal is dismissed — but stash them now so we
+    // don't lose them if the user closes too quickly.
+    if (loginCount > 0) setImportLogins(json.logins);
+    // Refresh the page data so the new rows are visible the moment
+    // the admin closes the modal.
+    await refresh?.();
+    return json;
   };
 
   const submitAdmission = async (form) => {
@@ -1579,13 +1570,15 @@ function BulkLoginsModal({ logins, onClose, flash }) {
 
 function ImportModal({ onClose, onFile }) {
   const [file, setFile] = useState(null);
-  // Three-state progress so the user knows the import is actually
-  // running: 'idle' before they click Import, 'importing' while the
-  // server is processing, 'done' after the parent re-fetches data.
-  // Modal stays open while busy and ignores backdrop clicks via the
-  // disabled Cancel button — large imports take 20s+ and accidental
-  // dismissal would lose the progress signal + the parent-logins CSV.
+  // Three-state flow so the user always knows where they are:
+  //   'idle'      → showing the file picker; admin can choose / change file
+  //   'importing' → submit ran, waiting on the server (large files = ~30s+)
+  //   'done'      → success card with counts + "Done" button. Modal does
+  //                 NOT auto-close — the admin reads the summary, closes
+  //                 manually, and the parent has already refreshed the
+  //                 page data in the background.
   const [phase, setPhase] = useState("idle");
+  const [result, setResult] = useState(null); // {count, logins, feesIssued, feesSkipped, errors} once 'done'
   const inputRef = useRef(null);
   // Sample CSV admins can download as a starting point. Includes every
   // column the importer actually reads, with realistic examples:
@@ -1604,94 +1597,200 @@ function ImportModal({ onClose, onFile }) {
     URL.revokeObjectURL(url);
   };
   return (
-    <ModalShell title="Import students" sub="Bulk-add via CSV or Excel · columns: Name, Class, Parent, Transport, Fees (Fees optional)" onClose={onClose} width={520}>
+    <ModalShell
+      title={phase === "done" ? "Import successful" : "Import students"}
+      sub={
+        phase === "done"
+          ? "The new rows are already on screen — close this dialog to continue."
+          : "Bulk-add via CSV or Excel · columns: Name, Class, Parent, Transport, Fees (Fees optional)"
+      }
+      onClose={phase === "importing" ? () => {} : onClose}
+      width={520}
+    >
       <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        <div
-          onClick={() => inputRef.current?.click()}
-          style={{
-            border: "2px dashed var(--rule)", borderRadius: 12, padding: 26,
-            textAlign: "center", cursor: "pointer", background: "var(--card-2)",
-          }}
-        >
-          <Icon name="upload" size={22} />
-          <div style={{ marginTop: 8, fontSize: 13, fontWeight: 500 }}>
-            {file ? file.name : "Click to select a CSV or Excel file"}
-          </div>
-          <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 4 }}>
-            {file ? `${(file.size / 1024).toFixed(1)} KB` : ".csv / .xlsx up to a few hundred rows"}
-          </div>
-          <input
-            ref={inputRef}
-            type="file"
-            // Accept both CSV and Excel formats. The handler in
-            // Students.jsx converts xlsx to CSV client-side via the
-            // already-bundled `xlsx` lib before posting to the
-            // import endpoint.
-            accept=".csv,text/csv,.xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
-            style={{ display: "none" }}
-            onChange={(e) => setFile(e.target.files?.[0] || null)}
-          />
-        </div>
-        <div style={{ fontSize: 11.5, color: "var(--ink-3)" }}>
-          Need a starting point? <a onClick={downloadSample} style={{ color: "var(--accent)", cursor: "pointer", textDecoration: "underline" }}>Download a sample template</a>.
-        </div>
-        {phase === "importing" && (
-          <div style={{
-            display: "flex", alignItems: "center", gap: 10,
-            padding: "10px 12px", borderRadius: 8,
-            background: "var(--accent-soft)", color: "var(--accent-2)",
-            fontSize: 12.5, fontWeight: 500,
-          }}>
-            <span className="spinner" style={{
-              width: 14, height: 14, borderRadius: "50%",
-              border: "2px solid var(--accent)", borderTopColor: "transparent",
-              animation: "spin 0.8s linear infinite",
-            }} />
-            Importing students and creating parent logins… this may take up to a minute for large files.
-            <style jsx>{`
-              @keyframes spin { to { transform: rotate(360deg); } }
-            `}</style>
-          </div>
-        )}
-        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-          <button className="btn ghost" onClick={onClose} disabled={phase === "importing"}>
-            {phase === "importing" ? "Please wait…" : "Cancel"}
-          </button>
-          <button
-            className="btn accent"
-            disabled={!file || phase === "importing"}
-            onClick={async () => {
-              if (!file) return;
-              setPhase("importing");
-              try {
-                await onFile(file);
-                // The parent closes the modal on success; this line is
-                // only reached if onFile rejected (which it doesn't —
-                // it handles errors internally via flash).
-                setPhase("idle");
-              } catch {
-                setPhase("idle");
+        {phase === "done" && result ? (
+          <ImportSuccessCard
+            result={result}
+            label="student"
+            extras={(() => {
+              const out = [];
+              const loginCount = (result.logins || []).length;
+              if (loginCount > 0) out.push({ k: "Parent logins", v: loginCount });
+              if (typeof result.feesIssued === "number") {
+                out.push({
+                  k: "Fees set",
+                  v: result.feesIssued + (result.feesSkipped ? ` (${result.feesSkipped} blank)` : ""),
+                });
               }
-            }}
-          >
-            {phase === "importing" ? (
-              <>
-                <span className="spinner-inline" style={{
-                  width: 12, height: 12, borderRadius: "50%",
-                  border: "2px solid currentColor", borderTopColor: "transparent",
-                  display: "inline-block", animation: "spin 0.8s linear infinite",
-                }} />
-                Importing…
-              </>
-            ) : (
-              <>
-                <Icon name="upload" size={13} />Import {file ? "" : "(pick a file)"}
-              </>
+              return out;
+            })()}
+          />
+        ) : (
+          <>
+            <div
+              onClick={() => inputRef.current?.click()}
+              style={{
+                border: "2px dashed var(--rule)", borderRadius: 12, padding: 26,
+                textAlign: "center", cursor: "pointer", background: "var(--card-2)",
+              }}
+            >
+              <Icon name="upload" size={22} />
+              <div style={{ marginTop: 8, fontSize: 13, fontWeight: 500 }}>
+                {file ? file.name : "Click to select a CSV or Excel file"}
+              </div>
+              <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 4 }}>
+                {file ? `${(file.size / 1024).toFixed(1)} KB` : ".csv / .xlsx up to a few hundred rows"}
+              </div>
+              <input
+                ref={inputRef}
+                type="file"
+                accept=".csv,text/csv,.xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+                style={{ display: "none" }}
+                onChange={(e) => setFile(e.target.files?.[0] || null)}
+              />
+            </div>
+            <div style={{ fontSize: 11.5, color: "var(--ink-3)" }}>
+              Need a starting point? <a onClick={downloadSample} style={{ color: "var(--accent)", cursor: "pointer", textDecoration: "underline" }}>Download a sample template</a>.
+            </div>
+            {phase === "importing" && (
+              <ImportingBanner label="Importing students and creating parent logins… this may take up to a minute for large files." />
             )}
-          </button>
+          </>
+        )}
+
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          {phase === "done" ? (
+            <button className="btn accent" onClick={onClose}>
+              <Icon name="check" size={13} />Done
+            </button>
+          ) : (
+            <>
+              <button className="btn ghost" onClick={onClose} disabled={phase === "importing"}>
+                {phase === "importing" ? "Please wait…" : "Cancel"}
+              </button>
+              <button
+                className="btn accent"
+                disabled={!file || phase === "importing"}
+                onClick={async () => {
+                  if (!file) return;
+                  setPhase("importing");
+                  try {
+                    const json = await onFile(file);
+                    setResult(json);
+                    setPhase("done");
+                  } catch {
+                    setPhase("idle");
+                  }
+                }}
+              >
+                {phase === "importing" ? (
+                  <>
+                    <span className="spinner-inline" style={{
+                      width: 12, height: 12, borderRadius: "50%",
+                      border: "2px solid currentColor", borderTopColor: "transparent",
+                      display: "inline-block", animation: "spin 0.8s linear infinite",
+                    }} />
+                    Importing…
+                  </>
+                ) : (
+                  <>
+                    <Icon name="upload" size={13} />Import {file ? "" : "(pick a file)"}
+                  </>
+                )}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </ModalShell>
+  );
+}
+
+// Shared "Importing…" banner — same shape used by every import modal so
+// progress feedback is consistent. Caller passes a screen-specific label
+// so the message reads honestly ("Importing topics", "Importing books").
+function ImportingBanner({ label }) {
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 10,
+      padding: "10px 12px", borderRadius: 8,
+      background: "var(--accent-soft)", color: "var(--accent-2)",
+      fontSize: 12.5, fontWeight: 500,
+    }}>
+      <span className="spinner" style={{
+        width: 14, height: 14, borderRadius: "50%",
+        border: "2px solid var(--accent)", borderTopColor: "transparent",
+        animation: "spin 0.8s linear infinite",
+      }} />
+      {label}
+      <style jsx>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+      `}</style>
+    </div>
+  );
+}
+
+// Shared success card shown by every import modal once the server
+// responds 200. The parent's data refresh has already run by the time
+// we render this, so the table behind the modal is already up to date —
+// the success card is the explicit "you can stop staring at the
+// spinner" signal. Lists the headline count plus screen-specific
+// extras (parent logins, fees set, etc.) and any skipped rows.
+function ImportSuccessCard({ result, label = "row", extras = [] }) {
+  const count = Number(result?.count ?? result?.imported?.length ?? 0);
+  const errors = Array.isArray(result?.errors) ? result.errors : [];
+  return (
+    <div style={{
+      display: "flex", flexDirection: "column", gap: 12,
+      padding: "16px 18px",
+      background: "var(--ok-soft, #e6f4ec)",
+      border: "1px solid var(--ok, #2f8854)",
+      borderRadius: 10,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{
+          width: 30, height: 30, borderRadius: "50%",
+          background: "var(--ok, #2f8854)", color: "#fff",
+          display: "grid", placeItems: "center", flexShrink: 0,
+        }}>
+          <Icon name="check" size={16} />
+        </span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: "var(--ink)" }}>
+            Import successful
+          </div>
+          <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 2 }}>
+            {count} {label}{count === 1 ? "" : "s"} imported · the table behind this dialog is already updated.
+          </div>
+        </div>
+      </div>
+      {extras.length > 0 && (
+        <div style={{
+          display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 8,
+          paddingTop: 6, borderTop: "1px solid var(--ok, #2f8854)",
+        }}>
+          {extras.map((x) => (
+            <div key={x.k}>
+              <div style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>{x.k}</div>
+              <div style={{ fontSize: 13, fontWeight: 500, color: "var(--ink)" }}>{x.v}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {errors.length > 0 && (
+        <div style={{
+          fontSize: 11.5, color: "var(--ink-2)",
+          background: "var(--warn-soft, #fff4e2)",
+          border: "1px solid var(--warn, #d4944e)",
+          padding: "8px 10px", borderRadius: 7,
+          lineHeight: 1.5,
+        }}>
+          <strong>{errors.length} row{errors.length === 1 ? "" : "s"} skipped:</strong>{" "}
+          {errors.slice(0, 5).map((e) => e.name || `row ${e.row}`).join(", ")}
+          {errors.length > 5 ? ` +${errors.length - 5} more` : ""}
+        </div>
+      )}
+    </div>
   );
 }
 
