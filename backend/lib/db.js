@@ -1491,6 +1491,12 @@ export async function setStopBoarding(code, stopName, action) {
 export async function addRoute(row) {
   const code = String(row.code || "").trim().toUpperCase();
   if (!code) throw new Error("Route code is required");
+  // Whitelist the direction value so an upstream typo can't write a
+  // garbage column. 'both' means the same vehicle does the same loop
+  // for AM and PM — both pickers will offer it.
+  const direction = ["morning", "evening", "both"].includes(row.direction)
+    ? row.direction
+    : "both";
   const route = {
     code,
     name: row.name || code,
@@ -1499,6 +1505,7 @@ export async function addRoute(row) {
     bus: row.bus || "—",
     status: row.status || "running",
     eta: row.eta || "07:00 – 08:00",
+    direction,
     stops: Array.isArray(row.stops) ? row.stops.map((s, i) => ({
       name: String(s.name || "").trim() || `Stop ${i + 1}`,
       t: s.t || "—",
@@ -1511,15 +1518,22 @@ export async function addRoute(row) {
   if (!route.stops.length) throw new Error("Add at least one stop");
 
   if (supabaseEnabled) {
-    const ins = await supabase.from("routes").insert(route).select().single();
+    let ins = await supabase.from("routes").insert(route).select().single();
+    // PostgREST schema cache may not yet know about `direction`. Retry
+    // without it; the column defaults to 'both' on the server side once
+    // the migration runs.
+    if (ins.error && /direction/i.test(ins.error.message)) {
+      const { direction: _drop, ...legacy } = route;
+      ins = await supabase.from("routes").insert(legacy).select().single();
+    }
     if (ins.error) {
-      // PostgREST cache miss — fall back to file storage.
+      // PostgREST cache miss for other columns — fall back to file storage.
       if (/route|stops/i.test(ins.error.message)) {
         return fileAddRoute(route);
       }
       throw new Error(ins.error.message);
     }
-    return fromRoute(ins.data);
+    return fromRoute({ ...ins.data, direction: ins.data.direction || direction });
   }
   return fileAddRoute(route);
 }
@@ -1612,6 +1626,9 @@ export async function updateRoute(code, patch) {
   if (typeof patch.bus === "string")      fields.bus = patch.bus;
   if (typeof patch.status === "string")  fields.status = patch.status;
   if (typeof patch.eta === "string")     fields.eta = patch.eta;
+  if (typeof patch.direction === "string" && ["morning", "evening", "both"].includes(patch.direction)) {
+    fields.direction = patch.direction;
+  }
   if (Array.isArray(patch.stops)) {
     const old = (found.row.stops || []);
     fields.stops = patch.stops.map((s, i) => {

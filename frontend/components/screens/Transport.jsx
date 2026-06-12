@@ -545,6 +545,7 @@ export default function ScreenTransport({ E, refresh, role, session }) {
               <div style={{ flex: 1, minWidth: 200 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                   <span style={{ fontSize: 15, fontWeight: 600 }}>{route.code} · {route.name}</span>
+                  <DirectionChip direction={route.direction} />
                   <RunStatusChip status={route.status} />
                 </div>
                 <div style={{ color: "var(--ink-3)", fontSize: 12, display: "flex", gap: 10, marginTop: 2, flexWrap: "wrap" }}>
@@ -882,6 +883,29 @@ function RunStatusChip({ status }) {
   return <span className="chip"><span className="dot" />Not started</span>;
 }
 
+// Visual tag for a route's direction. Morning routes are amber-tinted,
+// evening routes are slate / blue, and "both" stays neutral so it reads
+// as the default. Used on the route card header and inferable from the
+// dropdown filtering on the Admission screen.
+function DirectionChip({ direction = "both" }) {
+  const styles = {
+    morning: { bg: "var(--warn-soft, #fff4e2)", fg: "var(--warn, #d4944e)", label: "Morning" },
+    evening: { bg: "var(--accent-soft)", fg: "var(--accent-2)", label: "Evening" },
+    both:    { bg: "var(--bg-2)", fg: "var(--ink-3)", label: "AM + PM" },
+  };
+  const s = styles[direction] || styles.both;
+  return (
+    <span style={{
+      height: 18, padding: "0 8px",
+      display: "inline-flex", alignItems: "center",
+      fontSize: 10.5, fontWeight: 500,
+      background: s.bg, color: s.fg,
+      borderRadius: 999,
+      textTransform: "uppercase", letterSpacing: 0.4,
+    }}>{s.label}</span>
+  );
+}
+
 function ModalShell({ title, sub, onClose, children, width = 520 }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
@@ -1006,6 +1030,10 @@ function AddRouteModal({ onClose, onSubmit, existingCodes, staff = [] }) {
 
   const [form, setForm] = useState({
     code: nextCode, name: "", driver: "", bus: "", eta: "07:00 – 08:00",
+    // 'morning' | 'evening' | 'both'. Drives which student picker
+    // (AM / PM) surfaces this route. 'both' = same vehicle does the
+    // same loop for AM and PM — picked from both dropdowns.
+    direction: "morning",
   });
   const [stops, setStops] = useState([
     { name: "", t: "07:10", cap: "" },
@@ -1033,6 +1061,7 @@ function AddRouteModal({ onClose, onSubmit, existingCodes, staff = [] }) {
         driver: form.driver.trim() || "—",
         bus: form.bus.trim() || "—",
         eta: form.eta || "07:00 – 08:00",
+        direction: form.direction,
         stops: cleanStops,
       });
     } catch (ex) {
@@ -1052,6 +1081,37 @@ function AddRouteModal({ onClose, onSubmit, existingCodes, staff = [] }) {
             <input className="input" value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. Sarjapur loop" />
           </Field>
         </div>
+        <Field label="Direction" hint="Morning routes appear only in the AM picker for students; evening in the PM. ‘Both’ surfaces in both.">
+          <div role="radiogroup" style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
+            {[
+              { k: "morning", label: "Morning", sub: "AM trip" },
+              { k: "evening", label: "Evening", sub: "PM trip" },
+              { k: "both",    label: "Both",    sub: "Same loop, AM + PM" },
+            ].map((opt) => {
+              const active = form.direction === opt.k;
+              return (
+                <button
+                  key={opt.k}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  onClick={() => set("direction", opt.k)}
+                  style={{
+                    padding: "8px 10px", borderRadius: 8,
+                    border: `1px solid ${active ? "var(--accent)" : "var(--rule)"}`,
+                    background: active ? "var(--accent-soft)" : "var(--card)",
+                    color: active ? "var(--accent-2)" : "var(--ink-2)",
+                    cursor: "pointer", textAlign: "left",
+                    display: "flex", flexDirection: "column", gap: 2,
+                  }}
+                >
+                  <span style={{ fontSize: 12.5, fontWeight: 500 }}>{opt.label}</span>
+                  <span style={{ fontSize: 10.5, color: active ? "var(--accent-2)" : "var(--ink-4)" }}>{opt.sub}</span>
+                </button>
+              );
+            })}
+          </div>
+        </Field>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
           <Field label="Driver / attendant" hint={staff.length ? "Pick from staff or type a name" : ""}>
             <StaffPickerInput value={form.driver} onChange={(v) => set("driver", v)} staff={staff} placeholder="Driver name" />

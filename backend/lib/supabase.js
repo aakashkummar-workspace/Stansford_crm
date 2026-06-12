@@ -231,6 +231,10 @@ export const fromEnquiry = (r) => r && { ...r };
 export const fromRoute = (r) => r && {
   code: r.code, name: r.name, driver: r.driver, attendant: r.attendant || "—", bus: r.bus,
   status: r.status, eta: r.eta, stops: r.stops || [],
+  // 'morning' | 'evening' | 'both' — controls which student pickers
+  // surface this route. Rows from before the migration default to 'both'
+  // so they remain selectable in both AM and PM dropdowns.
+  direction: r.direction || "both",
 };
 
 // ---------- new mappers ----------

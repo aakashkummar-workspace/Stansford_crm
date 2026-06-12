@@ -1566,10 +1566,12 @@ function TransportCell({ student }) {
   );
 }
 
-// Reusable route + stop picker. Counts seat occupancy across BOTH morning
-// and evening assignments — a student riding RT-1 in the morning and RT-2
-// in the evening occupies one seat on each route. The `direction` arg
-// drives which side of each student row to read for occupancy.
+// Reusable route + stop picker. Filters the route list by direction —
+// the AM picker only surfaces routes tagged morning/both, the PM picker
+// only evening/both. Counts seat occupancy across the matching direction
+// only (a student on RT-1-morning and RT-2-evening is one occupant on
+// each). The `direction` arg drives which side of each student row to
+// read for occupancy.
 function TransportPicker({
   label, direction = "morning",
   routes = [], students = [],
@@ -1579,18 +1581,25 @@ function TransportPicker({
 }) {
   const routeOf  = (s) => direction === "evening" ? s.transportEvening : s.transport;
   const stopOf   = (s) => direction === "evening" ? s.pickupStopEvening : s.pickupStop;
-  const routeStats = routes.map((r) => {
+  // Filter routes by direction. "both" routes appear in either picker.
+  // A route from before the migration (no direction column) defaults to
+  // "both" via the mapper, so legacy data keeps working.
+  const eligibleRoutes = routes.filter((r) => {
+    const d = r.direction || "both";
+    return d === "both" || d === direction;
+  });
+  const routeStats = eligibleRoutes.map((r) => {
     const totalCap = (r.stops || []).reduce((a, s) => a + (Number(s.cap) || 0), 0);
     const taken    = students.filter((s) => routeOf(s) === r.code).length;
     const free     = Math.max(0, totalCap - taken);
     return { route: r, totalCap, taken, free };
   });
   const anyFree = routeStats.some((rs) => rs.free > 0);
-  const fallbackHint = routes.length === 0
-    ? "No routes set up yet — add routes from Transport screen"
+  const fallbackHint = eligibleRoutes.length === 0
+    ? `No ${direction === "evening" ? "evening" : "morning"} routes set up yet — add one from Transport`
     : anyFree ? "Only routes with free seats are selectable" : "All routes are full — capacity has to be increased on Transport";
 
-  const activeRoute = routes.find((r) => r.code === routeValue);
+  const activeRoute = eligibleRoutes.find((r) => r.code === routeValue);
   const stops = activeRoute?.stops || [];
   const stopStats = stops.map((s) => {
     const taken = students.filter((st) => routeOf(st) === activeRoute.code && stopOf(st) === s.name).length;
