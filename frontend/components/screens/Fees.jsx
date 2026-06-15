@@ -81,6 +81,10 @@ export default function ScreenFees({ E, refresh, role, session }) {
 
   // Pending row currently being edited (amount-only). Staff-only.
   const [editingFee, setEditingFee] = useState(null);
+  // Receipt awaiting delete-confirmation. Only admin/principal/accountant
+  // can open this — parents and teachers don't get the delete affordance.
+  const [deletingReceipt, setDeletingReceipt] = useState(null);
+  const canDeleteReceipt = role === "admin" || role === "principal" || role === "school_accountant";
   // "Add fee" modal — staff picks a student + fee type + amount to create a
   // brand-new pending row. Lets the school collect Application, Kit, ECA,
   // Uniform, Term I/II/III, Van, STEM, Annual Day fees as separate items.
@@ -750,7 +754,19 @@ export default function ScreenFees({ E, refresh, role, session }) {
                     <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{f.time}</td>
                     <td>
                       {f.status === "paid" ? (
-                        <button className="btn sm ghost" onClick={() => openReceipt(f)}>Receipt</button>
+                        <span style={{ display: "inline-flex", gap: 4 }}>
+                          <button className="btn sm ghost" onClick={() => openReceipt(f)}>Receipt</button>
+                          {canDeleteReceipt && (
+                            <button
+                              className="btn sm ghost"
+                              title="Delete this receipt from history"
+                              onClick={() => setDeletingReceipt(f)}
+                              style={{ color: "var(--bad)" }}
+                            >
+                              <Icon name="x" size={11} />
+                            </button>
+                          )}
+                        </span>
                       ) : isParent ? (
                         <span style={{ fontSize: 11, color: "var(--ink-4)" }}>Pay at office</span>
                       ) : (
@@ -791,6 +807,28 @@ export default function ScreenFees({ E, refresh, role, session }) {
             onSave={async (amt) => {
               const ok = await saveFeeAmount(editingFee.id, amt);
               if (ok) setEditingFee(null);
+            }}
+          />
+        )}
+        {deletingReceipt && (
+          <DeleteReceiptModal
+            receipt={deletingReceipt}
+            onCancel={() => setDeletingReceipt(null)}
+            onConfirm={async () => {
+              try {
+                const r = await fetch("/api/fees/receipt", {
+                  method: "DELETE",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ id: deletingReceipt.id }),
+                });
+                const json = await r.json().catch(() => ({}));
+                if (!r.ok || !json.ok) throw new Error(json.error || "Delete failed");
+                flash(`Receipt ${deletingReceipt.id} removed from history`, "ok");
+                setDeletingReceipt(null);
+                await refresh?.();
+              } catch (e) {
+                flash(e.message || "Delete failed", "bad");
+              }
             }}
           />
         )}
@@ -1317,6 +1355,76 @@ function PayOnlineModal({ order, busy, onClose, onConfirm }) {
               <Icon name="check" size={13} />{busy ? "Verifying…" : "Confirm payment"}
             </button>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Confirm-and-delete dialog for a single receipt row. The endpoint
+// itself enforces the role gate (admin / principal / school_accountant
+// only) — this dialog is the user-facing "are you sure?" step. The
+// modal is deliberately blunt about the side effect: the receipt
+// disappears from history but the pending balance is NOT auto-restored
+// (mirrors how the API behaves; matches the user's stated intent of
+// "just delete the history alone").
+function DeleteReceiptModal({ receipt, onCancel, onConfirm }) {
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onCancel(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+  const submit = async () => {
+    if (busy) return;
+    setBusy(true);
+    try { await onConfirm(); } finally { setBusy(false); }
+  };
+  const amt = Number(receipt?.amount) || 0;
+  return (
+    <div onClick={onCancel} style={{
+      position: "fixed", inset: 0, background: "rgba(20,16,10,0.55)",
+      display: "grid", placeItems: "center", zIndex: 300, padding: 16,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 440 }}>
+        <div style={{ padding: "18px 18px 6px", display: "flex", alignItems: "flex-start", gap: 12 }}>
+          <span style={{
+            width: 36, height: 36, borderRadius: 9,
+            background: "var(--bad-soft, #fbe1d8)", color: "var(--bad, #b13c1c)",
+            display: "grid", placeItems: "center", flexShrink: 0,
+          }}>
+            <Icon name="warning" size={16} />
+          </span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14.5, fontWeight: 600, color: "var(--ink)", lineHeight: 1.3 }}>
+              Delete this receipt?
+            </div>
+            <div style={{ fontSize: 12.5, color: "var(--ink-3)", marginTop: 6, lineHeight: 1.55 }}>
+              <div><strong>{receipt.name}</strong> · {formatClassLabel(receipt.cls)} · {receipt.id}</div>
+              <div style={{ marginTop: 4 }}>
+                ₹{amt.toLocaleString("en-IN")} · {receipt.method || "—"} · {receipt.time || ""}
+              </div>
+            </div>
+            <div style={{
+              marginTop: 12, padding: "10px 12px",
+              background: "var(--warn-soft, #fff4e2)",
+              border: "1px solid var(--warn, #d4944e)",
+              borderRadius: 7, fontSize: 11.5, color: "var(--ink-2)", lineHeight: 1.5,
+            }}>
+              <strong>Heads up:</strong> the receipt disappears from history and from the audit-ready ledger. The student's pending balance is <em>not</em> automatically reopened — if they actually owe this amount, raise it back via <b>Edit fees</b> after this delete.
+            </div>
+          </div>
+        </div>
+        <div style={{ padding: "12px 18px 18px", display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button className="btn ghost" onClick={onCancel} disabled={busy}>Cancel</button>
+          <button
+            className="btn"
+            onClick={submit}
+            disabled={busy}
+            style={{ background: "var(--bad)", borderColor: "var(--bad)", color: "#fff" }}
+          >
+            <Icon name="x" size={13} />{busy ? "Deleting…" : "Delete receipt"}
+          </button>
         </div>
       </div>
     </div>

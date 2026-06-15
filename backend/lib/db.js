@@ -1104,6 +1104,43 @@ export async function undoLastFeeEdit({ studentId }) {
   };
 }
 
+// Delete a receipt (a row in recent_fees) by id. Used by the Fees screen's
+// "✕ Delete" button for ledger corrections — e.g. a payment was recorded
+// against the wrong student, or a test entry slipped into production.
+// Receipts live in BOTH Supabase AND the file fallback (when payPendingFee
+// hit a PostgREST cache miss), so we try both back-ends to ensure the row
+// goes wherever it physically lives. Returns the deleted row, or null if
+// no such id existed in either store.
+//
+// IMPORTANT: this does NOT restore the matching pending_fees balance.
+// The caller (the Fees screen confirm dialog) explains this to the admin
+// — a mistaken entry that needs the balance back has to be re-raised
+// via "Edit fees" (which is increase-only by design).
+export async function deleteRecentFee(receiptId) {
+  if (!receiptId) return null;
+  let deleted = null;
+
+  if (supabaseEnabled) {
+    const sel = await supabase.from("recent_fees").select("*").eq("id", receiptId).maybeSingle();
+    if (sel.data) {
+      const del = await supabase.from("recent_fees").delete().eq("id", receiptId);
+      if (!del.error) deleted = sel.data;
+    }
+  }
+
+  const db = fileRead();
+  if (Array.isArray(db.recentFees)) {
+    const idx = db.recentFees.findIndex((r) => r.id === receiptId);
+    if (idx !== -1) {
+      if (!deleted) deleted = db.recentFees[idx];
+      db.recentFees.splice(idx, 1);
+      fileWrite(db);
+    }
+  }
+
+  return deleted;
+}
+
 // Pay a pending fee — supports partial payments. Pass `amount` to take just
 // part of the balance; omit (or pass >= balance) to clear the whole thing.
 //
