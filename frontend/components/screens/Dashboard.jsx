@@ -122,6 +122,12 @@ export default function ScreenDashboard({ E, role, session }) {
         const studentCount = (E.ADDED_STUDENTS || []).length;
         const collected = (RECENT_FEES || []).reduce((a, f) => a + (f.amount || 0), 0);
         const pendingTotal = (PENDING_FEES || []).reduce((a, f) => a + (f.amount || 0), 0);
+        // Total fees expected from the school = paid + still-outstanding.
+        // This is what every parent owes summed up; "Fees collected" is
+        // the slice already received. Showing both is how an admin tells
+        // at a glance whether collection is on track.
+        const totalExpected = collected + pendingTotal;
+        const pctCollected = totalExpected > 0 ? Math.round((collected / totalExpected) * 100) : 0;
         const studentsByClass = {};
         for (const s of (E.ADDED_STUDENTS || [])) {
           studentsByClass[s.cls] = (studentsByClass[s.cls] || 0) + 1;
@@ -141,11 +147,15 @@ export default function ScreenDashboard({ E, role, session }) {
             />
             <KPI
               label="Fees collected" value={moneyK(collected)}
-              sub={pendingTotal > 0 ? `${moneyK(pendingTotal)} still pending` : "this term"}
+              sub={
+                totalExpected > 0
+                  ? `of ${moneyK(totalExpected)} total · ${moneyK(pendingTotal)} pending · ${pctCollected}% collected`
+                  : "no fees raised yet"
+              }
               puck="peach" puckIcon="fees"
               details={{
-                title: `Fees · ${moneyK(collected)} collected`,
-                sub: `${(RECENT_FEES || []).length} receipts · ${moneyK(pendingTotal)} still outstanding`,
+                title: `Fees · ${moneyK(collected)} of ${moneyK(totalExpected)} expected`,
+                sub: `${(RECENT_FEES || []).length} receipt${(RECENT_FEES || []).length === 1 ? "" : "s"} · ${moneyK(pendingTotal)} still outstanding · ${pctCollected}% collected`,
                 items: (RECENT_FEES || []).slice(0, 8).map((f) => ({
                   label: `${f.name} · ${formatClassLabel(f.cls)}`,
                   value: `₹${(f.amount || 0).toLocaleString("en-IN")}`,
