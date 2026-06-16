@@ -501,13 +501,23 @@ export async function removeClass(n) {
 }
 
 // ---------- audit + activity (used by other helpers) ----------
+// IMPORTANT: every caller of logAudit / addActivity wraps the await in
+// try/catch because the audit trail is best-effort — we never want a
+// failed audit row to roll back the real business action. The functions
+// themselves still attempt the Supabase insert and surface the error
+// via console.warn so issues are visible in pm2 logs even when the
+// caller's try/catch swallows them.
 export async function logAudit(who, action, entity) {
   const id = "AUD-" + String(Math.floor(Math.random() * 1e6)).padStart(6, "0");
   const whenLabel = new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
   if (supabaseEnabled) {
-    await supabase.from("audit_log").insert({
+    const ins = await supabase.from("audit_log").insert({
       id, who, action, entity, when_label: whenLabel, ip: null,
     });
+    if (ins.error) {
+      console.warn(`[db] audit_log insert failed: ${ins.error.message}`);
+      throw new Error(`audit_log insert failed: ${ins.error.message}`);
+    }
     return { id, who, action, entity, when: whenLabel };
   }
   const db = fileRead();
@@ -519,9 +529,13 @@ export async function logAudit(who, action, entity) {
 
 export async function addActivity(row) {
   if (supabaseEnabled) {
-    await supabase.from("activities").insert({
+    const ins = await supabase.from("activities").insert({
       t: row.t, tone: row.tone, title: row.title, sub: row.sub, ts: row.ts || "now",
     });
+    if (ins.error) {
+      console.warn(`[db] activities insert failed: ${ins.error.message}`);
+      throw new Error(`activities insert failed: ${ins.error.message}`);
+    }
     return;
   }
   const db = fileRead();
@@ -1226,17 +1240,10 @@ export async function editStudentFee({ studentId, newTotal, newPaid, actor = "St
         method: "offline-entry", time: "just now", paid_at: paidAt,
         fee_type: "annual", status: "partial",
       });
-      // PostgREST cache lag → fall back to file
+      // No silent file fallback in production — surface the error so the
+      // admin knows the receipt didn't reach Supabase and can retry.
       if (ins.error) {
-        const db = fileRead();
-        if (!Array.isArray(db.recentFees)) db.recentFees = [];
-        db.recentFees.unshift({
-          id: receiptId, studentId, student_id: studentId,
-          name: student.name, cls: student.cls, amount: paidDelta,
-          method: "offline-entry", time: "just now", paidAt,
-          feeType: "annual", status: "partial",
-        });
-        fileWrite(db);
+        throw new Error(`Could not record the offline payment in Supabase: ${ins.error.message}. Please retry; nothing has been saved.`);
       }
     } else {
       const db = fileRead();
@@ -1481,17 +1488,20 @@ export async function payPendingFee(id, method, amount) {
 
   if (backend === "supabase") {
     if (isFull) {
-      await supabase.from("pending_fees").delete().eq("id", id);
+      const del = await supabase.from("pending_fees").delete().eq("id", id);
+      if (del.error) {
+        throw new Error(`Payment failed — could not clear the pending fee in Supabase: ${del.error.message}. Please retry.`);
+      }
     } else {
-      await supabase.from("pending_fees").update({ amount: remaining }).eq("id", id);
+      const upd = await supabase.from("pending_fees").update({ amount: remaining }).eq("id", id);
+      if (upd.error) {
+        throw new Error(`Payment failed — could not update the pending balance in Supabase: ${upd.error.message}. Please retry.`);
+      }
     }
-    // Insert receipt. The schema may not yet have the student_id column
-    // (PostgREST cache lag). If that's the case, route the receipt to the
-    // file backend instead — that preserves the student↔receipt link via
-    // the camelCase studentId field, which is what the screens actually
-    // filter on. Without that link, multiple partial receipts for the same
-    // student would still work but we couldn't show them on the parent
-    // dashboard / parent's Fees screen.
+    // Insert the receipt. NO SILENT FILE FALLBACK in production — any
+    // error here surfaces to the user as a red toast so they know the
+    // payment didn't reach Supabase. They retry; if the issue persists
+    // the parent should not be told it was paid.
     const ins = await supabase.from("recent_fees").insert({
       id: receiptId, student_id: realStudentId,
       name: f.name, cls: f.cls, amount: requested,
@@ -1500,12 +1510,31 @@ export async function payPendingFee(id, method, amount) {
       status: isFull ? "paid" : "partial",
     });
     if (ins.error) {
-      const db = fileRead();
-      if (!Array.isArray(db.recentFees)) db.recentFees = [];
-      db.recentFees.unshift(paidRow);
-      fileWrite(db);
+      // Best-effort rollback: re-add the pending row we just zeroed so the
+      // balance returns to the pre-attempt state. Otherwise admin sees
+      // both "payment failed" AND "fee disappeared" — worst case.
+      try {
+        if (isFull) {
+          await supabase.from("pending_fees").insert(toPendingFee({
+            id: f.id, studentId: f.studentId || f.id, feeType: f.feeType || DEFAULT_FEE_TYPE,
+            name: f.name, cls: f.cls, amount: balance,
+            due: f.due || "in 7 days", overdue: !!f.overdue,
+          }));
+        } else {
+          await supabase.from("pending_fees").update({ amount: balance }).eq("id", id);
+        }
+      } catch (rollbackErr) {
+        console.error(`[db] payPendingFee rollback also failed: ${rollbackErr.message}`);
+      }
+      throw new Error(`Payment failed — could not record the receipt in Supabase: ${ins.error.message}. The pending balance has been restored. Please retry.`);
     }
-    try { await supabase.from("students").update({ fee: newStudentFeeStatus }).eq("id", id); } catch {}
+    const stuUpd = await supabase.from("students").update({ fee: newStudentFeeStatus }).eq("id", id);
+    if (stuUpd.error) {
+      // Receipt + pending update succeeded; only the student.fee status
+      // failed to update. Don't roll back the payment — log a warning
+      // so the admin can fix the status manually if needed.
+      console.warn(`[db] payPendingFee: receipt saved but student.fee update failed: ${stuUpd.error.message}`);
+    }
     return { paid: paidRow, fee: newStudentFeeStatus, remaining };
   }
 
@@ -1752,14 +1781,18 @@ export async function recordTransportAttendance(row) {
   };
 
   if (supabaseEnabled) {
-    // Try Supabase first. Upsert on the composite PK so flipping status is atomic.
+    // Upsert on the composite PK so flipping a student's status is
+    // atomic. No silent file fallback in production — attendance is too
+    // important to lose; surface the error to the teacher's screen.
     const ins = await supabase
       .from("transport_attendance")
       .upsert(toTransportAttendance(persistRow), { onConflict: "student_id,date,direction" })
       .select()
       .maybeSingle();
-    if (!ins.error) return persistRow;
-    // Fall through to file backend if the table isn't there yet.
+    if (ins.error) {
+      throw new Error(`Could not record transport attendance in Supabase: ${ins.error.message}`);
+    }
+    return persistRow;
   }
 
   const db = fileRead();
@@ -1848,11 +1881,10 @@ export async function addRoute(row) {
       ins = await supabase.from("routes").insert(legacy).select().single();
     }
     if (ins.error) {
-      // PostgREST cache miss for other columns — fall back to file storage.
-      if (/route|stops/i.test(ins.error.message)) {
-        return fileAddRoute(route);
-      }
-      throw new Error(ins.error.message);
+      // NO SILENT FILE FALLBACK in production — every route must persist
+      // in Supabase. The admin sees the error and fixes the underlying
+      // cause (missing migration / network blip / RLS rule).
+      throw new Error(`Could not save route to Supabase: ${ins.error.message}`);
     }
     return fromRoute({ ...ins.data, direction: ins.data.direction || direction });
   }
@@ -1875,10 +1907,16 @@ export async function removeRoute(code) {
   if (supabaseEnabled) {
     const sel = await supabase.from("routes").select("*").eq("code", code).maybeSingle();
     if (sel.data) {
-      await supabase.from("routes").delete().eq("code", code);
+      const del = await supabase.from("routes").delete().eq("code", code);
+      if (del.error) {
+        throw new Error(`Could not remove route from Supabase: ${del.error.message}`);
+      }
       return fromRoute(sel.data);
     }
-    // Fall through to file fallback.
+    // Not in Supabase — only fall through to file if it's a legacy row
+    // written before Supabase came online. Don't silently delete from
+    // file in production (Supabase is the source of truth).
+    return null;
   }
   const db = fileRead();
   const idx = (db.routes || []).findIndex((r) => r.code === code);
@@ -3256,8 +3294,13 @@ export async function addExpense({ scope, category, amount, vendor, memo, date, 
   };
   if (supabaseEnabled) {
     const ins = await supabase.from("expenses").insert(toExpense(exp)).select().single();
-    if (!ins.error) return fromExpense(ins.data);
-    if (!isSchemaMissError(ins.error)) throw new Error(ins.error.message);
+    if (ins.error) {
+      // No silent file fallback — expenses go into the school's books
+      // and must be in Supabase. Schema-cache misses surface to the
+      // admin so they can run the migration.
+      throw new Error(`Could not save expense to Supabase: ${ins.error.message}`);
+    }
+    return fromExpense(ins.data);
   }
   const db = fileRead();
   if (!Array.isArray(db.expenses)) db.expenses = [];
