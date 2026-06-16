@@ -31,6 +31,10 @@ export default function ScreenTransport({ E, refresh, role, session }) {
   const [maintFor, setMaintFor]   = useState(null); // route whose maintenance log is open, or null
   const [showAbsent, setShowAbsent] = useState(false);
   const [showMap, setShowMap] = useState(false);
+  // Bulk transport-assignment importer — separate from the Students CSV
+  // importer because admission usually happens once + transport gets
+  // re-shuffled mid-term. This modal updates existing students only.
+  const [showAssignImport, setShowAssignImport] = useState(false);
   const [toast, setToast] = useState(null);
   const [busyAction, setBusyAction] = useState(null);
 
@@ -364,6 +368,11 @@ export default function ScreenTransport({ E, refresh, role, session }) {
           <button className="btn" onClick={() => setShowAbsent(true)}>
             <Icon name="download" size={13} />Absentee list
           </button>
+          {canEdit && (
+            <button className="btn" onClick={() => setShowAssignImport(true)} title="Bulk-assign morning and evening routes to existing students from CSV / Excel">
+              <Icon name="upload" size={13} />Import assignments
+            </button>
+          )}
           {canEdit && (
             <button className="btn accent" onClick={() => setShowAdd(true)}>
               <Icon name="plus" size={13} />Add route
@@ -808,6 +817,23 @@ export default function ScreenTransport({ E, refresh, role, session }) {
           staff={E.STAFF || []}
         />
       )}
+      {showAssignImport && canEdit && (
+        <ImportAssignmentsModal
+          routes={routes}
+          onClose={() => setShowAssignImport(false)}
+          onSubmitCsv={async (csv) => {
+            const r = await fetch("/api/transport/assign-bulk", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ csv }),
+            });
+            const json = await r.json().catch(() => ({}));
+            if (!r.ok || !json.ok) throw new Error(json.error || "Import failed");
+            await refresh?.();
+            return json;
+          }}
+        />
+      )}
       {/* Render order matters: when both are open, the picker must render
           AFTER the roster so it stacks on top (both share zIndex 250). */}
       {rosterOpen && canEdit && route && (
@@ -1014,6 +1040,217 @@ function StaffPickerInput({ value, onChange, staff = [], placeholder }) {
         </div>
       )}
     </div>
+  );
+}
+
+// Bulk-assign morning + evening transport routes to students already in
+// the roster. Reads a CSV / Excel file, matches each row to a student by
+// name (case + dot insensitive), validates that each route exists and is
+// tagged with the correct direction, then patches the student's
+// transport / pickupStop / transportEvening / pickupStopEvening fields.
+// Re-running the import is safe — it overwrites prior assignments rather
+// than stacking, so corrections live in the same Excel.
+function ImportAssignmentsModal({ routes = [], onClose, onSubmitCsv }) {
+  const [file, setFile] = useState(null);
+  const [phase, setPhase] = useState("idle");  // idle | importing | done
+  const [result, setResult] = useState(null);
+  const inputRef = useRef(null);
+
+  // Sample CSV — the admin downloads, fills in the routes column per
+  // student, and re-uploads. Uses realistic route codes from the user's
+  // own roster when available; falls back to RT-1 / RT-2 if none defined
+  // yet.
+  const sampleCsv = (() => {
+    const morningRoutes = routes.filter((r) => (r.direction || "both") !== "evening");
+    const eveningRoutes = routes.filter((r) => (r.direction || "both") !== "morning");
+    const mr = morningRoutes[0]?.code || "R1";
+    const er = eveningRoutes[0]?.code || mr;
+    return (
+      "Student Name,Morning Route,Morning Stop,Evening Route,Evening Stop\n" +
+      `Aakash Kumar,${mr},Stop 1,${er},Stop 1\n` +
+      `Priya Sharma,${mr},Stop 2,—,—\n` +
+      `KIRAN DEVI T,—,—,${er},Stop 3\n`
+    );
+  })();
+
+  const downloadSample = () => {
+    const blob = new Blob([sampleCsv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "transport-assignments-template.csv"; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Same client-side .xlsx → .csv conversion as the Students importer.
+  // Pulls in `xlsx` dynamically so the bundle stays small for users who
+  // never open this modal.
+  const xlsxToCsv = async (f) => {
+    const XLSX = await import("xlsx");
+    const buf = await f.arrayBuffer();
+    const wb = XLSX.read(buf, { type: "array" });
+    const firstSheet = wb.Sheets[wb.SheetNames[0]];
+    if (!firstSheet) throw new Error("Workbook has no sheets");
+    return XLSX.utils.sheet_to_csv(firstSheet);
+  };
+
+  const onClick = async () => {
+    if (!file || phase === "importing") return;
+    setPhase("importing");
+    try {
+      const name = String(file.name || "").toLowerCase();
+      const isExcel = name.endsWith(".xlsx") || name.endsWith(".xls");
+      const csv = isExcel ? await xlsxToCsv(file) : await file.text();
+      const json = await onSubmitCsv(csv);
+      setResult(json);
+      setPhase("done");
+    } catch (e) {
+      setResult({ ok: false, error: e?.message || "Import failed", errors: [] });
+      setPhase("done");
+    }
+  };
+
+  const errors = Array.isArray(result?.errors) ? result.errors : [];
+  const updated = Number(result?.count || 0);
+
+  return (
+    <ModalShell
+      title={phase === "done" ? (result?.ok === false ? "Import failed" : "Assignments imported") : "Import transport assignments"}
+      sub={
+        phase === "done"
+          ? "The routes on screen reflect the new assignments — close to continue."
+          : "CSV / Excel · columns: Student Name, Morning Route, Morning Stop, Evening Route, Evening Stop"
+      }
+      onClose={phase === "importing" ? () => {} : onClose}
+      width={560}
+    >
+      <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {phase === "done" && result ? (
+          result?.ok === false ? (
+            <div style={{
+              padding: "14px 16px",
+              background: "var(--err-soft, #fbe1d8)",
+              border: "1px solid var(--err, #b13c1c)",
+              borderRadius: 10, fontSize: 13, color: "var(--ink-2)", lineHeight: 1.5,
+            }}>
+              <strong>Import couldn't run:</strong> {result.error || "Unknown error"}
+            </div>
+          ) : (
+            <div style={{
+              display: "flex", flexDirection: "column", gap: 10,
+              padding: "14px 16px",
+              background: "var(--ok-soft, #e6f4ec)",
+              border: "1px solid var(--ok, #2f8854)",
+              borderRadius: 10,
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{
+                  width: 28, height: 28, borderRadius: "50%",
+                  background: "var(--ok, #2f8854)", color: "#fff",
+                  display: "grid", placeItems: "center", flexShrink: 0,
+                }}>
+                  <Icon name="check" size={14} />
+                </span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink)" }}>Assignments imported</div>
+                  <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 2 }}>
+                    {updated} student{updated === 1 ? "" : "s"} updated · routes refreshed in the background.
+                    {errors.length ? ` · ${errors.length} row${errors.length === 1 ? "" : "s"} skipped — see below.` : ""}
+                  </div>
+                </div>
+              </div>
+              {errors.length > 0 && (
+                <div style={{
+                  background: "var(--warn-soft, #fff4e2)",
+                  border: "1px solid var(--warn, #d4944e)",
+                  borderRadius: 7, padding: "8px 10px",
+                  fontSize: 11.5, color: "var(--ink-2)", lineHeight: 1.5,
+                  maxHeight: 160, overflowY: "auto",
+                }}>
+                  {errors.slice(0, 12).map((e, i) => (
+                    <div key={i}><strong>{e.name || `Row ${e.row}`}:</strong> {e.reason}</div>
+                  ))}
+                  {errors.length > 12 && (
+                    <div style={{ color: "var(--ink-4)", marginTop: 4 }}>…and {errors.length - 12} more</div>
+                  )}
+                </div>
+              )}
+            </div>
+          )
+        ) : (
+          <>
+            <div
+              onClick={() => inputRef.current?.click()}
+              style={{
+                border: "2px dashed var(--rule)", borderRadius: 12, padding: 26,
+                textAlign: "center", cursor: "pointer", background: "var(--card-2)",
+              }}
+            >
+              <Icon name="upload" size={22} />
+              <div style={{ marginTop: 8, fontSize: 13, fontWeight: 500 }}>
+                {file ? file.name : "Click to select a CSV or Excel file"}
+              </div>
+              <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 4 }}>
+                {file ? `${(file.size / 1024).toFixed(1)} KB` : ".csv / .xlsx — matches students by name"}
+              </div>
+              <input
+                ref={inputRef}
+                type="file"
+                accept=".csv,text/csv,.xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+                style={{ display: "none" }}
+                onChange={(e) => setFile(e.target.files?.[0] || null)}
+              />
+            </div>
+            <div style={{ fontSize: 11.5, color: "var(--ink-3)" }}>
+              Need a starting point? <a onClick={downloadSample} style={{ color: "var(--accent)", cursor: "pointer", textDecoration: "underline" }}>Download a sample template</a>. Use the same route codes you've created on this screen. Leave a side blank or type <code>—</code> if a student has no transport on that trip.
+            </div>
+            {phase === "importing" && (
+              <div style={{
+                display: "flex", alignItems: "center", gap: 10,
+                padding: "10px 12px", borderRadius: 8,
+                background: "var(--accent-soft)", color: "var(--accent-2)",
+                fontSize: 12.5, fontWeight: 500,
+              }}>
+                <span className="spinner" style={{
+                  width: 14, height: 14, borderRadius: "50%",
+                  border: "2px solid var(--accent)", borderTopColor: "transparent",
+                  animation: "spin 0.8s linear infinite",
+                }} />
+                Matching students and updating routes…
+                <style jsx>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+              </div>
+            )}
+          </>
+        )}
+
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          {phase === "done" ? (
+            <button className="btn accent" onClick={onClose}>
+              <Icon name="check" size={13} />Done
+            </button>
+          ) : (
+            <>
+              <button className="btn ghost" onClick={onClose} disabled={phase === "importing"}>
+                {phase === "importing" ? "Please wait…" : "Cancel"}
+              </button>
+              <button className="btn accent" disabled={!file || phase === "importing"} onClick={onClick}>
+                {phase === "importing" ? (
+                  <>
+                    <span style={{
+                      width: 12, height: 12, borderRadius: "50%",
+                      border: "2px solid currentColor", borderTopColor: "transparent",
+                      display: "inline-block", animation: "spin 0.8s linear infinite", marginRight: 6,
+                    }} />
+                    Importing…
+                  </>
+                ) : (
+                  <><Icon name="upload" size={13} />Import {file ? "" : "(pick a file)"}</>
+                )}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </ModalShell>
   );
 }
 
