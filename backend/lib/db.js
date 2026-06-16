@@ -393,6 +393,27 @@ export async function readAllData() {
       // made in the last hour. The Students FeeCell uses this to surface
       // an "Undo" button only while the snapshot is still valid.
       feeEditSnapshots: listFeeEditSnapshots(),
+      // Audit trails — full history of every fee change and every
+      // transport assignment. Unioned from Supabase + file fallback so
+      // a row written during a cache-miss isn't lost.
+      feeEdits: await (async () => {
+        try {
+          const r = await safeSelect("fee_edits", (q) => q.order("created_at", { ascending: false }).limit(2000));
+          const m = new Map();
+          for (const x of r) if (x?.id) m.set(x.id, x);
+          for (const x of fileFeeEditsSafe()) if (x?.id && !m.has(x.id)) m.set(x.id, x);
+          return [...m.values()];
+        } catch { return fileFeeEditsSafe(); }
+      })(),
+      transportAssignments: await (async () => {
+        try {
+          const r = await safeSelect("transport_assignments", (q) => q.order("assigned_at", { ascending: false }).limit(5000));
+          const m = new Map();
+          for (const x of r) if (x?.id) m.set(x.id, x);
+          for (const x of fileTransportAssignmentsSafe()) if (x?.id && !m.has(x.id)) m.set(x.id, x);
+          return [...m.values()];
+        } catch { return fileTransportAssignmentsSafe(); }
+      })(),
     };
   }
   const db = fileRead();
@@ -410,6 +431,8 @@ export async function readAllData() {
     syllabus: Array.isArray(db.syllabus) ? db.syllabus : [],
     appSettings: db.appSettings && typeof db.appSettings === "object" ? db.appSettings : {},
     feeEditSnapshots: listFeeEditSnapshots(),
+    feeEdits: fileFeeEditsSafe(),
+    transportAssignments: fileTransportAssignmentsSafe(),
   };
 }
 
@@ -534,12 +557,53 @@ export async function addStudent(row) {
     if (payload.pickup_stop && !out.pickupStop) out.pickupStop = payload.pickup_stop;
     if (payload.pickup_stop_evening && !out.pickupStopEvening) out.pickupStopEvening = payload.pickup_stop_evening;
     if (payload.transport_evening && !out.transportEvening) out.transportEvening = payload.transport_evening;
+    // Mirror the transport assignment into the audit table so the row
+    // exists from day-one alongside the students-table column.
+    try {
+      await writeTransportAssignmentsForStudent(out, "admission");
+    } catch (e) {
+      console.warn(`[db] transport_assignments admission audit failed (non-fatal): ${e.message}`);
+    }
     return out;
   }
   const db = fileRead();
   db.addedStudents.unshift(row);
   fileWrite(db);
+  try {
+    await writeTransportAssignmentsForStudent(row, "admission");
+  } catch (e) {
+    console.warn(`[db] transport_assignments admission audit failed (non-fatal): ${e.message}`);
+  }
   return row;
+}
+
+// Helper used by addStudent + updateStudent + bulk-assign — writes one
+// audit row per direction (morning + evening) whenever either field
+// changes. Skips the audit if the assignment didn't change.
+async function writeTransportAssignmentsForStudent(student, actor) {
+  if (!student?.id) return;
+  if (student.transport && student.transport !== "—") {
+    await appendTransportAssignment({
+      studentId: student.id,
+      studentName: student.name,
+      cls: student.cls,
+      direction: "morning",
+      routeCode: student.transport,
+      stopName: student.pickupStop || null,
+      assignedBy: actor || null,
+    });
+  }
+  if (student.transportEvening && student.transportEvening !== "—") {
+    await appendTransportAssignment({
+      studentId: student.id,
+      studentName: student.name,
+      cls: student.cls,
+      direction: "evening",
+      routeCode: student.transportEvening,
+      stopName: student.pickupStopEvening || null,
+      assignedBy: actor || null,
+    });
+  }
 }
 
 // Pretty label for a class number — delegates to the shared display
@@ -653,6 +717,13 @@ export async function updateStudent(id, patch) {
       if (wantsStop && !out.pickupStop) out.pickupStop = patch.pickupStop || null;
       if (wantsEveningStop && !out.pickupStopEvening) out.pickupStopEvening = patch.pickupStopEvening || null;
       if (fields.transport_evening && !out.transportEvening) out.transportEvening = fields.transport_evening;
+      // Audit-log the transport change in transport_assignments if either
+      // the morning or evening side was touched in this update.
+      if ("transport" in patch || wantsStop || "transportEvening" in patch || wantsEveningStop) {
+        try { await writeTransportAssignmentsForStudent(out, "updateStudent"); } catch (e) {
+          console.warn(`[db] transport_assignments update audit failed (non-fatal): ${e.message}`);
+        }
+      }
       return out;
     }
   }
@@ -674,6 +745,11 @@ export async function updateStudent(id, patch) {
   fileWrite(db);
   if (wantsStop) savePickupStop(id, patch.pickupStop);
   if (wantsEveningStop) savePickupStopEvening(id, patch.pickupStopEvening);
+  if ("transport" in patch || wantsStop || "transportEvening" in patch || wantsEveningStop) {
+    try { await writeTransportAssignmentsForStudent(merged, "updateStudent"); } catch (e) {
+      console.warn(`[db] transport_assignments update audit failed (non-fatal): ${e.message}`);
+    }
+  }
   return merged;
 }
 
@@ -790,6 +866,138 @@ function clearFeeEditSnapshot(studentId) {
     delete snapshots[studentId];
     writeFeeEditSnapshotsRaw(snapshots);
   }
+}
+
+// ---------- audit-trail writers (Supabase tables, file fallback) ----------
+//
+// Both fee_edits and transport_assignments are append-only ledgers in
+// Supabase. We try Supabase first; on any error (table missing, schema
+// cache lag, network blip) we fall back to a local file so the audit
+// trail isn't lost. Each fileXxxSafe() reader merges both halves when
+// readAllData() runs, so the admin always sees the union of the two.
+
+async function appendFeeEdit(row) {
+  const id = row.id || `FED-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 999)}`;
+  const payload = {
+    id,
+    student_id: row.studentId,
+    student_name: row.studentName || null,
+    cls: row.cls || null,
+    action: row.action,
+    amount_before: row.amountBefore ?? null,
+    amount_after: row.amountAfter ?? null,
+    paid_before: row.paidBefore ?? null,
+    paid_after: row.paidAfter ?? null,
+    receipt_id: row.receiptId || null,
+    actor_name: row.actorName || null,
+    actor_role: row.actorRole || null,
+    reverted_at: row.revertedAt || null,
+  };
+  if (supabaseEnabled) {
+    const ins = await supabase.from("fee_edits").insert(payload);
+    if (!ins.error) return { id, ...payload };
+    // Schema cache lag / table missing → fall through to file store.
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.feeEdits)) db.feeEdits = [];
+  db.feeEdits.unshift({ ...payload, created_at: new Date().toISOString() });
+  fileWrite(db);
+  return { id, ...payload };
+}
+
+// Mark every still-active fee_edits row for a student as reverted. Called
+// by undoLastFeeEdit so the audit trail stays consistent — the reverted
+// edit shows reverted_at set, plus the new "undo" row that did the work.
+async function markFeeEditReverted(studentId) {
+  const at = new Date().toISOString();
+  if (supabaseEnabled) {
+    const upd = await supabase.from("fee_edits")
+      .update({ reverted_at: at })
+      .eq("student_id", studentId)
+      .is("reverted_at", null);
+    if (!upd.error) return;
+  }
+  const db = fileRead();
+  if (Array.isArray(db.feeEdits)) {
+    let touched = false;
+    for (const r of db.feeEdits) {
+      if (r.student_id === studentId && !r.reverted_at) {
+        r.reverted_at = at;
+        touched = true;
+      }
+    }
+    if (touched) fileWrite(db);
+  }
+}
+
+function fileFeeEditsSafe() {
+  try {
+    if (!fs.existsSync(DB_PATH)) return [];
+    const raw = fs.readFileSync(DB_PATH, "utf8");
+    const data = JSON.parse(raw);
+    return Array.isArray(data.feeEdits) ? data.feeEdits : [];
+  } catch { return []; }
+}
+
+// Append a transport-assignment change. Old 'active' rows for the same
+// (student_id, direction) get marked 'replaced' with replaced_at = now,
+// and a fresh 'active' row is written. routeCode = null + status =
+// 'cleared' is the "no transport on this side" sentinel.
+async function appendTransportAssignment(row) {
+  const id = `TA-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 999)}`;
+  const studentId = row.studentId;
+  const direction = row.direction === "evening" ? "evening" : "morning";
+  const routeCode = row.routeCode && row.routeCode !== "—" ? String(row.routeCode).toUpperCase() : null;
+  const status = routeCode ? "active" : "cleared";
+  const at = new Date().toISOString();
+  if (!studentId) return null;
+
+  const payload = {
+    id,
+    student_id: studentId,
+    student_name: row.studentName || null,
+    cls: row.cls || null,
+    direction,
+    route_code: routeCode,
+    stop_name: row.stopName || null,
+    assigned_by: row.assignedBy || null,
+    status,
+  };
+
+  if (supabaseEnabled) {
+    // Mark prior active row(s) as replaced.
+    try {
+      await supabase.from("transport_assignments")
+        .update({ status: "replaced", replaced_at: at })
+        .eq("student_id", studentId)
+        .eq("direction", direction)
+        .eq("status", "active");
+    } catch {}
+    const ins = await supabase.from("transport_assignments").insert(payload);
+    if (!ins.error) return { ...payload, assigned_at: at };
+  }
+
+  // File fallback — same lifecycle.
+  const db = fileRead();
+  if (!Array.isArray(db.transportAssignments)) db.transportAssignments = [];
+  for (const t of db.transportAssignments) {
+    if (t.student_id === studentId && t.direction === direction && t.status === "active") {
+      t.status = "replaced";
+      t.replaced_at = at;
+    }
+  }
+  db.transportAssignments.unshift({ ...payload, assigned_at: at });
+  fileWrite(db);
+  return { ...payload, assigned_at: at };
+}
+
+function fileTransportAssignmentsSafe() {
+  try {
+    if (!fs.existsSync(DB_PATH)) return [];
+    const raw = fs.readFileSync(DB_PATH, "utf8");
+    const data = JSON.parse(raw);
+    return Array.isArray(data.transportAssignments) ? data.transportAssignments : [];
+  } catch { return []; }
 }
 
 // ---------- fees ----------
@@ -1060,6 +1268,38 @@ export async function editStudentFee({ studentId, newTotal, newPaid, actor = "St
     previousPaid: currentPaid,
   });
 
+  // 4) Append a permanent row to the fee_edits audit table so this change
+  //    is recoverable / queryable forever, not just within the 1-hour
+  //    undo window. Best-effort — never blocks the edit if the audit
+  //    write fails.
+  try {
+    // Look up name + class for the audit row if we didn't already.
+    let auditStudent = null;
+    if (supabaseEnabled) {
+      const sSel = await supabase.from("students").select("name,cls").eq("id", studentId).maybeSingle();
+      if (sSel.data) auditStudent = sSel.data;
+    } else {
+      const db = fileRead();
+      const s = (db.addedStudents || []).find((x) => x.id === studentId);
+      if (s) auditStudent = { name: s.name, cls: s.cls };
+    }
+    await appendFeeEdit({
+      studentId,
+      studentName: auditStudent?.name || null,
+      cls: auditStudent?.cls || null,
+      action: "edit",
+      amountBefore: currentTotal,
+      amountAfter: tgt,
+      paidBefore: currentPaid,
+      paidAfter: tgtPaid,
+      receiptId: addedReceiptIds[0] || null,
+      actorName: actor,
+      actorRole: null,
+    });
+  } catch (e) {
+    console.warn(`[db] fee_edits audit write failed (non-fatal): ${e.message}`);
+  }
+
   return {
     previousTotal: currentTotal, previousPaid: currentPaid,
     newTotal: tgt, newPaid: tgtPaid, newPending,
@@ -1096,6 +1336,28 @@ export async function undoLastFeeEdit({ studentId }) {
   await setPendingFeeAmount(studentId, snap.previousPending);
 
   clearFeeEditSnapshot(studentId);
+
+  // Flip the corresponding fee_edits row(s) to reverted, AND record the
+  // undo itself as its own audit row so a query like
+  //   select * from fee_edits where student_id = '...' order by created_at
+  // tells the full story.
+  try {
+    await markFeeEditReverted(studentId);
+    await appendFeeEdit({
+      studentId,
+      studentName: null,
+      cls: null,
+      action: "undo",
+      amountBefore: null,
+      amountAfter: snap.previousTotal,
+      paidBefore: null,
+      paidAfter: snap.previousPaid,
+      receiptId: null,
+      actorName: "system",
+    });
+  } catch (e) {
+    console.warn(`[db] fee_edits undo audit failed (non-fatal): ${e.message}`);
+  }
 
   return {
     restoredPending: snap.previousPending,
@@ -1135,6 +1397,28 @@ export async function deleteRecentFee(receiptId) {
       if (!deleted) deleted = db.recentFees[idx];
       db.recentFees.splice(idx, 1);
       fileWrite(db);
+    }
+  }
+
+  // Audit trail: every receipt delete leaves a row in fee_edits so the
+  // school has a permanent record of "RCP-XYZ was removed by Y at Z".
+  if (deleted) {
+    try {
+      const studentId = deleted.student_id || deleted.studentId;
+      await appendFeeEdit({
+        studentId,
+        studentName: deleted.name || null,
+        cls: deleted.cls || null,
+        action: "delete_receipt",
+        amountBefore: null,
+        amountAfter: null,
+        paidBefore: Number(deleted.amount) || 0,
+        paidAfter: 0,
+        receiptId,
+        actorName: "Staff",
+      });
+    } catch (e) {
+      console.warn(`[db] fee_edits delete audit failed (non-fatal): ${e.message}`);
     }
   }
 

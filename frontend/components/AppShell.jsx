@@ -354,6 +354,8 @@ export default function AppShell({ initialData, session }) {
         SCALE_SUPPORT_PLANS:   json.scaleSupportPlans || [],
         SCALE_DAILY_RITUALS:   json.scaleDailyRituals || [],
         FEE_EDIT_SNAPSHOTS:    json.feeEditSnapshots || {},
+        FEE_EDITS:             json.feeEdits || [],
+        TRANSPORT_ASSIGNMENTS: json.transportAssignments || [],
       });
     } catch {}
   };
