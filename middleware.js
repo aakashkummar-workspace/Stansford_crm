@@ -16,6 +16,11 @@ const PUBLIC_PATHS = [
   // Public donor form — anyone with the link can submit.
   "/donorform",
   "/api/donor-form",
+  // Public admission enquiry form — parents apply online without
+  // logging in. The submission lands in the enquiries table for
+  // staff to review on the Admissions screen.
+  "/admissionform",
+  "/api/admissions/public",
 ];
 
 function isPublic(pathname) {
