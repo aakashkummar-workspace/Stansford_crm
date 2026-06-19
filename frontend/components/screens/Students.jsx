@@ -13,7 +13,7 @@ import { formatClassLabel } from "@/backend/lib/format.js";
 // element ever shows or asks for a section letter.
 const ONLY_SECTION = "A";
 
-export default function ScreenStudents({ E, refresh, role, session }) {
+export default function ScreenStudents({ E, refresh, role, session, searchFocus, clearSearchFocus }) {
   const school = resolveSchool(E?.SETTINGS);
   const actor  = session?.name || null;
   // Teachers, principals and admin can edit student details. Parents cannot —
@@ -59,6 +59,23 @@ export default function ScreenStudents({ E, refresh, role, session }) {
   const activeRoster   = (E.ADDED_STUDENTS    || []).map((s) => ({ ...s, __added: true, __status: "active" }));
   const archivedRoster = (E.ARCHIVED_STUDENTS || []).map((s) => ({ ...s, __added: true, __status: "archived" }));
   const roster = view === "archived" ? archivedRoster : activeRoster;
+
+  // Global search deep-link: when a user clicks a student in the topbar
+  // search dropdown, AppShell sets searchFocus={type:"student", id, ...}.
+  // We find that student (checking archived too in case they've been
+  // withdrawn) and pop the profile modal, then clear the focus so a
+  // later navigation back to this screen doesn't re-open it.
+  useEffect(() => {
+    if (!searchFocus || searchFocus.type !== "student" || !searchFocus.id) return;
+    const all = [...activeRoster, ...archivedRoster];
+    const target = all.find((s) => s.id === searchFocus.id);
+    if (target) {
+      if (target.__status === "archived") setView("archived");
+      setProfileOf(target);
+    }
+    clearSearchFocus?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchFocus]);
 
   // Undoable fee edits — map of studentId → snapshot. Populated by
   // /api/data; the API serves only the unexpired ones (entries TTL at

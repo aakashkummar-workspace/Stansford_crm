@@ -130,6 +130,13 @@ export default function AppShell({ initialData, session }) {
   const [data, setData] = useState(initialData);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [current, setCurrent] = useState(DEFAULT_SCREEN_BY_ROLE[session?.role] || "dashboard");
+  // Set by GlobalSearch when the user clicks a result. The destination
+  // screen reads this and opens the relevant detail (e.g. Students reads
+  // {type:"student", id} and pops the profile modal). Each screen is
+  // responsible for clearing it via clearSearchFocus once consumed so
+  // navigating back to the same screen doesn't re-open the modal.
+  const [searchFocus, setSearchFocus] = useState(null);  // { screen, type, id, title } | null
+  const clearSearchFocus = () => setSearchFocus(null);
   const [showTweaks, setShowTweaks] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [hydrated, setHydrated] = useState(false);
@@ -586,7 +593,7 @@ export default function AppShell({ initialData, session }) {
         style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: "32px 16px", background: "var(--bg-2)" }}
       >
         <MobileShell current={current} setCurrent={setCurrent} role={role}>
-          <Comp E={E} refresh={refresh} role={role} session={session} setCurrent={setCurrent} />
+          <Comp E={E} refresh={refresh} role={role} session={session} setCurrent={setCurrent} searchFocus={searchFocus} clearSearchFocus={clearSearchFocus} />
         </MobileShell>
         <ViewToggle view={view} setView={(v) => setSetting("view", v)} />
         <Tweaks show={showTweaks} settings={settings} setSetting={setSetting} />
@@ -641,6 +648,10 @@ export default function AppShell({ initialData, session }) {
             E={scopedData}
             role={role}
             setCurrent={setCurrent}
+            onPickItem={(item) => {
+              if (item.screen) setCurrent(item.screen);
+              setSearchFocus(item);
+            }}
             placeholder={
               role === "parent"            ? "Search fees, messages, library, activities…" :
               role === "teacher"           ? "Search students, leave, remarks, library, SCALE…" :
@@ -656,7 +667,7 @@ export default function AppShell({ initialData, session }) {
           </div>
         </div>
 
-        <Comp E={E} refresh={refresh} role={role} session={session} setCurrent={setCurrent} />
+        <Comp E={E} refresh={refresh} role={role} session={session} setCurrent={setCurrent} searchFocus={searchFocus} clearSearchFocus={clearSearchFocus} />
 
         <BrandFooter />
       </div>

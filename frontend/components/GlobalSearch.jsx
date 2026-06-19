@@ -103,7 +103,7 @@ function scoreMatch(item, q) {
   return s;
 }
 
-export default function GlobalSearch({ E, role, setCurrent, placeholder }) {
+export default function GlobalSearch({ E, role, setCurrent, onPickItem, placeholder }) {
   const [open, setOpen]   = useState(false);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
@@ -152,7 +152,14 @@ export default function GlobalSearch({ E, role, setCurrent, placeholder }) {
 
   function pick(it) {
     const meta = TYPE_META[it.type];
-    if (meta?.screen && setCurrent) setCurrent(meta.screen);
+    // Prefer the deep-linking callback when supplied — it both navigates
+    // AND passes the focus (type + id) so the destination screen can open
+    // the relevant detail (e.g. ProfileModal for a student).
+    if (onPickItem) {
+      onPickItem({ screen: meta?.screen, type: it.type, id: it.id, title: it.title });
+    } else if (meta?.screen && setCurrent) {
+      setCurrent(meta.screen);
+    }
     setOpen(false);
     setQuery("");
   }

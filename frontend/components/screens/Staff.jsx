@@ -34,7 +34,7 @@ function Toast({ msg, tone, onClose }) {
   );
 }
 
-export default function ScreenStaff({ E, refresh, role, session }) {
+export default function ScreenStaff({ E, refresh, role, session, searchFocus, clearSearchFocus }) {
   const school = resolveSchool(E?.SETTINGS);
   const actor  = session?.name || null;
   const canEdit = role === "principal" || role === "admin";
@@ -58,6 +58,15 @@ export default function ScreenStaff({ E, refresh, role, session }) {
     if (filter === "all") return sorted;
     return sorted.filter((s) => (s.role || "").toLowerCase().includes(filter));
   }, [allStaff, filter]);
+
+  // Global search deep-link: open the StaffProfileModal for the picked id.
+  useEffect(() => {
+    if (!searchFocus || searchFocus.type !== "staff" || !searchFocus.id) return;
+    const target = allStaff.find((s) => s.id === searchFocus.id);
+    if (target) setProfileFor(target);
+    clearSearchFocus?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchFocus]);
 
   const total = allStaff.length;
   const interns = allStaff.filter((s) => /intern/i.test(s.role)).length;

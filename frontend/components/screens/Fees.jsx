@@ -14,7 +14,7 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-export default function ScreenFees({ E, refresh, role, session }) {
+export default function ScreenFees({ E, refresh, role, session, searchFocus, clearSearchFocus }) {
   const school = resolveSchool(E?.SETTINGS);
   const actor  = session?.name || null;
   const isParent = role === "parent";
@@ -144,6 +144,18 @@ export default function ScreenFees({ E, refresh, role, session }) {
     ],
     [scopedRecent, scopedPending]
   );
+
+  // Global search deep-link: when a fee/paid row is picked from the
+  // topbar search, select it so the right-hand Collect/Receipt panel
+  // jumps to that record.
+  useEffect(() => {
+    if (!searchFocus) return;
+    if (searchFocus.type !== "fee" && searchFocus.type !== "paid") return;
+    const hit = all.find((f) => f.id === searchFocus.id);
+    if (hit) setSelected(hit);
+    clearSearchFocus?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchFocus]);
 
   const counts = {
     All: all.length,
