@@ -47,10 +47,16 @@ export default function ScreenTransport({ E, refresh, role, session }) {
   }, [routes.length, routeIdx]);
 
   // Map: for the active route, group students by their pickup stop.
-  // Students are linked to a route via `student.transport === route.code`.
-  // Per-stop assignment is via `student.pickupStop` (matches a stop name).
-  // If the student has no pickupStop set, they fall into the FIRST stop so
-  // the driver can still see and mark them.
+  // Students are linked to a route via `student.transport === route.code`
+  // for morning routes, or `student.transportEvening === route.code` for
+  // evening routes. Per-stop assignment uses pickupStop / pickupStopEvening
+  // accordingly. Direction comes off the route ('morning' | 'evening' |
+  // 'both') — 'both' is treated as morning so single-direction schools that
+  // never set the field keep working.
+  const routeDir = route?.direction === "evening" ? "evening" : "morning";
+  const studentRouteCode = (stu) => routeDir === "evening" ? stu.transportEvening : stu.transport;
+  const studentPickupStop = (stu) => routeDir === "evening" ? stu.pickupStopEvening : stu.pickupStop;
+
   const studentsByStop = useMemo(() => {
     if (!route) return {};
     const stops = route.stops || [];
@@ -58,12 +64,14 @@ export default function ScreenTransport({ E, refresh, role, session }) {
     const out = {};
     for (const s of stops) out[s.name] = [];
     for (const stu of (E.ADDED_STUDENTS || [])) {
-      if (stu.transport !== route.code) continue;
-      const matchStop = stops.find((s) => s.name === stu.pickupStop)?.name || firstStopName;
+      if (studentRouteCode(stu) !== route.code) continue;
+      const stop = studentPickupStop(stu);
+      const matchStop = stops.find((s) => s.name === stop)?.name || firstStopName;
       if (matchStop && out[matchStop]) out[matchStop].push(stu);
     }
     return out;
-  }, [route, E.ADDED_STUDENTS]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [route, E.ADDED_STUDENTS, routeDir]);
 
   // Per-student attendance, persisted to /api/transport/attendance and
   // surfaced via E.TRANSPORT_ATTENDANCE on every refresh. We keep an
@@ -155,29 +163,41 @@ export default function ScreenTransport({ E, refresh, role, session }) {
   };
   const linkStudent = async (studentId, stopName) => {
     try {
+      // Direction-aware patch: an evening route writes only the evening
+      // slot, so the student's morning route (a different bus) stays
+      // intact. Same in reverse for morning routes.
+      const patch = routeDir === "evening"
+        ? { id: studentId, transportEvening: route.code, pickupStopEvening: stopName }
+        : { id: studentId, transport:        route.code, pickupStop:        stopName };
       const r = await fetch("/api/students", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: studentId, transport: route.code, pickupStop: stopName }),
+        body: JSON.stringify(patch),
       });
       const json = await r.json().catch(() => ({}));
       if (!r.ok || !json.ok) throw new Error(json.error || "Failed");
-      showToast(`${json.student.name} → ${route.code} · ${stopName}`, "ok");
+      showToast(`${json.student.name} → ${route.code} · ${stopName} (${routeDir})`, "ok");
       setAddStopOpen(null);
       await refresh?.();
     } catch (e) { showToast(e.message, "err"); }
   };
   const unlinkStudent = async (student) => {
-    if (!confirm(`Remove ${student.name} from ${route.code} · ${student.pickupStop || "this stop"}?`)) return;
+    const stopLabel = studentPickupStop(student) || "this stop";
+    if (!confirm(`Remove ${student.name} from ${route.code} · ${stopLabel} (${routeDir})?`)) return;
     try {
+      // Only clear the slot matching this route's direction — leaves the
+      // other direction's assignment untouched.
+      const patch = routeDir === "evening"
+        ? { id: student.id, transportEvening: "—", pickupStopEvening: null }
+        : { id: student.id, transport:        "—", pickupStop:        null };
       const r = await fetch("/api/students", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: student.id, transport: "—", pickupStop: null }),
+        body: JSON.stringify(patch),
       });
       const json = await r.json().catch(() => ({}));
       if (!r.ok || !json.ok) throw new Error(json.error || "Failed");
-      showToast(`${student.name} unlinked from transport`, "ok");
+      showToast(`${student.name} unlinked from ${routeDir} transport`, "ok");
       await refresh?.();
     } catch (e) { showToast(e.message, "err"); }
   };
@@ -1658,32 +1678,47 @@ function AssignStaffModal({ route, staff = [], onClose, onAssign }) {
   );
 }
 
-// Picker for assigning an existing student to a stop. Lists students who:
-//   - aren't currently linked to any transport route, OR
-//   - are on a different route (with a hint), OR
-//   - are on this route but a different stop
-// With a search box at the top to filter by name / class / id.
+// Picker for assigning an existing student to a stop. Direction-aware —
+// only flags conflicts inside the same direction. A student on R1 (morning)
+// being added to R6 (evening) is a brand-new assignment, NOT a "Switch":
+// they ride R1 in the morning AND R6 in the evening; both fields can hold
+// different route codes independently.
+//
+// States surfaced:
+//   - no transport at all in this direction        → "New"
+//   - already on this route + this stop           → hidden (filtered out)
+//   - on this route but a different stop          → "Move"
+//   - on a different route in this direction      → "Switch"  (real collision)
+//   - assigned in the OTHER direction only        → "Add"     (no collision)
 function AddStudentToStopModal({ route, stop, students, onClose, onPick }) {
   const [q, setQ] = useState("");
   const [busyId, setBusyId] = useState(null);
 
   const initials = (n) => (n || "?").trim().split(/\s+/).map((p) => p[0]).slice(0, 2).join("").toUpperCase();
 
-  // Surface students whose CURRENT pickup stop isn't this one. (Adding the
-  // student to this stop will move them here, even if they're on another
-  // route — confirm with the principal that this is the intent.)
+  const dir = route.direction === "evening" ? "evening" : "morning";
+  const dirLabel = dir === "evening" ? "evening" : "morning";
+  // The student field that THIS direction would write to.
+  const sameDirRoute = (s) => dir === "evening" ? s.transportEvening : s.transport;
+  const sameDirStop  = (s) => dir === "evening" ? s.pickupStopEvening : s.pickupStop;
+  const otherDirRoute = (s) => dir === "evening" ? s.transport : s.transportEvening;
+
+  // Hide students who are already on this exact route + stop in THIS direction.
+  // Everyone else is a candidate — including students on a different bus in
+  // the OTHER direction (no collision; they're just travelling both ways).
   const candidates = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return students
-      .filter((s) => !(s.transport === route.code && s.pickupStop === stop.name))
+      .filter((s) => !(sameDirRoute(s) === route.code && sameDirStop(s) === stop.name))
       .filter((s) => !needle || `${s.name} ${s.cls} ${s.id}`.toLowerCase().includes(needle))
       .slice(0, 60);
-  }, [students, route.code, stop.name, q]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [students, route.code, stop.name, q, dir]);
 
   return (
     <ModalShell
       title={`Add student to ${stop.name}`}
-      sub={`${route.code} · pickup ${stop.t}`}
+      sub={`${route.code} · ${dirLabel} · pickup ${stop.t}`}
       onClose={onClose}
       width={520}
     >
@@ -1700,9 +1735,12 @@ function AddStudentToStopModal({ route, stop, students, onClose, onPick }) {
         ) : (
           <div style={{ maxHeight: 360, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
             {candidates.map((s) => {
-              const onOtherRoute = s.transport && s.transport !== "—" && s.transport !== route.code;
-              const onThisRouteOtherStop = s.transport === route.code && s.pickupStop && s.pickupStop !== stop.name;
-              const noTransport = !s.transport || s.transport === "—";
+              const here = sameDirRoute(s);
+              const otherDir = otherDirRoute(s);
+              const onSameDirOtherRoute = here && here !== "—" && here !== route.code;
+              const onThisRouteOtherStop = here === route.code && sameDirStop(s) && sameDirStop(s) !== stop.name;
+              const noTransportThisDir   = !here || here === "—";
+              const onlyOtherDirSet      = noTransportThisDir && otherDir && otherDir !== "—";
               return (
                 <button
                   key={s.id}
@@ -1732,13 +1770,15 @@ function AddStudentToStopModal({ route, stop, students, onClose, onPick }) {
                     <div style={{ fontSize: 13, fontWeight: 500, color: "var(--ink)" }}>{s.name}</div>
                     <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>
                       {s.cls} · {s.id}
-                      {noTransport && " · no bus yet"}
-                      {onOtherRoute && ` · currently on ${s.transport}`}
-                      {onThisRouteOtherStop && ` · currently at ${s.pickupStop}`}
+                      {noTransportThisDir && !onlyOtherDirSet && ` · no ${dirLabel} bus yet`}
+                      {onlyOtherDirSet && ` · ${dir === "evening" ? "morning" : "evening"} bus: ${otherDir}`}
+                      {onSameDirOtherRoute && ` · ${dirLabel}: currently on ${here}`}
+                      {onThisRouteOtherStop && ` · currently at ${sameDirStop(s)}`}
                     </div>
                   </div>
-                  {onOtherRoute && <span className="chip warn" style={{ fontSize: 10 }}>Switch</span>}
-                  {noTransport && <span className="chip ok" style={{ fontSize: 10 }}>New</span>}
+                  {onSameDirOtherRoute && <span className="chip warn" style={{ fontSize: 10 }}>Switch</span>}
+                  {noTransportThisDir && !onlyOtherDirSet && <span className="chip ok" style={{ fontSize: 10 }}>New</span>}
+                  {onlyOtherDirSet && <span className="chip ok" style={{ fontSize: 10 }}>Add</span>}
                   {onThisRouteOtherStop && <span className="chip" style={{ fontSize: 10 }}>Move</span>}
                 </button>
               );
@@ -1746,7 +1786,10 @@ function AddStudentToStopModal({ route, stop, students, onClose, onPick }) {
           </div>
         )}
         <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>
-          Picking a student here sets their bus to <b>{route.code}</b> and pickup stop to <b>{stop.name}</b>. Changes are reversible.
+          Picking a student here sets their <b>{dirLabel}</b> bus to <b>{route.code}</b> and pickup to <b>{stop.name}</b>.
+          {dir === "morning"
+            ? " Their evening route (if any) is not affected."
+            : " Their morning route (if any) is not affected."}
         </div>
       </div>
     </ModalShell>
