@@ -137,6 +137,11 @@ export default function ScreenMoney({ E, refresh, role }) {
   const [methodFilter, setMethodFilter] = useState("All");
   const [spentFilter, setSpentFilter] = useState("All");          // All | Manual | Inventory
   const [showAddExpense, setShowAddExpense] = useState(false);
+  // When a template tile is clicked, we pre-fill the Add Expense modal
+  // with the template's defaults. `null` means a fresh blank modal.
+  const [expensePrefill, setExpensePrefill] = useState(null);
+  // The template-management modal (create/edit/delete tiles).
+  const [editingTemplate, setEditingTemplate] = useState(null);  // null | {} | template-row
   const [toast, setToast] = useState(null);
 
   const showToast = (msg, tone) => {
@@ -182,6 +187,46 @@ export default function ScreenMoney({ E, refresh, role }) {
     setShowAddExpense(false);
     showToast(`Money spent · ${j.expense.id} added`, "ok");
     await refresh?.();
+  }
+
+  // Filter the templates we show in the Quick Templates strip to the
+  // scope the admin is currently looking at. Combined view shows both.
+  const visibleTemplates = useMemo(() => {
+    const all = E.EXPENSE_TEMPLATES || [];
+    if (accountScope === "School only") return all.filter((t) => t.scope === "school");
+    if (accountScope === "Trust only")  return all.filter((t) => t.scope === "trust");
+    return all;
+  }, [E.EXPENSE_TEMPLATES, accountScope]);
+
+  function openExpenseFromTemplate(tmpl) {
+    setExpensePrefill(tmpl);
+    setShowAddExpense(true);
+  }
+
+  async function saveTemplate(payload) {
+    const isEdit = editingTemplate?.id;
+    const url = isEdit ? `/api/expenses/templates/${editingTemplate.id}` : `/api/expenses/templates`;
+    const r = await fetch(url, {
+      method: isEdit ? "PATCH" : "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
+    setEditingTemplate(null);
+    showToast(isEdit ? "Template updated" : "Template saved", "ok");
+    await refresh?.();
+  }
+
+  async function removeTemplate(tmpl) {
+    if (!confirm(`Delete template "${tmpl.name}"?`)) return;
+    try {
+      const r = await fetch(`/api/expenses/templates/${tmpl.id}`, { method: "DELETE" });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
+      showToast("Template removed", "ok");
+      await refresh?.();
+    } catch (e) { showToast(e.message, "err"); }
   }
 
   async function removeExpense(t) {
@@ -378,6 +423,55 @@ export default function ScreenMoney({ E, refresh, role }) {
         );
       })()}
 
+      {canEdit && (
+        <div className="card" style={{ marginBottom: 12 }}>
+          <div className="card-head">
+            <div>
+              <div className="card-title">Quick expense templates</div>
+              <div className="card-sub">
+                Save recurring expenses as one-click tiles · click a tile to pre-fill the Add Expense modal
+              </div>
+            </div>
+            <button
+              className="btn ghost"
+              onClick={() => setEditingTemplate({})}
+              style={{ height: 32 }}
+            >
+              <Icon name="plus" size={12} />Add template
+            </button>
+          </div>
+          <div className="card-body">
+            {visibleTemplates.length === 0 ? (
+              <div style={{
+                padding: "18px 14px", textAlign: "center",
+                color: "var(--ink-4)", fontSize: 12.5,
+                background: "var(--bg-2)", borderRadius: 8,
+                border: "1px dashed var(--rule, #e5dfd1)",
+              }}>
+                No templates yet. Click <strong>Add template</strong> to save your first recurring expense
+                (e.g. <em>Electricity bill · ₹12,000 · Utilities</em>) — then it shows up here as a one-click tile.
+              </div>
+            ) : (
+              <div style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+                gap: 10,
+              }}>
+                {visibleTemplates.map((t) => (
+                  <TemplateTile
+                    key={t.id}
+                    tmpl={t}
+                    onUse={() => openExpenseFromTemplate(t)}
+                    onEdit={() => setEditingTemplate(t)}
+                    onDelete={() => removeTemplate(t)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="grid g-12">
         <div className="card col-12">
           <div className="card-head">
@@ -494,30 +588,232 @@ export default function ScreenMoney({ E, refresh, role }) {
 
       {showAddExpense && canEdit && (
         <AddExpenseModal
-          onClose={() => setShowAddExpense(false)}
+          onClose={() => { setShowAddExpense(false); setExpensePrefill(null); }}
           onSubmit={submitExpense}
           defaultScope={isTrustOnly || accountScope === "Trust only" ? "trust" : "school"}
           lockScope={isTrustOnly}
           customCategories={E.EXPENSE_CATEGORIES || []}
           onCategoryAdded={refresh}
+          prefill={expensePrefill}
+        />
+      )}
+
+      {editingTemplate && canEdit && (
+        <TemplateEditModal
+          template={editingTemplate.id ? editingTemplate : null}
+          defaultScope={isTrustOnly || accountScope === "Trust only" ? "trust" : "school"}
+          lockScope={isTrustOnly}
+          customCategories={E.EXPENSE_CATEGORIES || []}
+          onClose={() => setEditingTemplate(null)}
+          onSubmit={saveTemplate}
         />
       )}
     </div>
   );
 }
 
-function AddExpenseModal({ onClose, onSubmit, defaultScope, lockScope = false, customCategories = [], onCategoryAdded }) {
+// One template tile. Click anywhere on it = "Use this template" (opens the
+// Add Expense modal pre-filled). The corner buttons handle edit / delete.
+function TemplateTile({ tmpl, onUse, onEdit, onDelete }) {
+  return (
+    <div
+      style={{
+        position: "relative",
+        background: "var(--card)",
+        border: "1px solid var(--rule, #e5dfd1)",
+        borderRadius: 10,
+        padding: "12px 12px 12px 14px",
+        display: "flex", flexDirection: "column", gap: 6,
+        cursor: "pointer",
+        transition: "border-color 0.15s, box-shadow 0.15s",
+      }}
+      onClick={onUse}
+      onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--rule, #e5dfd1)"; }}
+      role="button"
+      title="Click to use this template"
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 6 }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--ink)", lineHeight: 1.3, flex: 1, minWidth: 0 }}>
+          {tmpl.name}
+        </span>
+        <div style={{ display: "flex", gap: 2, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
+          <button
+            className="icon-btn"
+            title="Edit template"
+            onClick={onEdit}
+            style={{ width: 22, height: 22 }}
+          ><Icon name="pencil" size={10} /></button>
+          <button
+            className="icon-btn"
+            title="Delete template"
+            onClick={onDelete}
+            style={{ width: 22, height: 22 }}
+          ><Icon name="x" size={11} /></button>
+        </div>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: "var(--ink-3)" }}>
+        <span className="chip">{tmpl.category}</span>
+        <span style={{ color: "var(--ink-4)" }}>·</span>
+        <span style={{ textTransform: "uppercase", letterSpacing: 0.4, fontSize: 9.5, color: "var(--ink-4)" }}>
+          {tmpl.scope}
+        </span>
+      </div>
+      <div style={{
+        fontSize: 16, fontWeight: 600, color: "var(--ink)",
+        fontFamily: "var(--font-mono)", marginTop: 2,
+      }}>
+        {tmpl.defaultAmount > 0 ? `₹${Number(tmpl.defaultAmount).toLocaleString("en-IN")}` : "no default"}
+      </div>
+      {tmpl.defaultVendor && (
+        <div style={{ fontSize: 11, color: "var(--ink-4)" }}>
+          to {tmpl.defaultVendor}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Create / edit a single template. Same shape as the Add Expense form but
+// stores defaults instead of recording one expense.
+function TemplateEditModal({ template, defaultScope, lockScope = false, customCategories = [], onClose, onSubmit }) {
+  const isEdit = !!template;
+  const [busy, setBusy] = useState(false);
+  const [err, setErr]   = useState("");
+  const [form, setForm] = useState({
+    name: template?.name || "",
+    scope: template?.scope || defaultScope || "school",
+    category: template?.category || "Supplies",
+    defaultAmount: template?.defaultAmount ? String(template.defaultAmount) : "",
+    defaultVendor: template?.defaultVendor || "",
+    defaultPaymentMethod: template?.defaultPaymentMethod || "Bank transfer",
+  });
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  const mergedCategories = (() => {
+    const out = [...EXPENSE_CATEGORIES];
+    const seen = new Set(out.map((c) => c.toLowerCase()));
+    for (const c of customCategories) {
+      if (c.type !== form.scope) continue;
+      const name = String(c.name || "").trim();
+      if (name && !seen.has(name.toLowerCase())) {
+        out.push(name);
+        seen.add(name.toLowerCase());
+      }
+    }
+    return out;
+  })();
+
+  async function submit(e) {
+    e.preventDefault();
+    if (busy) return;
+    setBusy(true); setErr("");
+    try {
+      const name = form.name.trim();
+      if (!name) throw new Error("Template name is required");
+      const payload = {
+        name,
+        scope: form.scope,
+        category: form.category,
+        defaultAmount: Number(form.defaultAmount) || 0,
+        defaultVendor: form.defaultVendor.trim() || null,
+        defaultPaymentMethod: form.defaultPaymentMethod,
+      };
+      await onSubmit(payload);
+    } catch (ex) {
+      setErr(ex.message);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <ModalShell
+      title={isEdit ? `Edit template · ${template.name}` : "New expense template"}
+      sub="Saved defaults that pre-fill the Add Expense modal in one click."
+      onClose={onClose}
+    >
+      <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <Field label="Template name *">
+          <input
+            className="input"
+            value={form.name}
+            onChange={(e) => set("name", e.target.value)}
+            placeholder="e.g. Electricity bill"
+            autoFocus
+            maxLength={80}
+          />
+        </Field>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <Field label="Account *">
+            <div className="segmented" style={lockScope ? { opacity: 0.7, pointerEvents: "none" } : undefined}>
+              <button type="button" disabled={lockScope} className={form.scope === "school" ? "active" : ""} onClick={() => !lockScope && set("scope", "school")}>School</button>
+              <button type="button" disabled={lockScope} className={form.scope === "trust" ? "active" : ""} onClick={() => !lockScope && set("scope", "trust")}>Trust</button>
+            </div>
+          </Field>
+          <Field label="Category">
+            <select
+              className="select"
+              value={form.category}
+              onChange={(e) => set("category", e.target.value)}
+            >
+              {mergedCategories.map((c) => <option key={c}>{c}</option>)}
+            </select>
+          </Field>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <Field label="Default amount (₹)" hint="You can override per use">
+            <input
+              className="input"
+              inputMode="numeric"
+              value={form.defaultAmount}
+              onChange={(e) => set("defaultAmount", e.target.value.replace(/\D/g, ""))}
+              placeholder="12000"
+            />
+          </Field>
+          <Field label="Default payment method">
+            <select
+              className="select"
+              value={form.defaultPaymentMethod}
+              onChange={(e) => set("defaultPaymentMethod", e.target.value)}
+            >
+              {PAYMENT_METHODS.map((m) => <option key={m}>{m}</option>)}
+            </select>
+          </Field>
+        </div>
+        <Field label="Default vendor (optional)">
+          <input
+            className="input"
+            value={form.defaultVendor}
+            onChange={(e) => set("defaultVendor", e.target.value)}
+            placeholder="e.g. TANGEDCO"
+          />
+        </Field>
+        {err && (
+          <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "9px 12px", borderRadius: 7, fontSize: 12 }}>{err}</div>
+        )}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+          <button type="submit" className="btn accent" disabled={busy}>
+            <Icon name="check" size={13} />{busy ? "Saving…" : isEdit ? "Save changes" : "Create template"}
+          </button>
+        </div>
+      </form>
+    </ModalShell>
+  );
+}
+
+function AddExpenseModal({ onClose, onSubmit, defaultScope, lockScope = false, customCategories = [], onCategoryAdded, prefill = null }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const today = new Date().toISOString().slice(0, 10);
   const [form, setForm] = useState({
-    scope: defaultScope || "school",
-    category: "Supplies",
-    amount: "",
-    vendor: "",
-    memo: "",
+    scope: prefill?.scope || defaultScope || "school",
+    category: prefill?.category || "Supplies",
+    amount: prefill?.defaultAmount ? String(prefill.defaultAmount) : "",
+    vendor: prefill?.defaultVendor || "",
+    memo: prefill?.name ? `From template: ${prefill.name}` : "",
     date: today,
-    paymentMethod: "Bank transfer",
+    paymentMethod: prefill?.defaultPaymentMethod || "Bank transfer",
   });
   // "Also track in inventory" state. Only meaningful when the chosen
   // category is purchase-style (PURCHASE_CATEGORIES). When the user

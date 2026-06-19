@@ -32,6 +32,8 @@ function scopeForRole(data, session) {
       ...data,
       // Trust-scope expenses only — drop school-scope rows.
       expenses: (data.expenses || []).filter((e) => e.scope === "trust"),
+      // Same for templates — trust accountant only sees trust templates.
+      expenseTemplates: (data.expenseTemplates || []).filter((t) => t.scope === "trust"),
       // Strip every school-side list. Empty arrays/objects so screens
       // that defensively read these fields don't crash.
       addedStudents: [], archivedStudents: [],
@@ -77,6 +79,7 @@ function scopeForRole(data, session) {
     donorReceipts: [],
     donorFormSubmissions: [],
     expenses: [],
+    expenseTemplates: [],
     staff: [],
     teacherAttendance: [],
     audit: [],

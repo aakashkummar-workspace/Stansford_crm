@@ -358,6 +358,7 @@ export async function readAllData() {
       // Failures are tolerated so a fresh install (where the v2 migration
       // hasn't been applied yet) still loads.
       expenseCategories: await listExpenseCategories().catch(() => safeArr("expenseCategories")),
+      expenseTemplates:  await listExpenseTemplates().catch(() => safeArr("expenseTemplates")),
       donorFormSubmissions: await listDonorFormSubmissions({ limit: 200 }).catch(() => safeArr("donorFormSubmissions")),
       leaveRequests: await listLeaveRequests({ limit: 200 }).catch(() => safeArr("leaveRequests")),
       remarksRewards: await listRemarksRewards({ limit: 200 }).catch(() => safeArr("remarksRewards")),
@@ -6009,6 +6010,121 @@ export async function removeExpenseCategory(id) {
   if (idx === -1) return null;
   const removed = db.expenseCategories[idx];
   db.expenseCategories.splice(idx, 1);
+  fileWrite(db);
+  return removed;
+}
+
+// ---------- expense_templates (quick-add tiles on Money screen) ---------
+const fromExpenseTemplate = (r) => r ? ({
+  id: r.id,
+  name: r.name,
+  category: r.category,
+  defaultAmount: Number(r.default_amount) || 0,
+  defaultVendor: r.default_vendor || null,
+  defaultPaymentMethod: r.default_payment_method || "Bank transfer",
+  scope: r.scope || "school",
+  createdBy: r.created_by || null,
+  createdAt: r.created_at,
+}) : null;
+
+const toExpenseTemplate = (t) => ({
+  id: t.id,
+  name: String(t.name || "").trim(),
+  category: String(t.category || "").trim(),
+  default_amount: Math.max(0, Math.floor(Number(t.defaultAmount) || 0)),
+  default_vendor: t.defaultVendor ? String(t.defaultVendor).trim() : null,
+  default_payment_method: t.defaultPaymentMethod || "Bank transfer",
+  scope: t.scope === "trust" ? "trust" : "school",
+  created_by: t.createdBy || null,
+});
+
+export async function listExpenseTemplates({ scope } = {}) {
+  if (supabaseEnabled) {
+    let q = supabase.from("expense_templates").select("*").order("created_at", { ascending: false });
+    if (scope) q = q.eq("scope", scope);
+    const sel = await q;
+    if (!sel.error) return (sel.data || []).map(fromExpenseTemplate);
+    if (!isSchemaMissError(sel.error)) console.warn(`[db] expense_templates fell back: ${sel.error.message}`);
+  }
+  const db = fileRead();
+  const all = Array.isArray(db.expenseTemplates) ? db.expenseTemplates : [];
+  return scope ? all.filter((t) => t.scope === scope) : all;
+}
+
+export async function addExpenseTemplate({ name, category, defaultAmount = 0, defaultVendor = null, defaultPaymentMethod = "Bank transfer", scope = "school", createdBy = null } = {}) {
+  const trimmedName = String(name || "").trim();
+  if (!trimmedName) throw new Error("Template name is required");
+  if (trimmedName.length > 80) throw new Error("Template name is too long");
+  const cat = String(category || "").trim();
+  if (!cat) throw new Error("Category is required");
+  const id = `ET-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 999)}`;
+  const row = toExpenseTemplate({ id, name: trimmedName, category: cat, defaultAmount, defaultVendor, defaultPaymentMethod, scope, createdBy });
+  if (supabaseEnabled) {
+    const ins = await supabase.from("expense_templates").insert(row).select().single();
+    if (!ins.error) return fromExpenseTemplate(ins.data);
+    if (!isSchemaMissError(ins.error)) throw new Error(`expense_templates insert failed: ${ins.error.message}`);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.expenseTemplates)) db.expenseTemplates = [];
+  const local = fromExpenseTemplate({ ...row, created_at: new Date().toISOString() });
+  db.expenseTemplates.unshift(local);
+  fileWrite(db);
+  return local;
+}
+
+export async function updateExpenseTemplate(id, patch = {}) {
+  if (!id) throw new Error("id required");
+  const allowed = ["name", "category", "defaultAmount", "defaultVendor", "defaultPaymentMethod", "scope"];
+  const next = {};
+  for (const k of allowed) if (k in patch) next[k] = patch[k];
+  if (!Object.keys(next).length) throw new Error("Nothing to update");
+  if (next.name != null) next.name = String(next.name).trim();
+  if (next.category != null) next.category = String(next.category).trim();
+  if (next.defaultAmount != null) next.defaultAmount = Math.max(0, Math.floor(Number(next.defaultAmount) || 0));
+  if (next.scope && next.scope !== "trust") next.scope = "school";
+  const dbRow = toExpenseTemplate({ id, ...next });
+  // toExpenseTemplate fills defaults for unspecified fields — strip them
+  // so we only update what the caller actually passed.
+  const updateOnly = {};
+  if ("name"        in next) updateOnly.name        = dbRow.name;
+  if ("category"    in next) updateOnly.category    = dbRow.category;
+  if ("defaultAmount"        in next) updateOnly.default_amount         = dbRow.default_amount;
+  if ("defaultVendor"        in next) updateOnly.default_vendor         = dbRow.default_vendor;
+  if ("defaultPaymentMethod" in next) updateOnly.default_payment_method = dbRow.default_payment_method;
+  if ("scope"       in next) updateOnly.scope       = dbRow.scope;
+
+  if (supabaseEnabled) {
+    const upd = await supabase.from("expense_templates").update(updateOnly).eq("id", id).select().single();
+    if (!upd.error) return fromExpenseTemplate(upd.data);
+    if (!isSchemaMissError(upd.error)) throw new Error(`expense_templates update failed: ${upd.error.message}`);
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.expenseTemplates)) db.expenseTemplates = [];
+  const idx = db.expenseTemplates.findIndex((t) => t.id === id);
+  if (idx === -1) return null;
+  const merged = { ...db.expenseTemplates[idx] };
+  for (const k of allowed) if (k in next) merged[k] = next[k];
+  db.expenseTemplates[idx] = merged;
+  fileWrite(db);
+  return merged;
+}
+
+export async function removeExpenseTemplate(id) {
+  if (!id) throw new Error("id required");
+  if (supabaseEnabled) {
+    const sel = await supabase.from("expense_templates").select("*").eq("id", id).maybeSingle();
+    if (sel.data) {
+      const del = await supabase.from("expense_templates").delete().eq("id", id);
+      if (del.error) throw new Error(`expense_templates delete failed: ${del.error.message}`);
+      return fromExpenseTemplate(sel.data);
+    }
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.expenseTemplates)) db.expenseTemplates = [];
+  const idx = db.expenseTemplates.findIndex((t) => t.id === id);
+  if (idx === -1) return null;
+  const removed = db.expenseTemplates[idx];
+  db.expenseTemplates.splice(idx, 1);
   fileWrite(db);
   return removed;
 }

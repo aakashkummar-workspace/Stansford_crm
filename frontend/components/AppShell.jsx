@@ -343,6 +343,7 @@ export default function AppShell({ initialData, session }) {
         ARCHIVED_STUDENTS: json.archivedStudents || [],
         DAILY_LOGS: json.dailyLogs || [],
         EXPENSE_CATEGORIES:    json.expenseCategories || [],
+        EXPENSE_TEMPLATES:     json.expenseTemplates  || [],
         DONOR_FORM_SUBMISSIONS: json.donorFormSubmissions || [],
         LEAVE_REQUESTS:        json.leaveRequests || [],
         REMARKS_REWARDS:       json.remarksRewards || [],
