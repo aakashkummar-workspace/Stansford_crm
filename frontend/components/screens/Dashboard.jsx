@@ -648,6 +648,20 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
       }
     : null;
 
+  // Class teacher for the child's section. Teachers are users with
+  // role="teacher" and a linkedClasses array of section keys ("5-A").
+  // Parents specifically asked to see who the class teacher is at a
+  // glance on their dashboard, so we surface the name + email under
+  // the page header (and use "Not assigned" if the school hasn't
+  // picked one yet via Classes → Assign class teacher).
+  const classTeacher = (E.USERS || [])
+    .filter((u) => u.role === "teacher")
+    .find((u) => {
+      if (Array.isArray(u.linkedClasses) && u.linkedClasses.includes(child.cls)) return true;
+      if (u.linkedId === child.cls) return true;
+      return false;
+    });
+
   return (
     <div className="page">
       <div className="page-head">
@@ -657,6 +671,67 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
             {greet}, <span className="amber">{firstName || child.name.split(" ")[0]}</span>.
           </div>
           <div className="page-sub">Today's classroom report, attendance, transport, and any messages from the school.</div>
+        </div>
+      </div>
+
+      {/* Child + class teacher snapshot strip. Sits between the greeting
+          and the KPI row so parents see "who is my child, who teaches
+          them" without having to drill into another screen. */}
+      <div style={{
+        display: "flex", flexWrap: "wrap", alignItems: "center", gap: 18,
+        padding: "12px 16px", marginBottom: 14,
+        background: "var(--card)",
+        border: "1px solid var(--rule-2)",
+        borderRadius: 12,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+          <span style={{
+            width: 36, height: 36, borderRadius: "50%",
+            background: "linear-gradient(135deg, var(--accent), var(--accent-2))",
+            color: "#fff", display: "grid", placeItems: "center",
+            fontSize: 13, fontWeight: 700, flexShrink: 0,
+          }}>
+            {child.name.split(/\s+/).slice(0, 2).map((p) => p[0]).join("").toUpperCase()}
+          </span>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink)" }}>{child.name}</div>
+            <div style={{ fontSize: 11.5, color: "var(--ink-3)" }}>
+              <span className="mono">{child.id}</span>
+              <span style={{ margin: "0 6px", color: "var(--ink-4)" }}>·</span>
+              {formatClassLabel(child.cls)}
+            </div>
+          </div>
+        </div>
+
+        <div style={{
+          width: 1, alignSelf: "stretch", background: "var(--rule-2)",
+        }} />
+
+        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+          <span style={{
+            width: 36, height: 36, borderRadius: "50%",
+            background: classTeacher ? "linear-gradient(135deg, var(--ok), #2f6048)" : "var(--bg-2)",
+            color: classTeacher ? "#fff" : "var(--ink-4)",
+            display: "grid", placeItems: "center",
+            fontSize: 13, fontWeight: 700, flexShrink: 0,
+          }}>
+            {classTeacher
+              ? classTeacher.name.split(/\s+/).slice(0, 2).map((p) => p[0]).join("").toUpperCase()
+              : "?"}
+          </span>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 10.5, color: "var(--ink-4)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>
+              Class teacher
+            </div>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: classTeacher ? "var(--ink)" : "var(--ink-4)" }}>
+              {classTeacher ? classTeacher.name : "Not assigned yet"}
+            </div>
+            {classTeacher?.email && (
+              <div style={{ fontSize: 11, color: "var(--ink-3)", fontFamily: "var(--font-mono)" }}>
+                {classTeacher.email}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 

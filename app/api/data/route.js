@@ -127,6 +127,22 @@ function scopeForRole(data, session) {
       complaints:   (data.complaints   || []).filter((c) => c.studentId === myChild.id || c.student === myChild.name),
       scaleEntries: (data.scaleEntries || []).filter((e) => e.studentId === myChild.id),
       scaleSessions: [], // sessions are teacher-side
+      // Restrict the user roster to teachers only. Parents need to see
+      // their child's class teacher (surfaced on the parent dashboard
+      // home strip) but shouldn't get visibility into admin / accountant
+      // / principal email addresses. We further trim to a minimal field
+      // set — name, email, linkedClasses, linkedId — for the same
+      // reason; no password hashes, ids, or roles other than teacher.
+      users: (data.users || [])
+        .filter((u) => u.role === "teacher")
+        .map((u) => ({
+          id: u.id,
+          role: u.role,
+          name: u.name,
+          email: u.email,
+          linkedId: u.linkedId,
+          linkedClasses: u.linkedClasses,
+        })),
     };
   }
 

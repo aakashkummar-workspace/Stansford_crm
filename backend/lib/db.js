@@ -393,6 +393,11 @@ export async function readAllData() {
       // made in the last hour. The Students FeeCell uses this to surface
       // an "Undo" button only while the snapshot is still valid.
       feeEditSnapshots: listFeeEditSnapshots(),
+      // User accounts — needed by the parent dashboard to look up the
+      // class teacher by name. The /api/data role-scoper trims this
+      // down for parents (only teachers + their email/linkedClasses
+      // make it through) so parent dashboards stay information-tight.
+      users: await listUsers().catch(() => []),
       // Audit trails — full history of every fee change and every
       // transport assignment. Unioned from Supabase + file fallback so
       // a row written during a cache-miss isn't lost.
