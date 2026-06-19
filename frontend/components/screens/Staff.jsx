@@ -46,6 +46,11 @@ export default function ScreenStaff({ E, refresh, role, session }) {
   const [profileFor, setProfileFor] = useState(null); // staff being viewed in the profile modal
   const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
   const [issuedLogin, setIssuedLogin] = useState(null); // teacher login just provisioned
+  const [showImport, setShowImport] = useState(false);
+  // Bulk-imported teacher logins land here after a successful import so
+  // we can render them in a CSV-download modal — same pattern as the
+  // Students importer surfacing parent logins.
+  const [importLogins, setImportLogins] = useState(null);
 
   const allStaff = E.STAFF || [];
   const filtered = useMemo(() => {
@@ -185,6 +190,11 @@ export default function ScreenStaff({ E, refresh, role, session }) {
           <div className="page-sub">Performance · attendance · tasks · interns rotations</div>
         </div>
         <div className="page-actions">
+          {canEdit && (
+            <button className="btn" onClick={() => setShowImport(true)} title="Bulk-add staff from CSV / Excel">
+              <Icon name="upload" size={13} />Import
+            </button>
+          )}
           <button className="btn" onClick={downloadMonthlyReport} title="Open a printable, branded PDF report">
             <Icon name="download" size={13} />Export PDF
           </button>
@@ -499,6 +509,35 @@ export default function ScreenStaff({ E, refresh, role, session }) {
         <AddStaffModal onClose={() => setShowAdd(false)} onSubmit={handleAdd} />
       )}
 
+      {showImport && canEdit && (
+        <ImportStaffModal
+          onClose={() => setShowImport(false)}
+          onSubmitCsv={async (csv) => {
+            const r = await fetch("/api/staff/import", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ csv }),
+            });
+            const json = await r.json().catch(() => ({}));
+            if (!r.ok || !json.ok) throw new Error(json.error || "Import failed");
+            await refresh?.();
+            // Surface the generated teacher logins once for the principal
+            // to download as CSV. Same pattern as the Students importer.
+            if (Array.isArray(json.logins) && json.logins.length > 0) {
+              setImportLogins(json.logins);
+            }
+            return json;
+          }}
+        />
+      )}
+
+      {importLogins && (
+        <ImportStaffLoginsModal
+          logins={importLogins}
+          onClose={() => setImportLogins(null)}
+        />
+      )}
+
       {issuedLogin && (
         <CredentialsModal
           title="Teacher login created"
@@ -572,6 +611,308 @@ function ModalShell({ title, sub, onClose, children, width = 520 }) {
           <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
         </div>
         {children}
+      </div>
+    </div>
+  );
+}
+
+// Bulk-import staff (teachers, ops, interns) from a CSV / Excel.
+// Mirrors the Students importer: file picker → spinner → green
+// success card with counts + skipped rows. Teacher logins are
+// auto-provisioned server-side for any row with an email, and the
+// credentials surface in a separate modal after Done is clicked.
+function ImportStaffModal({ onClose, onSubmitCsv }) {
+  const [file, setFile] = useState(null);
+  const [phase, setPhase] = useState("idle"); // idle | importing | done
+  const [result, setResult] = useState(null);
+  const inputRef = useRef(null);
+
+  // Minimum required columns: Name + Email. Phone / Role / Department /
+  // Salary / Joining are all optional; missing values land as defaults.
+  // For teachers (the most common case) the login is auto-provisioned
+  // from the Email column with a per-teacher password derived from the
+  // first name — Aakash → Aakash@123.
+  const sampleCsv =
+    "Name,Email,Phone,Role,Department,Salary,Joining\n" +
+    "Aakash,aakash@school.com,+91 9876543210,Teacher,,,\n" +
+    "Priya Sharma,priya@school.com,9988776655,Teacher,,,\n" +
+    "Suresh Office,suresh@school.com,9000011111,Ops,Operations,22000,\n";
+  const downloadSample = () => {
+    const blob = new Blob([sampleCsv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "staff-template.csv"; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Same client-side .xlsx → .csv conversion as the Students importer.
+  const xlsxToCsv = async (f) => {
+    const XLSX = await import("xlsx");
+    const buf = await f.arrayBuffer();
+    const wb = XLSX.read(buf, { type: "array" });
+    const firstSheet = wb.Sheets[wb.SheetNames[0]];
+    if (!firstSheet) throw new Error("Workbook has no sheets");
+    return XLSX.utils.sheet_to_csv(firstSheet);
+  };
+
+  const onClick = async () => {
+    if (!file || phase === "importing") return;
+    setPhase("importing");
+    try {
+      const name = String(file.name || "").toLowerCase();
+      const isExcel = name.endsWith(".xlsx") || name.endsWith(".xls");
+      const csv = isExcel ? await xlsxToCsv(file) : await file.text();
+      const json = await onSubmitCsv(csv);
+      setResult(json);
+      setPhase("done");
+    } catch (e) {
+      setResult({ ok: false, error: e?.message || "Import failed", errors: [] });
+      setPhase("done");
+    }
+  };
+
+  const errors = Array.isArray(result?.errors) ? result.errors : [];
+  const count = Number(result?.count || 0);
+  const loginCount = Array.isArray(result?.logins) ? result.logins.length : 0;
+
+  return (
+    <div onClick={phase === "importing" ? undefined : onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)",
+      display: "grid", placeItems: "center", zIndex: 250, padding: 16,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 520 }}>
+        <div className="card-head">
+          <div>
+            <div className="card-title">
+              {phase === "done"
+                ? (result?.ok === false ? "Import failed" : "Staff imported")
+                : "Import staff"}
+            </div>
+            <div className="card-sub">
+              {phase === "done"
+                ? "The staff list behind this dialog has refreshed — close to continue."
+                : "Bulk-add via CSV or Excel · columns: Name, Email, Phone, Role, Department, Salary, Joining"}
+            </div>
+          </div>
+          <button className="icon-btn" onClick={onClose} disabled={phase === "importing"}>
+            <Icon name="x" size={14} />
+          </button>
+        </div>
+        <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {phase === "done" && result ? (
+            result?.ok === false ? (
+              <div style={{
+                padding: "14px 16px",
+                background: "var(--err-soft, #fbe1d8)",
+                border: "1px solid var(--err, #b13c1c)",
+                borderRadius: 10, fontSize: 13, color: "var(--ink-2)", lineHeight: 1.5,
+              }}>
+                <strong>Import couldn't run:</strong> {result.error || "Unknown error"}
+              </div>
+            ) : (
+              <div style={{
+                display: "flex", flexDirection: "column", gap: 10,
+                padding: "14px 16px",
+                background: "var(--ok-soft, #e6f4ec)",
+                border: "1px solid var(--ok, #2f8854)",
+                borderRadius: 10,
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{
+                    width: 28, height: 28, borderRadius: "50%",
+                    background: "var(--ok, #2f8854)", color: "#fff",
+                    display: "grid", placeItems: "center", flexShrink: 0,
+                  }}>
+                    <Icon name="check" size={14} />
+                  </span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink)" }}>Staff imported</div>
+                    <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 2 }}>
+                      {count} record{count === 1 ? "" : "s"} added
+                      {loginCount > 0 && ` · ${loginCount} teacher login${loginCount === 1 ? "" : "s"} provisioned`}
+                      {errors.length > 0 && ` · ${errors.length} row${errors.length === 1 ? "" : "s"} skipped — see below.`}
+                    </div>
+                  </div>
+                </div>
+                {errors.length > 0 && (
+                  <div style={{
+                    background: "var(--warn-soft, #fff4e2)",
+                    border: "1px solid var(--warn, #d4944e)",
+                    borderRadius: 7, padding: "8px 10px",
+                    fontSize: 11.5, color: "var(--ink-2)", lineHeight: 1.5,
+                    maxHeight: 160, overflowY: "auto",
+                  }}>
+                    {errors.slice(0, 12).map((e, i) => (
+                      <div key={i}><strong>{e.name || `Row ${e.row}`}:</strong> {e.reason}</div>
+                    ))}
+                    {errors.length > 12 && (
+                      <div style={{ color: "var(--ink-4)", marginTop: 4 }}>…and {errors.length - 12} more</div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )
+          ) : (
+            <>
+              <div
+                onClick={() => inputRef.current?.click()}
+                style={{
+                  border: "2px dashed var(--rule)", borderRadius: 12, padding: 26,
+                  textAlign: "center", cursor: "pointer", background: "var(--card-2)",
+                }}
+              >
+                <Icon name="upload" size={22} />
+                <div style={{ marginTop: 8, fontSize: 13, fontWeight: 500 }}>
+                  {file ? file.name : "Click to select a CSV or Excel file"}
+                </div>
+                <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 4 }}>
+                  {file ? `${(file.size / 1024).toFixed(1)} KB` : ".csv / .xlsx — teachers + ops + interns"}
+                </div>
+                <input
+                  ref={inputRef}
+                  type="file"
+                  accept=".csv,text/csv,.xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+                  style={{ display: "none" }}
+                  onChange={(e) => setFile(e.target.files?.[0] || null)}
+                />
+              </div>
+              <div style={{ fontSize: 11.5, color: "var(--ink-3)" }}>
+                Need a starting point? <a onClick={downloadSample} style={{ color: "var(--accent)", cursor: "pointer", textDecoration: "underline" }}>Download a sample template</a>. Only <b>Name</b> + <b>Email</b> are required. Teacher logins are auto-created from the email column; the password is derived from the first name (<i>aakash → Aakash@123</i>) and shared in a download-CSV modal after import.
+              </div>
+              {phase === "importing" && (
+                <div style={{
+                  display: "flex", alignItems: "center", gap: 10,
+                  padding: "10px 12px", borderRadius: 8,
+                  background: "var(--accent-soft)", color: "var(--accent-2)",
+                  fontSize: 12.5, fontWeight: 500,
+                }}>
+                  <span className="spinner" style={{
+                    width: 14, height: 14, borderRadius: "50%",
+                    border: "2px solid var(--accent)", borderTopColor: "transparent",
+                    animation: "spin 0.8s linear infinite",
+                  }} />
+                  Importing staff and provisioning teacher logins…
+                  <style jsx>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+                </div>
+              )}
+            </>
+          )}
+
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            {phase === "done" ? (
+              <button className="btn accent" onClick={onClose}>
+                <Icon name="check" size={13} />Done
+              </button>
+            ) : (
+              <>
+                <button className="btn ghost" onClick={onClose} disabled={phase === "importing"}>
+                  {phase === "importing" ? "Please wait…" : "Cancel"}
+                </button>
+                <button className="btn accent" disabled={!file || phase === "importing"} onClick={onClick}>
+                  {phase === "importing" ? (
+                    <>
+                      <span style={{
+                        width: 12, height: 12, borderRadius: "50%",
+                        border: "2px solid currentColor", borderTopColor: "transparent",
+                        display: "inline-block", animation: "spin 0.8s linear infinite", marginRight: 6,
+                      }} />
+                      Importing…
+                    </>
+                  ) : (
+                    <><Icon name="upload" size={13} />Import {file ? "" : "(pick a file)"}</>
+                  )}
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Shown once after the staff import lands. Lists every generated
+// teacher login (email + the common default password) and offers a
+// one-click CSV download so the principal can share credentials with
+// the teachers via WhatsApp / printed slip / etc.
+function ImportStaffLoginsModal({ logins, onClose }) {
+  const count = logins.length;
+  const downloadCsv = () => {
+    const escape = (v) => {
+      const s = String(v ?? "");
+      if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+      return s;
+    };
+    const header = "Staff ID,Staff Name,Role,Email,Password";
+    const rows = logins.map((l) => [l.staffId, l.staffName, l.role, l.email, l.password].map(escape).join(","));
+    const csv = [header, ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `teacher-logins-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(20,16,10,0.55)",
+      display: "grid", placeItems: "center", zIndex: 260, padding: 16,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 600 }}>
+        <div className="card-head">
+          <div>
+            <div className="card-title">{count} teacher login{count === 1 ? "" : "s"} created</div>
+            <div className="card-sub">Download the CSV now — the passwords here will not appear again.</div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
+        <div style={{ padding: "16px 20px 8px", display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{
+            background: "var(--warn-soft, #fff4e2)",
+            border: "1px solid var(--warn, #d4944e)",
+            color: "var(--ink-2)",
+            fontSize: 12, lineHeight: 1.45,
+            padding: "10px 12px", borderRadius: 8,
+          }}>
+            <strong>Security note:</strong> every imported teacher shares the same default password.
+            Ask each teacher to change it from <b>My account</b> after first sign-in.
+          </div>
+          <div style={{
+            maxHeight: 320, overflowY: "auto",
+            border: "1px solid var(--rule)", borderRadius: 8,
+          }}>
+            <table className="table" style={{ width: "100%", fontSize: 12 }}>
+              <thead>
+                <tr style={{ position: "sticky", top: 0, background: "var(--bg)", zIndex: 1 }}>
+                  <th style={{ textAlign: "left", padding: "8px 10px" }}>Staff</th>
+                  <th style={{ textAlign: "left", padding: "8px 10px" }}>Role</th>
+                  <th style={{ textAlign: "left", padding: "8px 10px" }}>Email</th>
+                  <th style={{ textAlign: "left", padding: "8px 10px" }}>Password</th>
+                </tr>
+              </thead>
+              <tbody>
+                {logins.map((l) => (
+                  <tr key={l.staffId} style={{ borderTop: "1px solid var(--rule-2)" }}>
+                    <td style={{ padding: "7px 10px" }}>
+                      <div style={{ fontWeight: 500 }}>{l.staffName}</div>
+                      <div className="mono" style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{l.staffId}</div>
+                    </td>
+                    <td style={{ padding: "7px 10px", textTransform: "capitalize" }}>{l.role}</td>
+                    <td style={{ padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 11.5 }}>{l.email}</td>
+                    <td style={{ padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 11.5 }}>{l.password}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, paddingTop: 4 }}>
+            <button className="btn ghost" onClick={onClose}>I've saved these</button>
+            <button className="btn accent" onClick={downloadCsv}>
+              <Icon name="download" size={13} />Download CSV
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );

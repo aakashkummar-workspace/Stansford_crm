@@ -2197,13 +2197,16 @@ export async function addStaff(row) {
   // "Class teacher" picker on the Classes screen and (b) can sign in
   // immediately. Common password — same for every teacher account so the
   // principal only ever has to share one credential. Returned in the response
-  // so the UI can show it once at creation time.
+  // so the UI can show it once at creation time. Callers (e.g. bulk
+  // import) can pass an explicit `defaultPassword` to override the
+  // shared COMMON_TEACHER_PASSWORD — used for per-teacher derived
+  // passwords like "Aakash@123".
   let createdLogin = null;
   if (filled.role === "Teacher" && filled.email) {
     try {
       const existing = await getUserByEmail(filled.email);
       if (!existing) {
-        const defaultPassword = COMMON_TEACHER_PASSWORD;
+        const defaultPassword = row.defaultPassword || COMMON_TEACHER_PASSWORD;
         const { hashPassword } = require("./auth.js");
         const passwordHash = await hashPassword(defaultPassword);
         await createUser({
