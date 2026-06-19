@@ -129,7 +129,12 @@ function scopeForRole(data, session) {
       recentFees:   (data.recentFees   || []).filter((f) => (f.studentId || f.id) === myChild.id),
       dailyLogs:    (data.dailyLogs    || []).filter((l) => l.studentId === myChild.id),
       transportAttendance: (data.transportAttendance || []).filter((t) => t.studentId === myChild.id),
-      routes:       (data.routes       || []).filter((r) => r.code === myChild.transport),
+      // Routes the child rides on — morning bus + evening bus (different
+       // routes are common). De-duped so a "both"-direction route used for
+       // both legs only appears once.
+       routes:       (data.routes       || []).filter((r) =>
+         r.code === myChild.transport || r.code === myChild.transportEvening
+       ),
       complaints:   (data.complaints   || []).filter((c) => c.studentId === myChild.id || c.student === myChild.name),
       scaleEntries: (data.scaleEntries || []).filter((e) => e.studentId === myChild.id),
       scaleSessions: [], // sessions are teacher-side

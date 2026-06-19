@@ -5,7 +5,7 @@ import Icon from "../Icon";
 import { KPI, BarChart, LineBarChart, Ring, AvatarChip } from "../ui";
 import { money, moneyK, formatClassLabel } from "@/lib/format";
 
-export default function ScreenDashboard({ E, role, session }) {
+export default function ScreenDashboard({ E, role, session, refresh }) {
   const { KPIS, CLASS_STRENGTH, RECENT_FEES, PENDING_FEES, ACTIVITIES, ROUTES, INCOME_SERIES } = E;
   const isParent = role === "parent";
   const child = isParent ? (E.ADDED_STUDENTS || [])[0] : null;
@@ -247,6 +247,27 @@ export default function ScreenDashboard({ E, role, session }) {
         </div>
 
       </div>
+
+      {/* My bus routes — shown to teachers (and any staff) who are
+          assigned as the attendant on one or more routes. Each card has
+          the start / advance / finish controls so the teacher can drive
+          the run from their own dashboard without going to Transport. */}
+      {!isParent && (() => {
+        const me = (session?.name || "").trim().toLowerCase();
+        if (!me) return null;
+        const myRoutes = (ROUTES || []).filter((r) => {
+          const att = (r.attendant || "").trim().toLowerCase();
+          return att && att !== "—" && att === me;
+        });
+        if (!myRoutes.length) return null;
+        return (
+          <div style={{ marginBottom: 20, display: "flex", flexDirection: "column", gap: 12 }}>
+            {myRoutes.map((r) => (
+              <TeacherBusRouteCard key={r.code} route={r} refresh={refresh} />
+            ))}
+          </div>
+        );
+      })()}
 
       {/* Live alerts strip — pulls from real data so the principal can act in one click */}
       {/* Today's teaching periods — shown to teachers (and any other staff
@@ -606,7 +627,12 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
   const childToday = (E.TIMETABLE || [])
     .filter((t) => t.cls === child.cls && t.day === todayDayName)
     .sort((a, b) => (a.period || 0) - (b.period || 0));
-  const route = (E.ROUTES || []).find((r) => r.code === child.transport);
+  // Both legs of the child's commute. Either may be missing (parent drop-off
+  // one direction is common). The route objects come pre-filtered by
+  // /api/data so this scope only ever sees the child's own buses.
+  const morningRoute = (E.ROUTES || []).find((r) => r.code === child.transport);
+  const eveningRoute = (E.ROUTES || []).find((r) => r.code === child.transportEvening);
+  const route = morningRoute || eveningRoute; // legacy alias kept for the KPI strip
   const myFees    = (E.PENDING_FEES || []).filter((f) => f.id === child.id);
   const myPaid    = (E.RECENT_FEES || []).filter((f) => (f.studentId || f.id) === child.id);
   const announcements = (E.BROADCASTS || []).filter((b) =>
@@ -799,25 +825,27 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
         {/* Right column: Bus + Last 7 days + Announcements */}
         <div className="col-5" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <div className="card">
-            <div className="card-head"><div><div className="card-title">Bus · today</div><div className="card-sub">{busInfo ? `${busInfo.code} · ${busInfo.name}` : "No transport assigned"}</div></div></div>
-            <div className="card-body">
-              {busInfo ? (
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}>
-                    <span style={{ color: "var(--ink-3)" }}>Current stop</span>
-                    <span style={{ fontWeight: 500 }}>{busInfo.currentStop}</span>
-                  </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}>
-                    <span style={{ color: "var(--ink-3)" }}>Driver</span>
-                    <span style={{ fontWeight: 500 }}>{busInfo.driver}</span>
-                  </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}>
-                    <span style={{ color: "var(--ink-3)" }}>Window</span>
-                    <span className="mono" style={{ fontSize: 12 }}>{busInfo.eta}</span>
-                  </div>
+            <div className="card-head">
+              <div>
+                <div className="card-title">My child's bus</div>
+                <div className="card-sub">
+                  {(morningRoute || eveningRoute)
+                    ? "Live status — updates as the teacher marks each stop"
+                    : "No transport assigned"}
                 </div>
-              ) : (
-                <div className="empty" style={{ padding: 16 }}>Your child isn't assigned to a school route. Speak to the office to set this up.</div>
+              </div>
+            </div>
+            <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {!(morningRoute || eveningRoute) && (
+                <div className="empty" style={{ padding: 16 }}>
+                  Your child isn't assigned to a school route. Speak to the office to set this up.
+                </div>
+              )}
+              {morningRoute && (
+                <ParentBusRouteCard route={morningRoute} child={child} leg="morning" />
+              )}
+              {eveningRoute && morningRoute?.code !== eveningRoute?.code && (
+                <ParentBusRouteCard route={eveningRoute} child={child} leg="evening" />
               )}
             </div>
           </div>
@@ -1153,6 +1181,313 @@ function MyLeaveCard({ title, sub, requests }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// Teacher-facing live controls for one route they're assigned to. Drives
+// the bus through its stops via /api/transport/advance. Buttons are gated
+// server-side too (we double-check the route.attendant matches session.name)
+// so a stale UI doesn't let a former teacher mark the run.
+function TeacherBusRouteCard({ route, refresh }) {
+  const [busy, setBusy] = useState(null); // 'start' | 'next' | 'prev' | 'finish' | null
+  const [err, setErr] = useState("");
+  const stops = Array.isArray(route.stops) ? route.stops : [];
+  const curIdx = stops.findIndex((s) => s.status === "current");
+  const cur = curIdx >= 0 ? stops[curIdx] : null;
+  const next = curIdx >= 0 && curIdx + 1 < stops.length ? stops[curIdx + 1] : null;
+  const isRunning = route.status === "running";
+  const isCompleted = route.status === "completed";
+  const isIdle = !isRunning && !isCompleted;
+  const isLast = curIdx === stops.length - 1;
+
+  const advance = async (action) => {
+    setBusy(action); setErr("");
+    try {
+      const r = await fetch("/api/transport/advance", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code: route.code, action }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
+      await refresh?.();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="card">
+      <div className="card-head">
+        <div>
+          <div className="card-title">
+            My bus · {route.code}
+            {route.direction === "evening"
+              ? <span className="chip" style={{ marginLeft: 8, fontSize: 10 }}>Evening</span>
+              : route.direction === "morning"
+                ? <span className="chip" style={{ marginLeft: 8, fontSize: 10 }}>Morning</span>
+                : null}
+          </div>
+          <div className="card-sub">
+            {route.name}
+            {route.driver && <> · Driver: {route.driver}</>}
+            {route.bus && <> · {route.bus}</>}
+          </div>
+        </div>
+        <div>
+          {isCompleted
+            ? <span className="chip ok"><span className="dot" />Completed</span>
+            : isRunning
+              ? <span className="chip"><span className="dot" />Running</span>
+              : <span className="chip"><span className="dot" />Not started</span>}
+        </div>
+      </div>
+      <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {isIdle && (
+          <div style={{ fontSize: 12.5, color: "var(--ink-3)" }}>
+            Tap <b>Start bus run</b> when you depart. Parents will see the bus status update live.
+          </div>
+        )}
+        {isRunning && cur && (
+          <div style={{
+            padding: "8px 12px",
+            background: "var(--accent-soft)",
+            border: "1px solid var(--accent)",
+            borderRadius: 8,
+            fontSize: 12.5, color: "var(--ink-2)",
+          }}>
+            Currently at <b>{cur.name}</b>
+            {cur.arrivedAt && <> · arrived {relativeMins(cur.arrivedAt)}</>}
+            {next && <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 2 }}>
+              Next: {next.name}{next.t ? ` · scheduled ${next.t}` : ""}
+            </div>}
+          </div>
+        )}
+        {isCompleted && (
+          <div style={{ fontSize: 12.5, color: "var(--ink-3)" }}>
+            Run completed{route.completedAt ? ` · ${relativeMins(route.completedAt)}` : ""}.
+            Tap <b>Reset for next trip</b> when you're ready to start again.
+          </div>
+        )}
+        {err && (
+          <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "8px 12px", borderRadius: 7, fontSize: 12 }}>{err}</div>
+        )}
+
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {isIdle && (
+            <button className="btn sm accent" disabled={busy === "start"} onClick={() => advance("start")}>
+              <Icon name="bus" size={12} />{busy === "start" ? "Starting…" : "Start bus run"}
+            </button>
+          )}
+          {isRunning && (
+            <>
+              <button className="btn sm" disabled={busy === "prev" || curIdx <= 0} onClick={() => advance("prev")}>
+                <Icon name="x" size={11} />{busy === "prev" ? "…" : "Back a stop"}
+              </button>
+              <button className="btn sm accent" disabled={!!busy} onClick={() => advance("next")}>
+                <Icon name="check" size={12} />
+                {busy === "next" ? "Saving…" : isLast ? "Mark this stop done & finish" : "Mark this stop done & advance"}
+              </button>
+              <button className="btn sm" disabled={!!busy} onClick={() => advance("finish")} title="Mark all remaining stops as done">
+                {busy === "finish" ? "…" : "Finish run"}
+              </button>
+            </>
+          )}
+          {isCompleted && (
+            <button className="btn sm" disabled={busy === "reset"} onClick={() => advance("reset")}>
+              {busy === "reset" ? "Resetting…" : "Reset for next trip"}
+            </button>
+          )}
+        </div>
+
+        {stops.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 4 }}>
+            {stops.map((s, i) => {
+              const isCurrent = s.status === "current";
+              const isDone    = s.status === "done";
+              const dotColor = isDone ? "var(--ok)" : isCurrent ? "var(--accent-2)" : "var(--ink-4)";
+              return (
+                <div key={`${s.name}-${i}`} style={{
+                  display: "grid", gridTemplateColumns: "16px 1fr auto",
+                  alignItems: "center", gap: 8,
+                  padding: "3px 0",
+                  opacity: isDone ? 0.65 : 1,
+                }}>
+                  <span style={{
+                    width: 10, height: 10, borderRadius: "50%",
+                    background: dotColor,
+                    boxShadow: isCurrent ? "0 0 0 3px rgba(255,165,80,0.18)" : "none",
+                    justifySelf: "center",
+                  }} />
+                  <span style={{
+                    fontSize: 12.5,
+                    fontWeight: isCurrent ? 600 : 400,
+                    color: isCurrent ? "var(--ink)" : isDone ? "var(--ink-3)" : "var(--ink-2)",
+                  }}>{s.name}</span>
+                  <span style={{ fontSize: 10.5, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>
+                    {isDone && s.doneAt
+                      ? `done · ${relativeMins(s.doneAt)}`
+                      : isCurrent && s.arrivedAt
+                        ? `at ${new Date(s.arrivedAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}`
+                        : s.t || ""}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Human-friendly relative time. "just now" / "2 min ago" / "1 hr 12 min ago"
+// / null if the timestamp is missing. Kept local to the dashboard since this
+// is the only place we currently surface bus timestamps to end users.
+function relativeMins(iso) {
+  if (!iso) return null;
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return null;
+  const diff = Math.max(0, Date.now() - then);
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.floor(mins / 60);
+  const rem = mins % 60;
+  return rem === 0 ? `${hrs} hr ago` : `${hrs} hr ${rem} min ago`;
+}
+
+// Parent-facing live status for one leg of the child's commute. Renders
+// the route header (code + driver + status pill), then the stop timeline
+// with the current stop highlighted and the child's own stop marked.
+function ParentBusRouteCard({ route, child, leg }) {
+  const stops = Array.isArray(route.stops) ? route.stops : [];
+  const curIdx = stops.findIndex((s) => s.status === "current");
+  const cur = curIdx >= 0 ? stops[curIdx] : null;
+  const next = curIdx >= 0 && curIdx + 1 < stops.length ? stops[curIdx + 1] : null;
+  const childStopName = leg === "evening" ? child.pickupStopEvening : child.pickupStop;
+  const isRunning = route.status === "running";
+  const isCompleted = route.status === "completed";
+  const isIdle = !isRunning && !isCompleted;
+  const arrivedAgo = cur ? relativeMins(cur.arrivedAt) : null;
+
+  const statusChip = isCompleted
+    ? <span className="chip ok"><span className="dot" />Completed</span>
+    : isRunning
+      ? <span className="chip"><span className="dot" />Running</span>
+      : <span className="chip"><span className="dot" />Not started</span>;
+
+  return (
+    <div style={{
+      background: "var(--bg-2)",
+      border: "1px solid var(--rule-2)",
+      borderRadius: 9,
+      padding: "10px 12px",
+      display: "flex", flexDirection: "column", gap: 8,
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+          <Icon name="bus" size={14} style={{ color: "var(--accent-2)" }} />
+          <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--ink)" }}>
+            {leg === "evening" ? "Evening" : "Morning"} · {route.code}
+          </span>
+          <span style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{route.name}</span>
+        </div>
+        {statusChip}
+      </div>
+
+      <div style={{ fontSize: 11, color: "var(--ink-4)" }}>
+        Driver: <b style={{ color: "var(--ink-3)" }}>{route.driver || "—"}</b>
+        {route.attendant && route.attendant !== "—" && (
+          <> · Teacher: <b style={{ color: "var(--ink-3)" }}>{route.attendant}</b></>
+        )}
+        {route.bus && <> · Bus: <b style={{ color: "var(--ink-3)" }}>{route.bus}</b></>}
+      </div>
+
+      {isIdle && (
+        <div style={{ fontSize: 11.5, color: "var(--ink-4)", fontStyle: "italic" }}>
+          Bus hasn't departed yet. You'll see live progress here once the teacher starts the run.
+        </div>
+      )}
+
+      {isRunning && cur && (
+        <div style={{
+          padding: "6px 10px",
+          background: "var(--accent-soft)",
+          border: "1px solid var(--accent)",
+          borderRadius: 7,
+          fontSize: 12,
+          color: "var(--ink-2)",
+        }}>
+          <b>At {cur.name}</b>
+          {arrivedAgo && <span style={{ color: "var(--ink-3)" }}> · {arrivedAgo}</span>}
+          {next && <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 2 }}>
+            Next: {next.name}{next.t ? ` · scheduled ${next.t}` : ""}
+          </div>}
+        </div>
+      )}
+
+      {isCompleted && (
+        <div style={{
+          padding: "6px 10px",
+          background: "var(--bg)",
+          border: "1px solid var(--rule-2)",
+          borderRadius: 7,
+          fontSize: 12, color: "var(--ink-3)",
+        }}>
+          Run completed{route.completedAt ? ` · ${relativeMins(route.completedAt)}` : ""}.
+        </div>
+      )}
+
+      {/* Stop timeline */}
+      {stops.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 2 }}>
+          {stops.map((s, i) => {
+            const isCurrent = s.status === "current";
+            const isDone    = s.status === "done";
+            const isChildStop = childStopName && s.name === childStopName;
+            const dotColor = isDone ? "var(--ok)" : isCurrent ? "var(--accent-2)" : "var(--ink-4)";
+            return (
+              <div key={`${s.name}-${i}`} style={{
+                display: "grid", gridTemplateColumns: "16px 1fr auto",
+                alignItems: "center", gap: 8,
+                padding: "3px 0",
+                opacity: isDone ? 0.65 : 1,
+              }}>
+                <span style={{
+                  width: 10, height: 10, borderRadius: "50%",
+                  background: dotColor,
+                  border: isCurrent ? "2px solid var(--accent-soft)" : "none",
+                  boxShadow: isCurrent ? "0 0 0 3px rgba(255,165,80,0.18)" : "none",
+                  justifySelf: "center",
+                }} />
+                <span style={{
+                  fontSize: 12,
+                  fontWeight: isCurrent || isChildStop ? 600 : 400,
+                  color: isCurrent ? "var(--ink)" : isDone ? "var(--ink-3)" : "var(--ink-2)",
+                }}>
+                  {s.name}
+                  {isChildStop && (
+                    <span className="chip ok" style={{ marginLeft: 6, fontSize: 9.5, padding: "1px 6px" }}>
+                      Your stop
+                    </span>
+                  )}
+                </span>
+                <span style={{ fontSize: 10.5, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>
+                  {isDone && s.doneAt
+                    ? `done · ${relativeMins(s.doneAt)}`
+                    : isCurrent && s.arrivedAt
+                      ? `at ${new Date(s.arrivedAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}`
+                      : s.t || ""}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

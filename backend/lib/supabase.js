@@ -235,6 +235,10 @@ export const fromRoute = (r) => r && {
   // surface this route. Rows from before the migration default to 'both'
   // so they remain selectable in both AM and PM dropdowns.
   direction: r.direction || "both",
+  // Run-level timestamps; may be absent on rows from before the
+  // advanceRoute timestamp upgrade — UI treats null as "unknown".
+  startedAt:   r.started_at   ?? r.startedAt   ?? null,
+  completedAt: r.completed_at ?? r.completedAt ?? null,
 };
 
 // ---------- new mappers ----------

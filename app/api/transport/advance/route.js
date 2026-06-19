@@ -1,18 +1,45 @@
 import { NextResponse } from "next/server";
-import { advanceRoute, logAudit } from "@/lib/db";
+import { advanceRoute, logAudit, readAllData } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 
 const ALLOWED = new Set(["start", "next", "prev", "finish", "reset"]);
+// Roles that can always advance any route (no per-route check needed).
+const ADMIN_ROLES = new Set(["admin", "principal", "academic_director"]);
 
 // POST /api/transport/advance { code, action: 'start'|'next'|'prev'|'finish'|'reset' }
+// Allowed callers:
+//   - admin / principal / academic_director — any route
+//   - teacher whose name matches the route's attendant — only that route
+//   - everyone else — 403
 export async function POST(req) {
   const session = await getSession();
-  const actor = session?.name || "Principal";
+  if (!session) return NextResponse.json({ ok: false, error: "Sign in required" }, { status: 401 });
+  const actor = session.name || "Staff";
 
   let body; try { body = await req.json(); } catch { body = null; }
   if (!body?.code || !ALLOWED.has(body.action)) {
     return NextResponse.json({ ok: false, error: "code + valid action required" }, { status: 400 });
   }
+
+  if (!ADMIN_ROLES.has(session.role)) {
+    if (session.role !== "teacher") {
+      return NextResponse.json({ ok: false, error: "Only the assigned teacher can advance this bus." }, { status: 403 });
+    }
+    // Teacher: look up the route and confirm the attendant name matches
+    // this teacher (case-insensitive, trimmed). Cheap one-shot read.
+    try {
+      const data = await readAllData();
+      const route = (data.routes || []).find((r) => r.code === body.code);
+      const attendant = (route?.attendant || "").trim().toLowerCase();
+      const me = (session.name || "").trim().toLowerCase();
+      if (!attendant || attendant === "—" || attendant !== me) {
+        return NextResponse.json({ ok: false, error: "You're not assigned as the teacher for this route." }, { status: 403 });
+      }
+    } catch (e) {
+      return NextResponse.json({ ok: false, error: "Could not verify route assignment" }, { status: 500 });
+    }
+  }
+
   try {
     const route = await advanceRoute(body.code, body.action);
     if (!route) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 });

@@ -2127,6 +2127,14 @@ export async function updateRoute(code, patch) {
 //           "prev"   → step back one stop (mark current as pending, prev as current)
 //           "finish" → mark all remaining stops as done, status='completed'
 //           "reset"  → mark all stops as pending, clear boarded/absent, status='idle'
+//
+// Stops gain two timestamp fields as they progress so parent/teacher views
+// can show "arrived 2 mins ago" / "departed 04:18":
+//   - arrivedAt: ISO timestamp set when the stop transitions to 'current'
+//   - doneAt:    ISO timestamp set when it transitions to 'done'
+// Both are cleared on 'reset' so the next trip starts fresh. Stops written
+// before this migration just won't have the fields — the UI treats absence
+// as "unknown" rather than blowing up.
 export async function advanceRoute(code, action) {
   const found = await readRoute(code);
   if (!found) return null;
@@ -2134,42 +2142,52 @@ export async function advanceRoute(code, action) {
   if (stops.length === 0) throw new Error("Route has no stops");
 
   const curIdx = stops.findIndex((s) => s.status === "current");
+  const now = new Date().toISOString();
 
   if (action === "start") {
-    for (let i = 0; i < stops.length; i++) stops[i] = { ...stops[i], status: i === 0 ? "current" : "pending" };
-    return writeRoute(found, { stops, status: "running" });
+    for (let i = 0; i < stops.length; i++) {
+      stops[i] = {
+        ...stops[i],
+        status: i === 0 ? "current" : "pending",
+        arrivedAt: i === 0 ? now : null,
+        doneAt: null,
+      };
+    }
+    return writeRoute(found, { stops, status: "running", startedAt: now });
   }
   if (action === "next") {
     if (curIdx === -1) {
       // Treat next as start when nothing is current yet
-      stops[0] = { ...stops[0], status: "current" };
-      return writeRoute(found, { stops, status: "running" });
+      stops[0] = { ...stops[0], status: "current", arrivedAt: now };
+      return writeRoute(found, { stops, status: "running", startedAt: found.row.startedAt || now });
     }
-    stops[curIdx] = { ...stops[curIdx], status: "done" };
+    stops[curIdx] = { ...stops[curIdx], status: "done", doneAt: now };
     if (curIdx + 1 < stops.length) {
-      stops[curIdx + 1] = { ...stops[curIdx + 1], status: "current" };
+      stops[curIdx + 1] = { ...stops[curIdx + 1], status: "current", arrivedAt: now };
       return writeRoute(found, { stops, status: "running" });
     }
     // Was at the last stop → mark whole run as completed
-    return writeRoute(found, { stops, status: "completed" });
+    return writeRoute(found, { stops, status: "completed", completedAt: now });
   }
   if (action === "prev") {
     if (curIdx === -1) return found.row;
-    stops[curIdx] = { ...stops[curIdx], status: "pending" };
+    stops[curIdx] = { ...stops[curIdx], status: "pending", arrivedAt: null };
     if (curIdx > 0) {
-      stops[curIdx - 1] = { ...stops[curIdx - 1], status: "current" };
+      stops[curIdx - 1] = { ...stops[curIdx - 1], status: "current", doneAt: null };
     }
     return writeRoute(found, { stops, status: "running" });
   }
   if (action === "finish") {
-    for (let i = 0; i < stops.length; i++) stops[i] = { ...stops[i], status: "done" };
-    return writeRoute(found, { stops, status: "completed" });
+    for (let i = 0; i < stops.length; i++) {
+      stops[i] = { ...stops[i], status: "done", doneAt: stops[i].doneAt || now };
+    }
+    return writeRoute(found, { stops, status: "completed", completedAt: now });
   }
   if (action === "reset") {
     for (let i = 0; i < stops.length; i++) {
-      stops[i] = { ...stops[i], status: "pending", boarded: 0, absent: 0 };
+      stops[i] = { ...stops[i], status: "pending", boarded: 0, absent: 0, arrivedAt: null, doneAt: null };
     }
-    return writeRoute(found, { stops, status: "idle" });
+    return writeRoute(found, { stops, status: "idle", startedAt: null, completedAt: null });
   }
   throw new Error(`Unknown action: ${action}`);
 }
