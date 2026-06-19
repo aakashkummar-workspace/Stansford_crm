@@ -14,10 +14,17 @@
   --rule:        #e5e7eb;
   --rule-2:      #ececef;
 
-  --ink:         #15161a;
-  --ink-2:       #3a3d44;
-  --ink-3:       #6b6f78;
-  --ink-4:       #9aa0a8;
+  /* Option B — full blue text palette. Every text shade is a blue
+     stepping from the brand navy (#1f3f8b, same hex used in receipts
+     + the orange-and-navy gradient buttons) down to a softer mid-tone
+     for placeholders. Replaces the previous near-black ramp so the
+     whole app reads in colour for school staff who flagged the old
+     near-black as hard to scan. Dark-theme overrides further down
+     stay unchanged — they were already legible on dark surfaces. */
+  --ink:         #1f3f8b;
+  --ink-2:       #2c4a8e;
+  --ink-3:       #4a6caf;
+  --ink-4:       #7a92c5;
 
   /* Brand orange — sampled from the school logo (the central figure, book,
      and "Sanvi Educational and Charitable Trust" arc). Slightly more
