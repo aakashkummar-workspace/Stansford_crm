@@ -156,7 +156,10 @@ export default function ScreenFees({ E, refresh, role, session }) {
     if (statusFilter === "Paid" && f.status !== "paid") return false;
     if (statusFilter === "Pending" && f.status !== "pending") return false;
     if (statusFilter === "Overdue" && f.status !== "overdue") return false;
-    if (classFilter !== "All" && f.cls.split("-")[0] !== classFilter.replace("Class ", "")) return false;
+    // classFilter holds the raw class number string ("1"-"12", "13"=PRE-MONT,
+    // "14"=MONT I, "15"=MONT II) or "All". Compare against f.cls's leading
+    // segment so Roman / Montessori labels all work without per-label mapping.
+    if (classFilter !== "All" && String(f.cls || "").split("-")[0] !== classFilter) return false;
     return true;
   });
 
@@ -670,11 +673,12 @@ export default function ScreenFees({ E, refresh, role, session }) {
               <div style={{ position: "relative" }}>
                 <button className={`btn sm ${classFilter !== "All" ? "accent" : ""}`} onClick={() => setFilterOpen((v) => !v)}>
                   <Icon name="filter" size={12} />
-                  {classFilter === "All" ? "Filter" : classFilter}
+                  {classFilter === "All" ? "Filter" : formatClassLabel(classFilter)}
                 </button>
                 {filterOpen && (
                   <FilterMenu
                     value={classFilter}
+                    classes={E.CLASSES || []}
                     onClose={() => setFilterOpen(false)}
                     onPick={(v) => { setClassFilter(v); setFilterOpen(false); }}
                   />
@@ -1787,7 +1791,7 @@ function CollectMenu({ items, onPick, onClose }) {
   );
 }
 
-function FilterMenu({ value, onPick, onClose }) {
+function FilterMenu({ value, classes = [], onPick, onClose }) {
   // close on outside click
   useEffect(() => {
     const onDoc = (e) => {
@@ -1797,7 +1801,26 @@ function FilterMenu({ value, onPick, onClose }) {
     return () => document.removeEventListener("click", onDoc);
   }, [onClose]);
 
-  const opts = ["All", "Class 1", "Class 2", "Class 3", "Class 4", "Class 5", "Class 6", "Class 7", "Class 8"];
+  // Build options from the real class roster (mirrors the Students filter).
+  // key === stringified class number ("1"-"12", "13"=PRE-MONT, "14"=MONT I,
+  // "15"=MONT II); label uses formatClassLabel so PRE-MONT / MONT I / MONT II
+  // / Class XII all render correctly. Fallback to 1-12 if CLASSES is empty
+  // so the filter never disappears entirely.
+  const opts = (() => {
+    if (classes.length) {
+      return [{ key: "All", label: "All" }, ...classes.map((c) => ({
+        key: String(c.n),
+        label: c.label || formatClassLabel(String(c.n)),
+      }))];
+    }
+    return [
+      { key: "All", label: "All" },
+      ...Array.from({ length: 12 }, (_, i) => ({
+        key: String(i + 1),
+        label: formatClassLabel(String(i + 1)),
+      })),
+    ];
+  })();
   return (
     <div
       className="filter-menu"
@@ -1812,6 +1835,8 @@ function FilterMenu({ value, onPick, onClose }) {
         boxShadow: "var(--shadow-lg)",
         padding: 6,
         minWidth: 160,
+        maxHeight: 320,
+        overflowY: "auto",
       }}
     >
       <div style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.08em", padding: "6px 10px 4px" }}>
@@ -1819,8 +1844,8 @@ function FilterMenu({ value, onPick, onClose }) {
       </div>
       {opts.map((o) => (
         <button
-          key={o}
-          onClick={() => onPick(o)}
+          key={o.key}
+          onClick={() => onPick(o.key)}
           className="btn ghost"
           style={{
             width: "100%",
@@ -1828,12 +1853,12 @@ function FilterMenu({ value, onPick, onClose }) {
             height: 30,
             padding: "0 10px",
             fontSize: 12.5,
-            background: value === o ? "var(--accent-soft)" : "transparent",
-            color: value === o ? "var(--accent-2)" : "var(--ink)",
-            fontWeight: value === o ? 500 : 400,
+            background: value === o.key ? "var(--accent-soft)" : "transparent",
+            color: value === o.key ? "var(--accent-2)" : "var(--ink)",
+            fontWeight: value === o.key ? 500 : 400,
           }}
         >
-          {o}
+          {o.label}
         </button>
       ))}
     </div>
