@@ -119,7 +119,10 @@ function scopeForRole(data, session) {
       ...sanitised,
       addedStudents: [myChild],
       archivedStudents: [],
-      pendingFees:  (data.pendingFees  || []).filter((f) => f.id === myChild.id),
+      // Match by studentId first, fall back to id — newer composite-id rows
+      // (e.g. transport-fee rows keyed `${studentId}__transport`) carry the
+      // owning student in studentId, while legacy rows still use id directly.
+      pendingFees:  (data.pendingFees  || []).filter((f) => (f.studentId || f.id) === myChild.id),
       recentFees:   (data.recentFees   || []).filter((f) => (f.studentId || f.id) === myChild.id),
       dailyLogs:    (data.dailyLogs    || []).filter((l) => l.studentId === myChild.id),
       transportAttendance: (data.transportAttendance || []).filter((t) => t.studentId === myChild.id),

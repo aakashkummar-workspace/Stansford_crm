@@ -1320,6 +1320,111 @@ export async function editStudentFee({ studentId, newTotal, newPaid, actor = "St
   };
 }
 
+// Set (or clear) a student's transport / van fee. Lives in pending_fees
+// alongside the annual row but is keyed `${studentId}__transport` so the
+// two coexist on the same student. fee_type = "transport" so reports /
+// receipts can split it from academic fees. Passing amount=0 deletes the
+// row (student no longer charged for transport).
+//
+// Increase-only at the storage layer, mirroring editStudentFee: you can
+// raise the transport fee or leave it equal, but you can't silently
+// shrink it — the only legitimate way down is to set it to 0.
+//
+// Returns { previousAmount, newAmount }.
+export async function setStudentTransportFee({ studentId, amount, actor = "Staff" }) {
+  if (!studentId) throw new Error("studentId required");
+  const tgt = Math.max(0, Math.floor(Number(amount) || 0));
+  const rowId = `${studentId}__transport`;
+
+  // Look up student for the row's name/cls columns + audit context.
+  let student = null;
+  if (supabaseEnabled) {
+    const sSel = await supabase.from("students").select("*").eq("id", studentId).maybeSingle();
+    if (sSel.data) student = fromStudent(sSel.data);
+  }
+  if (!student) {
+    const db = fileRead();
+    student = (db.addedStudents || []).find((s) => s.id === studentId);
+  }
+  if (!student) throw new Error("Student not found");
+
+  // Current transport pending balance (0 if no row yet).
+  let currentAmount = 0;
+  if (supabaseEnabled) {
+    const pSel = await supabase.from("pending_fees").select("*").eq("id", rowId).maybeSingle();
+    if (pSel.data) currentAmount = Number(pSel.data.amount) || 0;
+  } else {
+    const db = fileRead();
+    const f = (db.pendingFees || []).find((x) => x.id === rowId);
+    if (f) currentAmount = Number(f.amount) || 0;
+  }
+
+  if (tgt !== 0 && tgt < currentAmount) {
+    throw new Error(`Cannot reduce transport fee. Current is ₹${currentAmount.toLocaleString("en-IN")}; set it to 0 to clear, or to a higher amount to add charges.`);
+  }
+  if (tgt === currentAmount) {
+    return { previousAmount: currentAmount, newAmount: tgt };
+  }
+
+  if (supabaseEnabled) {
+    if (tgt === 0) {
+      const del = await supabase.from("pending_fees").delete().eq("id", rowId);
+      if (del.error) throw new Error(`pending_fees delete failed: ${del.error.message}`);
+    } else {
+      const pSel = await supabase.from("pending_fees").select("*").eq("id", rowId).maybeSingle();
+      if (pSel.data) {
+        const upd = await supabase.from("pending_fees").update({ amount: tgt }).eq("id", rowId);
+        if (upd.error) throw new Error(`pending_fees update failed: ${upd.error.message}`);
+      } else {
+        const ins = await supabase.from("pending_fees").insert(toPendingFee({
+          id: rowId, name: student.name, cls: student.cls,
+          amount: tgt, due: "in 7 days", overdue: false,
+          studentId, feeType: "transport",
+        }));
+        if (ins.error) throw new Error(`pending_fees insert failed: ${ins.error.message}`);
+      }
+    }
+  } else {
+    const db = fileRead();
+    if (!Array.isArray(db.pendingFees)) db.pendingFees = [];
+    const fIdx = db.pendingFees.findIndex((x) => x.id === rowId);
+    if (tgt === 0) {
+      if (fIdx !== -1) db.pendingFees.splice(fIdx, 1);
+    } else if (fIdx !== -1) {
+      db.pendingFees[fIdx] = { ...db.pendingFees[fIdx], amount: tgt };
+    } else {
+      db.pendingFees.unshift({
+        id: rowId, studentId, name: student.name, cls: student.cls,
+        amount: tgt, due: "in 7 days", overdue: false,
+        feeType: "transport",
+      });
+    }
+    fileWrite(db);
+  }
+
+  // Audit — same fee_edits table the annual edits use, with action="transport-edit"
+  // so it stays queryable but distinguishable in the audit timeline.
+  try {
+    await appendFeeEdit({
+      studentId,
+      studentName: student.name,
+      cls: student.cls,
+      action: tgt === 0 ? "transport-clear" : "transport-edit",
+      amountBefore: currentAmount,
+      amountAfter: tgt,
+      paidBefore: null,
+      paidAfter: null,
+      receiptId: null,
+      actorName: actor,
+      actorRole: null,
+    });
+  } catch (e) {
+    console.warn(`[db] fee_edits transport audit failed (non-fatal): ${e.message}`);
+  }
+
+  return { previousAmount: currentAmount, newAmount: tgt };
+}
+
 // Undo the most recent editStudentFee call for a student. Only valid for
 // one hour after the edit. Returns the restored state, or null if no
 // snapshot exists (already undone, never edited, or TTL expired).
@@ -1533,7 +1638,10 @@ export async function payPendingFee(id, method, amount) {
       }
       throw new Error(`Payment failed — could not record the receipt in Supabase: ${ins.error.message}. The pending balance has been restored. Please retry.`);
     }
-    const stuUpd = await supabase.from("students").update({ fee: newStudentFeeStatus }).eq("id", id);
+    // students.fee is keyed by the real student id, not the pending row id.
+    // Composite-id rows (transport, kit, etc.) would silently no-op here
+    // if we used `id` directly.
+    const stuUpd = await supabase.from("students").update({ fee: newStudentFeeStatus }).eq("id", realStudentId);
     if (stuUpd.error) {
       // Receipt + pending update succeeded; only the student.fee status
       // failed to update. Don't roll back the payment — log a warning
@@ -1554,7 +1662,7 @@ export async function payPendingFee(id, method, amount) {
   }
   if (!Array.isArray(db.recentFees)) db.recentFees = [];
   db.recentFees.unshift(paidRow);
-  const sIdx = (db.addedStudents || []).findIndex((s) => s.id === id);
+  const sIdx = (db.addedStudents || []).findIndex((s) => s.id === realStudentId);
   if (sIdx !== -1) db.addedStudents[sIdx].fee = newStudentFeeStatus;
   fileWrite(db);
   return { paid: paidRow, fee: newStudentFeeStatus, remaining };

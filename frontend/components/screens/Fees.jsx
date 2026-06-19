@@ -25,7 +25,7 @@ export default function ScreenFees({ E, refresh, role, session }) {
   const [selected, setSelected] = useState(() => {
     const childId = role === "parent" && E.ADDED_STUDENTS && E.ADDED_STUDENTS[0]
       ? E.ADDED_STUDENTS[0].id : null;
-    const p = childId ? (E.PENDING_FEES || []).filter((f) => f.id === childId) : (E.PENDING_FEES || []);
+    const p = childId ? (E.PENDING_FEES || []).filter((f) => (f.studentId || f.id) === childId) : (E.PENDING_FEES || []);
     const r = childId ? (E.RECENT_FEES  || []).filter((f) => (f.studentId || f.id) === childId) : (E.RECENT_FEES  || []);
     return p[0] || r[0];
   });
@@ -128,7 +128,7 @@ export default function ScreenFees({ E, refresh, role, session }) {
   const myChildId = isParent && E.ADDED_STUDENTS && E.ADDED_STUDENTS[0]
     ? E.ADDED_STUDENTS[0].id : null;
   const scopedPending = useMemo(
-    () => (myChildId ? (E.PENDING_FEES || []).filter((f) => f.id === myChildId) : (E.PENDING_FEES || [])),
+    () => (myChildId ? (E.PENDING_FEES || []).filter((f) => (f.studentId || f.id) === myChildId) : (E.PENDING_FEES || [])),
     [E.PENDING_FEES, myChildId]
   );
   const scopedRecent = useMemo(
