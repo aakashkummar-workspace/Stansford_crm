@@ -10,15 +10,15 @@ export const dynamic = "force-dynamic";
 export default async function AdmissionFormPage() {
   // Pull the school identity so the form shows the right name.
   // Fall back to the bundled defaults if settings haven't been written.
-  // Single-identity branding — trustName mirrors the school name so
-  // the form's brand strip shows only the school.
-  let school = { name: "Sanfort International School", trustName: "Sanfort International School" };
+  // Pull the school identity so the form shows the right names.
+  // Fall back to the bundled defaults if settings haven't been written.
+  let school = { name: "Sanfort International School", trustName: "Sanvi Educational and Charitable Trust" };
   try {
     const settings = await readSettings();
     const trust = settings?.trust || {};
     school = {
       name:      trust.name      || school.name,
-      trustName: trust.trustName || trust.name || school.name,
+      trustName: trust.trustName || trust.name || school.trustName,
       regNo:     trust.regNo     || null,
       contact:   trust.contact   || null,
     };

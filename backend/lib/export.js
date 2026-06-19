@@ -8,11 +8,7 @@
 
 const FALLBACK_SCHOOL = {
   name: "Sanfort International School",
-  // trustName mirrors the school name — the trust line is suppressed
-  // wherever it would duplicate the school name (login, sidebar,
-  // receipts, exports). Set a different name in Settings → Trust
-  // identity to surface a separate "Run by" line.
-  trustName: "Sanfort International School",
+  trustName: "Sanvi Educational and Charitable Trust",
   regNo: null,
   pan80g: null,
   contact: null,
@@ -182,11 +178,7 @@ export async function downloadPdf({
   doc.setFont("helvetica", "normal");
   doc.setFontSize(8);
   doc.setTextColor(...GREY);
-  // Only print a separate "trust" line when it's a genuinely different
-  // organisation from the school. Default install collapses to one name.
-  if (s.trustName && s.trustName !== s.name) {
-    doc.text(safe(String(s.trustName).toUpperCase()), textX, y + 11);
-  }
+  doc.text(safe(String(s.trustName || "").toUpperCase()), textX, y + 11);
   const idMeta = [
     s.regNo   ? `Reg No: ${s.regNo}`   : null,
     s.pan80g  ? `PAN/80G: ${s.pan80g}` : null,
@@ -405,9 +397,7 @@ export async function downloadScaleReportPdf(payload = {}) {
   }
   doc.setFont("helvetica", "normal");
   doc.setFontSize(8); doc.setTextColor(...GREY);
-  if (s.trustName && s.trustName !== s.name) {
-    doc.text(String(s.trustName).toUpperCase(), textX, y + 11);
-  }
+  doc.text(String(s.trustName || "").toUpperCase(), textX, y + 11);
   const idMeta = [s.regNo && `Reg No: ${s.regNo}`, s.pan80g && `PAN/80G: ${s.pan80g}`, s.contact].filter(Boolean).join("  ·  ");
   if (idMeta) { doc.setFontSize(7.5); doc.text(idMeta, textX, y + 15); }
 

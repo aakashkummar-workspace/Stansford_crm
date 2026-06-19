@@ -1246,10 +1246,7 @@ function escapeHtml(s) {
 export function openPrintWindow(title, dateLabel, bodyHtml, opts = {}) {
   const school = {
     name:      opts.school?.name      || "Sanfort International School",
-    // Defaults trustName to the school name so the "Run by ..." sub-line
-    // collapses for single-identity installs (controlled by the
-    // school.trustName !== school.name guard in the template below).
-    trustName: opts.school?.trustName || opts.school?.name || "Sanfort International School",
+    trustName: opts.school?.trustName || "Sanvi Educational and Charitable Trust",
     regNo:     opts.school?.regNo     || null,
     pan80g:    opts.school?.pan80g    || null,
     contact:   opts.school?.contact   || null,
@@ -1296,9 +1293,7 @@ export function openPrintWindow(title, dateLabel, bodyHtml, opts = {}) {
         <img src="${window.location.origin}/logo.png" alt="logo" style="width:60px;height:60px;object-fit:contain;" />
         <div>
           <div class="school">${escapeHtml(school.name)}</div>
-          ${school.trustName && school.trustName !== school.name
-            ? `<div class="sub">Run by ${escapeHtml(school.trustName)} &middot; ${escapeHtml(school.brand)}</div>`
-            : `<div class="sub">${escapeHtml(school.brand)}</div>`}
+          <div class="sub">Run by ${escapeHtml(school.trustName)} &middot; ${escapeHtml(school.brand)}</div>
           ${idMeta ? `<div class="id-meta">${idMeta}</div>` : ""}
         </div>
       </div>

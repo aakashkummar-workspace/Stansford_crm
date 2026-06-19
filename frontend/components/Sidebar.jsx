@@ -417,6 +417,7 @@ export default function Sidebar({ current, setCurrent, role, user, permissions, 
           <div className="b1">
             Sanfort<span className="num"> International</span>
           </div>
+          <div className="b2">Sanvi Educational &amp; Charitable Trust</div>
         </div>
       </div>
       <div className="side-groups" style={{ overflowY: "auto", flex: 1, marginTop: 4 }}>
