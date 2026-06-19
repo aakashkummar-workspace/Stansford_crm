@@ -19,6 +19,14 @@ function Toast({ msg, tone, onClose }) {
 }
 
 export default function ScreenAttendance({ E, refresh, role, session }) {
+  // Parents get a child-scoped read-only view — no class picker, no
+  // roster, no marking controls. They see today's status + a 30-day
+  // attendance history for their child only. Staff fall through to
+  // the full marking flow below.
+  if (role === "parent") {
+    return <ParentAttendanceView E={E} />;
+  }
+
   // Teachers can be assigned to several classes. Build the picker list from
   // session.linkedClasses (legacy session.linkedId still honoured).
   const teacherClassList = role === "teacher"
@@ -566,5 +574,180 @@ function MarkChip({ label, tone, active, onClick }) {
         transition: "background .12s",
       }}
     >{label}</button>
+  );
+}
+
+// Parent-only attendance view. Read-only summary for one child.
+// Server-side, /api/data parent-scope already filters dailyLogs to just
+// this child's records, so we can iterate freely without leaking other
+// students' attendance.
+function ParentAttendanceView({ E }) {
+  const child = (E.ADDED_STUDENTS || [])[0] || null;
+
+  if (!child) {
+    return (
+      <div className="page">
+        <div className="page-head">
+          <div>
+            <div className="page-eyebrow">PEOPLE · ATTENDANCE</div>
+            <div className="page-title">Attendance</div>
+            <div className="page-sub">Ask the school office to link your account to your child's record.</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const logs = (E.DAILY_LOGS || []).filter((l) => l.studentId === child.id);
+
+  // Today's status from the latest log
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayLog = logs.find((l) => l.date === todayIso);
+  const todayState = !todayLog
+    ? "not_posted"
+    : todayLog.attendance === "absent"
+      ? "absent"
+      : "present";
+
+  // Term-level stats
+  const presentCount = logs.filter((l) => l.attendance !== "absent").length;
+  const absentCount  = logs.filter((l) => l.attendance === "absent").length;
+  const totalLogs    = logs.length;
+  const pct = totalLogs ? Math.round((presentCount / totalLogs) * 100) : null;
+
+  // Build a 30-day grid: most recent day first, weekends muted, days
+  // with no log shown as "—".
+  const grid = (() => {
+    const out = [];
+    const today = new Date(`${todayIso}T00:00:00`);
+    for (let i = 0; i < 30; i++) {
+      const d = new Date(today);
+      d.setDate(today.getDate() - i);
+      const iso = d.toISOString().slice(0, 10);
+      const log = logs.find((l) => l.date === iso);
+      const isWeekend = d.getDay() === 0;
+      out.push({
+        iso,
+        dateLabel: d.toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" }),
+        state: isWeekend
+          ? "weekend"
+          : !log ? "empty" : (log.attendance === "absent" ? "absent" : "present"),
+        reason: log?.reason || null,
+        postedBy: log?.postedBy || null,
+      });
+    }
+    return out;
+  })();
+
+  const statusBadge = todayState === "present"
+    ? { label: "Present", color: "var(--ok)", bg: "var(--ok-soft, #e6f4ec)" }
+    : todayState === "absent"
+      ? { label: "Absent", color: "var(--bad)", bg: "var(--bad-soft, #fbe1d8)" }
+      : { label: "Not posted yet", color: "var(--ink-3)", bg: "var(--bg-2)" };
+
+  return (
+    <div className="page">
+      <div className="page-head">
+        <div>
+          <div className="page-eyebrow">PEOPLE · ATTENDANCE</div>
+          <div className="page-title">Attendance <span className="amber">history</span></div>
+          <div className="page-sub">
+            {child.name} · {formatClassLabel(child.cls)} · {totalLogs} day{totalLogs === 1 ? "" : "s"} logged so far
+          </div>
+        </div>
+      </div>
+
+      {/* KPI strip */}
+      <div className="grid g-4" style={{ marginBottom: 18 }}>
+        <KPI
+          label="Today"
+          value={statusBadge.label}
+          sub={todayLog ? `Marked by ${todayLog.postedBy || "teacher"}` : "Teacher hasn't posted yet"}
+          puck={todayState === "absent" ? "rose" : todayState === "present" ? "mint" : "cream"}
+          puckIcon={todayState === "absent" ? "x" : "check"}
+        />
+        <KPI
+          label="This term"
+          value={pct !== null ? `${pct}%` : "—"}
+          sub={totalLogs ? `${presentCount}/${totalLogs} days present` : "no logs yet"}
+          puck="peach"
+          puckIcon="trending"
+        />
+        <KPI
+          label="Days present"
+          value={presentCount}
+          sub={`out of ${totalLogs} logged`}
+          puck="mint"
+          puckIcon="check"
+        />
+        <KPI
+          label="Days absent"
+          value={absentCount}
+          sub={absentCount > 0 ? "see reasons below" : "no absences"}
+          puck={absentCount > 0 ? "rose" : "mint"}
+          puckIcon={absentCount > 0 ? "x" : "check"}
+        />
+      </div>
+
+      {/* 30-day timeline list */}
+      <div className="card">
+        <div className="card-head">
+          <div>
+            <div className="card-title">Last 30 days</div>
+            <div className="card-sub">Most recent first · weekends marked as 'Holiday'</div>
+          </div>
+        </div>
+        <div style={{ maxHeight: 480, overflowY: "auto" }}>
+          <table className="table" style={{ width: "100%" }}>
+            <thead>
+              <tr>
+                <th style={{ width: 150 }}>Date</th>
+                <th>Status</th>
+                <th>Marked by</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {grid.length === 0 && (
+                <tr><td colSpan={4} className="empty">No attendance records yet.</td></tr>
+              )}
+              {grid.map((row) => {
+                const pill = row.state === "present"
+                  ? { label: "Present", color: "var(--ok)" }
+                  : row.state === "absent"
+                    ? { label: "Absent",  color: "var(--bad)" }
+                    : row.state === "weekend"
+                      ? { label: "Holiday", color: "var(--ink-4)" }
+                      : { label: "—",       color: "var(--ink-4)" };
+                return (
+                  <tr key={row.iso} style={{ borderTop: "1px solid var(--rule-2)" }}>
+                    <td style={{ padding: "10px 12px", fontSize: 12.5, color: "var(--ink-2)" }}>
+                      {row.dateLabel}
+                    </td>
+                    <td style={{ padding: "10px 12px" }}>
+                      <span style={{
+                        display: "inline-flex", alignItems: "center", gap: 6,
+                        padding: "2px 10px", borderRadius: 999,
+                        fontSize: 11, fontWeight: 500,
+                        color: pill.color, border: `1px solid ${pill.color}`,
+                        background: "transparent",
+                      }}>
+                        {pill.label}
+                      </span>
+                    </td>
+                    <td style={{ padding: "10px 12px", fontSize: 12, color: "var(--ink-3)" }}>
+                      {row.postedBy || "—"}
+                    </td>
+                    <td style={{ padding: "10px 12px", fontSize: 12, color: "var(--ink-3)" }}>
+                      {row.reason || (row.state === "absent" ? "No reason recorded" : "—")}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   );
 }
