@@ -73,8 +73,26 @@ export async function POST(req) {
 
   if (session.role === "parent") {
     const users = await listUsers();
-    const admin = users.find((u) => u.role === "admin") || users.find((u) => u.role === "principal");
-    if (!admin) return NextResponse.json({ ok: false, error: "No admin account found" }, { status: 503 });
+    // Route to whichever admin-equivalent account exists. Order of
+    // preference: admin → principal → super (legacy) → super_admin →
+    // school_accountant (last-resort so the message never bounces).
+    // Earlier the lookup only matched "admin" or "principal", so any
+    // school whose owner account had role "super" (legacy) hit a 503.
+    const preference = ["admin", "principal", "super", "super_admin", "school_accountant"];
+    let admin = null;
+    for (const role of preference) {
+      admin = users.find((u) => u.role === role);
+      if (admin) break;
+    }
+    if (!admin) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: `No admin account found. Roles in the system: ${[...new Set(users.map((u) => u.role).filter(Boolean))].join(", ") || "(none)"}.`,
+        },
+        { status: 503 }
+      );
+    }
     receiverId = admin.id;
     receiverRole = admin.role;
   } else if (STAFF_SENDER_ROLES.has(session.role)) {
