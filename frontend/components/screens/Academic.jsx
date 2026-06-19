@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { resolveSchool, downloadPdf } from "@/lib/export";
+import { formatClassLabel } from "@/backend/lib/format.js";
 import { KPI, AvatarChip } from "../ui";
 
 // Build the last 8 week-start dates relative to today. Computed lazily on
@@ -424,13 +425,13 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
         <div className="card col-7">
           <div className="card-head">
             <div>
-              <div className="card-title">Class {cls}-{sec} · {roster.length} students</div>
+              <div className="card-title">{formatClassLabel(`${cls}-${sec}`)} · {roster.length} students</div>
               <div className="card-sub">Tap the pills to mark today inline · {week.label}</div>
             </div>
           </div>
           <div style={{ maxHeight: 620, overflowY: "auto" }}>
             {roster.length === 0 && (
-              <div className="empty">No students in Class {cls}-{sec} yet. Add some on the Students screen.</div>
+              <div className="empty">No students in {formatClassLabel(`${cls}-${sec}`)} yet. Add some on the Students screen.</div>
             )}
             {roster.map((s, i) => {
               const act = i === selectedStudent;
@@ -508,7 +509,7 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
                 <div style={{ fontSize: 17, fontWeight: 600, letterSpacing: "-0.01em" }}>{student.name}</div>
                 <div style={{ color: "var(--ink-3)", fontSize: 12.5, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                   <span>{student.id}</span><span className="meta-dot">·</span>
-                  <span>Class {cls}-{sec} · Roll {student.roll}</span>
+                  <span>{formatClassLabel(`${cls}-${sec}`)} · Roll {student.roll}</span>
                 </div>
               </div>
               <div style={{ display: "flex", gap: 6 }}>

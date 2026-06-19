@@ -23,7 +23,7 @@ function dot(s, max) {
 // that the WhatsApp Cloud / Evolution API will accept directly as `media`.
 export function renderReceiptPng({
   schoolName = "SANFORT INTERNATIONAL SCHOOL",
-  trustName  = "Sanvi Educational and Charitable Trust",
+  trustName  = "",
   regNo      = "SIS/2026",
   address    = "No.45, MG Road, Chennai - 600 001.",
   phone      = "9876 543 210",
@@ -61,8 +61,12 @@ export function renderReceiptPng({
   ctx.textAlign = "center";
   ctx.font = "bold 22px Arial, sans-serif";
   ctx.fillText(schoolName, W / 2, 50);
-  ctx.font = "bold 13px Arial, sans-serif";
-  ctx.fillText(trustName, W / 2, 72);
+  // Render the trust line only if it differs from the school name —
+  // single-identity installs skip it.
+  if (trustName && trustName !== schoolName) {
+    ctx.font = "bold 13px Arial, sans-serif";
+    ctx.fillText(trustName, W / 2, 72);
+  }
   ctx.font = "bold 12px Arial, sans-serif";
   ctx.fillText(`Reg No: ${regNo}/${slNo}`, W / 2, 95);
   ctx.fillText(address, W / 2, 115);

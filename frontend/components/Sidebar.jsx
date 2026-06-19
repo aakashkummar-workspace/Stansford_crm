@@ -150,8 +150,11 @@ export const NAV_BY_ROLE = {
     { id: "dashboard",    label: "Home",         icon: "home" },
     { id: "academic",     label: "Academics",    icon: "academic" },
     { id: "syllabus",     label: "Syllabus",     icon: "academic" },
-    { id: "scale_report", label: "SCALE report", icon: "reports" },
-    { id: "scale_ritual", label: "Daily ritual", icon: "check" },
+    // SCALE report + Daily ritual are intentionally NOT in the parent's
+    // default nav — admins must explicitly enable them via Access
+    // Control for schools that run the SCALE programme. Pre-this, every
+    // school's parent saw "SCALE report" even if they hadn't bought into
+    // the module, which was confusing.
     { id: "timetable",    label: "Timetable",    icon: "clock" },
     { id: "fees",         label: "Fees",         icon: "fees" },
     { id: "transport",    label: "Transport",    icon: "bus" },
@@ -414,7 +417,6 @@ export default function Sidebar({ current, setCurrent, role, user, permissions, 
           <div className="b1">
             Sanfort<span className="num"> International</span>
           </div>
-          <div className="b2">Sanvi Educational &amp; Charitable Trust</div>
         </div>
       </div>
       <div className="side-groups" style={{ overflowY: "auto", flex: 1, marginTop: 4 }}>

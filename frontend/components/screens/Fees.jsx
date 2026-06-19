@@ -419,7 +419,7 @@ export default function ScreenFees({ E, refresh, role, session }) {
   };
   const sendEmail = () => {
     const subject = encodeURIComponent(`Fee receipt · ${selected.id} · ${selected.name}`);
-    const body = encodeURIComponent(`Dear Parent,\n\nThis is to confirm receipt of ₹${selected.amount} towards fees for ${selected.name} (${formatClassLabel(selected.cls)}, Reg ID ${selected.id}).\nMethod: ${method}\n\nThank you,\nSanfort International School\nRun by Sanvi Educational and Charitable Trust`);
+    const body = encodeURIComponent(`Dear Parent,\n\nThis is to confirm receipt of ₹${selected.amount} towards fees for ${selected.name} (${formatClassLabel(selected.cls)}, Reg ID ${selected.id}).\nMethod: ${method}\n\nThank you,\nSanfort International School`);
     window.open(`mailto:parent@example.com?subject=${subject}&body=${body}`, "_self");
     flash("Opened email draft");
   };
@@ -518,7 +518,6 @@ export default function ScreenFees({ E, refresh, role, session }) {
       <img src="${window.location.origin}/logo.png" alt="logo" />
       <div class="school-block">
         <div class="school">SANFORT INTERNATIONAL SCHOOL</div>
-        <div class="trust">Sanvi Educational and Charitable Trust</div>
       </div>
     </div>
     <div class="reg">Reg No: SIS/2026/${receiptNo}</div>
@@ -1080,7 +1079,6 @@ export default function ScreenFees({ E, refresh, role, session }) {
                       <img src="/logo.png" alt="logo" style={{ width: 50, height: 50, objectFit: "contain", flexShrink: 0 }} />
                       <div style={{ flex: 1, textAlign: "center", color: navy }}>
                         <div style={{ fontWeight: 800, fontSize: 14, letterSpacing: 0.3, lineHeight: 1.15 }}>SANFORT INTERNATIONAL SCHOOL</div>
-                        <div style={{ fontWeight: 700, fontSize: 10.5, marginTop: 2, letterSpacing: 0.3 }}>Sanvi Educational and Charitable Trust</div>
                       </div>
                     </div>
                     <div style={{ textAlign: "center", color: navy }}>

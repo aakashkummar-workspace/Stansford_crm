@@ -77,7 +77,6 @@ export default function LoginScreen({ demo, next }) {
             <img src="/logo.png" alt="" className="lp-logo" />
             <div className="lp-brand-text">
               <div className="lp-school">Sanfort <span>International</span></div>
-              <div className="lp-trust">Sanvi Educational &amp; Charitable Trust</div>
             </div>
           </div>
 
@@ -98,7 +97,7 @@ export default function LoginScreen({ demo, next }) {
             ))}
           </ul>
 
-          <div className="lp-foot">© {year} Sanvi Educational &amp; Charitable Trust · All rights reserved</div>
+          <div className="lp-foot">© {year} Sanfort International School · All rights reserved</div>
         </div>
       </aside>
 
@@ -110,7 +109,6 @@ export default function LoginScreen({ demo, next }) {
             <img src="/logo.png" alt="" />
             <div>
               <div className="lp-school">Sanfort <span>International</span></div>
-              <div className="lp-trust">Sanvi Educational &amp; Charitable Trust</div>
             </div>
           </div>
 
@@ -219,7 +217,7 @@ export default function LoginScreen({ demo, next }) {
             </a>
           </div>
 
-          <div className="lp-foot-mobile">© {year} Sanvi Educational &amp; Charitable Trust</div>
+          <div className="lp-foot-mobile">© {year} Sanfort International School</div>
         </div>
       </main>
 
