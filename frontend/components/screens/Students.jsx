@@ -947,7 +947,11 @@ function EditFeeModal({ student, summary, onClose, onSubmit }) {
   const paid = academic.paid;
   const currentTotal = outstanding + paid;
   const currentTransport = transport.outstanding + transport.paid;
-  const hasTransport = student.transport && student.transport !== "—";
+  // Transport fee is always editable from this modal, even for students
+  // without a route assigned — the admin can charge the van fee before
+  // finalizing pickup. We still surface the route label when one exists.
+  const hasTransport = true;
+  const routeLabel = student.transport && student.transport !== "—" ? student.transport : null;
 
   const [totalStr, setTotalStr] = useState(String(currentTotal));
   const [paidStr,  setPaidStr]  = useState(String(paid));
@@ -1045,19 +1049,17 @@ function EditFeeModal({ student, summary, onClose, onSubmit }) {
               <span style={{ color: "var(--ink-3)" }}>Outstanding</span>
               <span style={{ fontFamily: "var(--font-mono)", color: outstanding > 0 ? "var(--warn)" : "var(--ink-3)" }}>{fmt(outstanding)}</span>
             </div>
-            {hasTransport && (
-              <div style={{
-                display: "flex", justifyContent: "space-between",
-                paddingTop: 6, marginTop: 2, borderTop: "1px dashed var(--rule-2)",
-              }}>
-                <span style={{ color: "var(--ink-3)" }}>
-                  Transport fee · {student.transport}
-                </span>
-                <span style={{ fontFamily: "var(--font-mono)", color: currentTransport > 0 ? "var(--ink)" : "var(--ink-4)" }}>
-                  {currentTransport > 0 ? fmt(currentTransport) : "not set"}
-                </span>
-              </div>
-            )}
+            <div style={{
+              display: "flex", justifyContent: "space-between",
+              paddingTop: 6, marginTop: 2, borderTop: "1px dashed var(--rule-2)",
+            }}>
+              <span style={{ color: "var(--ink-3)" }}>
+                Transport fee{routeLabel ? ` · ${routeLabel}` : ""}
+              </span>
+              <span style={{ fontFamily: "var(--font-mono)", color: currentTransport > 0 ? "var(--ink)" : "var(--ink-4)" }}>
+                {currentTransport > 0 ? fmt(currentTransport) : "not set"}
+              </span>
+            </div>
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
@@ -1103,28 +1105,28 @@ function EditFeeModal({ student, summary, onClose, onSubmit }) {
             </label>
           </div>
 
-          {hasTransport && (
-            <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>
-                Transport fee · {student.transport} (₹)
-              </span>
-              <input
-                className="input"
-                inputMode="numeric"
-                value={transportStr}
-                onChange={(e) => setTransportStr(e.target.value.replace(/[^\d]/g, ""))}
-                placeholder={String(currentTransport)}
-                style={transportReduced ? { borderColor: "var(--bad)" } : undefined}
-              />
-              <span style={{ fontSize: 11, color: transportReduced ? "var(--bad)" : "var(--ink-4)" }}>
-                {transportReduced
-                  ? `Cannot reduce. Set to 0 to clear, or to ≥ ${fmt(currentTransport)} to raise.`
-                  : currentTransport === 0
+          <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>
+              Transport fee{routeLabel ? ` · ${routeLabel}` : ""} (₹)
+            </span>
+            <input
+              className="input"
+              inputMode="numeric"
+              value={transportStr}
+              onChange={(e) => setTransportStr(e.target.value.replace(/[^\d]/g, ""))}
+              placeholder={String(currentTransport)}
+              style={transportReduced ? { borderColor: "var(--bad)" } : undefined}
+            />
+            <span style={{ fontSize: 11, color: transportReduced ? "var(--bad)" : "var(--ink-4)" }}>
+              {transportReduced
+                ? `Cannot reduce. Set to 0 to clear, or to ≥ ${fmt(currentTransport)} to raise.`
+                : currentTransport === 0
+                  ? routeLabel
                     ? "Not yet set. Enter the van fee — it adds to this student's overall pending fees."
-                    : `Current ${fmt(currentTransport)} · raise to add charges, or set to 0 to clear.`}
-              </span>
-            </label>
-          )}
+                    : "Not yet set. Optional — leave 0 if this student doesn't use transport. Adds to overall pending fees once set."
+                  : `Current ${fmt(currentTransport)} · raise to add charges, or set to 0 to clear.`}
+            </span>
+          </label>
 
           {valid && (
             <div style={{
