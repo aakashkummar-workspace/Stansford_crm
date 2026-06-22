@@ -336,22 +336,32 @@ function TeacherRow({ sectionKey, teacher, teachers, canAssign, onAssign, onUnas
 
   useEffect(() => {
     if (!pickerOpen) return;
-    const onClick = (e) => {
+    const onClickOutside = (e) => {
       // Close if click is outside both the trigger and the floating menu.
+      // pointerdown covers touch + mouse + pen in a single event (no double
+      // fire on mobile from synthetic mouse events).
       if (triggerRef.current?.contains(e.target)) return;
       if (menuRef.current?.contains(e.target)) return;
       setPickerOpen(false);
     };
-    const close = () => setPickerOpen(false);
-    document.addEventListener("mousedown", onClick);
-    // Re-anchor / close on scroll + resize so the menu doesn't float in
-    // the wrong place when the user scrolls the classes grid.
-    window.addEventListener("scroll", close, true);
-    window.addEventListener("resize", close);
+    const onScroll = (e) => {
+      // Capture-phase scroll listener catches scroll events from ANY
+      // descendant — including the menu's own overflow-y:auto pane.
+      // Only close when the scroll happens OUTSIDE the menu (e.g. the
+      // user scrolls the underlying classes grid); scrolling within the
+      // menu is the expected way to see a long teacher list and must
+      // not dismiss it.
+      if (menuRef.current?.contains(e.target)) return;
+      setPickerOpen(false);
+    };
+    const onResize = () => setPickerOpen(false);
+    document.addEventListener("pointerdown", onClickOutside);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onResize);
     return () => {
-      document.removeEventListener("mousedown", onClick);
-      window.removeEventListener("scroll", close, true);
-      window.removeEventListener("resize", close);
+      document.removeEventListener("pointerdown", onClickOutside);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onResize);
     };
   }, [pickerOpen]);
 
