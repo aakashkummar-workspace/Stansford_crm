@@ -323,18 +323,74 @@ function ClassCard({ cls, studentCount, teachers, teacherFor, canAssign, onAssig
 // ---------- class-teacher picker ----------
 // Single teacher per class. Storage uses the legacy "N-A" key under the
 // hood, but the row itself just says "Class teacher" — no "Section A" chip.
+//
+// The picker is rendered with position:fixed (anchored to the trigger's
+// getBoundingClientRect) so it can escape the parent .card's overflow:hidden
+// clip. Otherwise the dropdown gets cut off at the card boundary and only
+// the first teacher row is visible.
 function TeacherRow({ sectionKey, teacher, teachers, canAssign, onAssign, onUnassign }) {
   const [pickerOpen, setPickerOpen] = useState(false);
-  const ref = useRef(null);
+  const [anchorRect, setAnchorRect] = useState(null);
+  const triggerRef = useRef(null);
+  const menuRef = useRef(null);
 
   useEffect(() => {
     if (!pickerOpen) return;
-    const onClick = (e) => { if (ref.current && !ref.current.contains(e.target)) setPickerOpen(false); };
+    const onClick = (e) => {
+      // Close if click is outside both the trigger and the floating menu.
+      if (triggerRef.current?.contains(e.target)) return;
+      if (menuRef.current?.contains(e.target)) return;
+      setPickerOpen(false);
+    };
+    const close = () => setPickerOpen(false);
     document.addEventListener("mousedown", onClick);
-    return () => document.removeEventListener("mousedown", onClick);
+    // Re-anchor / close on scroll + resize so the menu doesn't float in
+    // the wrong place when the user scrolls the classes grid.
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
   }, [pickerOpen]);
 
   const initials = (n) => (n || "?").trim().split(/\s+/).map((p) => p[0]).slice(0, 2).join("").toUpperCase();
+
+  const togglePicker = () => {
+    if (pickerOpen) { setPickerOpen(false); return; }
+    if (triggerRef.current) {
+      setAnchorRect(triggerRef.current.getBoundingClientRect());
+    }
+    setPickerOpen(true);
+  };
+
+  // Compute a sensible position for the floating menu. Anchored to the
+  // trigger's left edge, falling back to right-align if it would overflow
+  // the viewport. If it would extend past the bottom, flip it above.
+  const menuStyle = (() => {
+    if (!anchorRect) return null;
+    const MENU_W = 280;
+    const MENU_H_MAX = 320;
+    let left = anchorRect.left;
+    if (typeof window !== "undefined") {
+      left = Math.min(left, window.innerWidth - MENU_W - 8);
+      left = Math.max(8, left);
+    }
+    let top = anchorRect.bottom + 4;
+    let flip = false;
+    if (typeof window !== "undefined" && top + MENU_H_MAX + 8 > window.innerHeight) {
+      flip = anchorRect.top - 4 - MENU_H_MAX > 8;
+      if (flip) top = anchorRect.top - 4 - MENU_H_MAX;
+    }
+    return {
+      position: "fixed", top, left, minWidth: MENU_W,
+      maxHeight: MENU_H_MAX, overflowY: "auto",
+      background: "var(--card)", border: "1px solid var(--rule)",
+      borderRadius: 8, padding: 4, zIndex: 9000,
+      boxShadow: "var(--shadow-lg)",
+    };
+  })();
 
   return (
     <div style={{
@@ -342,7 +398,7 @@ function TeacherRow({ sectionKey, teacher, teachers, canAssign, onAssign, onUnas
       padding: "10px 12px",
       background: "var(--bg-2)", border: "1px solid var(--rule-2)", borderRadius: 8,
     }}>
-      <div ref={ref} style={{ flex: 1, minWidth: 0, position: "relative" }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
         {teacher ? (
           (() => {
             const list = Array.isArray(teacher.linkedClasses) ? teacher.linkedClasses : (teacher.linkedId ? [teacher.linkedId] : []);
@@ -370,68 +426,62 @@ function TeacherRow({ sectionKey, teacher, teachers, canAssign, onAssign, onUnas
             );
           })()
         ) : canAssign ? (
-          <button className="btn sm" onClick={() => setPickerOpen((s) => !s)} style={{ height: 28 }}>
+          <button ref={triggerRef} className="btn sm" onClick={togglePicker} style={{ height: 28 }}>
             <Icon name="plus" size={11} />Assign class teacher
           </button>
         ) : (
           <span style={{ fontSize: 11.5, color: "var(--ink-4)" }}>No class teacher assigned</span>
         )}
-
-        {pickerOpen && canAssign && (
-          <div style={{
-            position: "absolute", top: "calc(100% + 4px)", left: 0,
-            minWidth: 240, background: "var(--card)",
-            border: "1px solid var(--rule)", borderRadius: 8,
-            padding: 4, zIndex: 60, boxShadow: "var(--shadow-lg)",
-            maxHeight: 280, overflowY: "auto",
-          }}>
-            <div style={{ fontSize: 10.5, color: "var(--ink-4)", padding: "6px 10px 4px", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 500 }}>
-              Pick a teacher
-            </div>
-            {teachers.length === 0 ? (
-              <div style={{ padding: "10px 12px", fontSize: 11.5, color: "var(--ink-3)" }}>
-                No teachers yet. Add a Teacher account first.
-              </div>
-            ) : (
-              teachers.map((t) => {
-                const list = Array.isArray(t.linkedClasses) ? t.linkedClasses : (t.linkedId ? [t.linkedId] : []);
-                const here = list.includes(sectionKey);
-                const otherClasses = list.filter((c) => c !== sectionKey);
-                return (
-                  <button
-                    key={t.id}
-                    onClick={() => { onAssign(t.id); setPickerOpen(false); }}
-                    disabled={here}
-                    style={{
-                      width: "100%", textAlign: "left",
-                      padding: "8px 10px", background: here ? "var(--bg-2)" : "transparent",
-                      border: 0, borderRadius: 6, cursor: here ? "default" : "pointer",
-                      color: "var(--ink-2)", fontSize: 12,
-                      display: "flex", alignItems: "center", gap: 8,
-                    }}
-                    onMouseEnter={(e) => !here && (e.currentTarget.style.background = "var(--bg-2)")}
-                    onMouseLeave={(e) => !here && (e.currentTarget.style.background = "transparent")}
-                  >
-                    <span style={{
-                      width: 20, height: 20, borderRadius: "50%",
-                      background: "linear-gradient(135deg, var(--ok), #2f6048)",
-                      color: "#fff", display: "grid", placeItems: "center",
-                      fontSize: 9, fontWeight: 600, flexShrink: 0,
-                    }}>{initials(t.name)}</span>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 12, fontWeight: 500, color: "var(--ink)" }}>{t.name}</div>
-                      <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>
-                        {t.email}{otherClasses.length ? ` · also teaches ${otherClasses.join(", ")}` : ""}
-                      </div>
-                    </div>
-                    {here && <span className="chip ok" style={{ fontSize: 9.5 }}><span className="dot" />Already here</span>}
-                  </button>
-                );
-              })
-            )}
-          </div>
-        )}
       </div>
+
+      {pickerOpen && canAssign && menuStyle && (
+        <div ref={menuRef} style={menuStyle}>
+          <div style={{ fontSize: 10.5, color: "var(--ink-4)", padding: "6px 10px 4px", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 500 }}>
+            Pick a teacher
+          </div>
+          {teachers.length === 0 ? (
+            <div style={{ padding: "10px 12px", fontSize: 11.5, color: "var(--ink-3)" }}>
+              No teachers yet. Add a Teacher account first.
+            </div>
+          ) : (
+            teachers.map((t) => {
+              const list = Array.isArray(t.linkedClasses) ? t.linkedClasses : (t.linkedId ? [t.linkedId] : []);
+              const here = list.includes(sectionKey);
+              const otherClasses = list.filter((c) => c !== sectionKey);
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => { onAssign(t.id); setPickerOpen(false); }}
+                  disabled={here}
+                  style={{
+                    width: "100%", textAlign: "left",
+                    padding: "8px 10px", background: here ? "var(--bg-2)" : "transparent",
+                    border: 0, borderRadius: 6, cursor: here ? "default" : "pointer",
+                    color: "var(--ink-2)", fontSize: 12,
+                    display: "flex", alignItems: "center", gap: 8,
+                  }}
+                  onMouseEnter={(e) => !here && (e.currentTarget.style.background = "var(--bg-2)")}
+                  onMouseLeave={(e) => !here && (e.currentTarget.style.background = "transparent")}
+                >
+                  <span style={{
+                    width: 20, height: 20, borderRadius: "50%",
+                    background: "linear-gradient(135deg, var(--ok), #2f6048)",
+                    color: "#fff", display: "grid", placeItems: "center",
+                    fontSize: 9, fontWeight: 600, flexShrink: 0,
+                  }}>{initials(t.name)}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12, fontWeight: 500, color: "var(--ink)" }}>{t.name}</div>
+                    <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>
+                      {t.email}{otherClasses.length ? ` · also teaches ${otherClasses.join(", ")}` : ""}
+                    </div>
+                  </div>
+                  {here && <span className="chip ok" style={{ fontSize: 9.5 }}><span className="dot" />Already here</span>}
+                </button>
+              );
+            })
+          )}
+        </div>
+      )}
     </div>
   );
 }
