@@ -499,9 +499,10 @@ export default function ScreenTransport({ E, refresh, role, session }) {
                     <Icon name="bus" size={20} />
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                       <span style={{ fontSize: 13, fontWeight: 500 }}>{r.code}</span>
                       <RunStatusChip status={r.status} />
+                      <DirectionChip direction={r.direction} />
                     </div>
                     <div className="s" style={{ marginTop: 1 }}>{r.name}</div>
                     <div style={{ fontSize: 11, color: "var(--ink-4)", marginTop: 2, display: "flex", alignItems: "center", gap: 4 }}>
