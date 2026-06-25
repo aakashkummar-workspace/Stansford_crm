@@ -29,6 +29,11 @@ export default function ScreenTransport({ E, refresh, role, session }) {
   const [editing, setEditing] = useState(null); // route object being edited, or null
   const [assigning, setAssigning] = useState(null); // route object being staff-assigned, or null
   const [maintFor, setMaintFor]   = useState(null); // route whose maintenance log is open, or null
+  // Route being considered for deletion. Opens a type-to-confirm modal so
+  // a single accidental click on the ✕ icon can never wipe a route
+  // (and unlink dozens of students with it). Bug that bit the school
+  // multiple times before this guard was added.
+  const [confirmRemove, setConfirmRemove] = useState(null);
   const [showAbsent, setShowAbsent] = useState(false);
   const [showMap, setShowMap] = useState(false);
   // Bulk transport-assignment importer — separate from the Students CSV
@@ -291,8 +296,11 @@ export default function ScreenTransport({ E, refresh, role, session }) {
     }
   }
 
-  async function handleRemoveRoute(code) {
-    if (!confirm(`Remove route ${code}? This cannot be undone.`)) return;
+  // The actual delete — only called after the user has confirmed via the
+  // type-to-confirm modal (state: confirmRemove). Never invoke this
+  // directly from an icon-button onClick; route deletion is destructive
+  // and has bitten the admin multiple times via a single accidental click.
+  async function performRemoveRoute(code) {
     try {
       const r = await fetch("/api/transport/route", {
         method: "DELETE",
@@ -548,7 +556,7 @@ export default function ScreenTransport({ E, refresh, role, session }) {
                       </button>
                       <button
                         className="icon-btn"
-                        onClick={(e) => { e.stopPropagation(); handleRemoveRoute(r.code); }}
+                        onClick={(e) => { e.stopPropagation(); setConfirmRemove(r); }}
                         title="Remove route"
                       >
                         <Icon name="x" size={13} />
@@ -915,12 +923,121 @@ export default function ScreenTransport({ E, refresh, role, session }) {
       {showMap && (
         <MapModal routes={routes} onClose={() => setShowMap(false)} />
       )}
+      {confirmRemove && (
+        <ConfirmRemoveRouteModal
+          route={confirmRemove}
+          studentCount={(E.ADDED_STUDENTS || []).filter(
+            (s) => s.transport === confirmRemove.code || s.transportEvening === confirmRemove.code
+          ).length}
+          onClose={() => setConfirmRemove(null)}
+          onConfirm={async () => {
+            await performRemoveRoute(confirmRemove.code);
+            setConfirmRemove(null);
+          }}
+        />
+      )}
 
       <Toast msg={toast?.msg} tone={toast?.tone} onClose={() => setToast(null)} />
     </div>
   );
 }
 
+
+// Type-to-confirm delete modal for transport routes. A single accidental
+// click on the ✕ icon used to wipe a route + unlink dozens of students;
+// this guard makes that impossible — the Delete button stays disabled
+// until the admin types the route code exactly. Pattern modelled after
+// GitHub's "type the repo name to delete repo".
+function ConfirmRemoveRouteModal({ route, studentCount, onClose, onConfirm }) {
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const matches = typed.trim().toUpperCase() === String(route.code || "").trim().toUpperCase();
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  async function submit(e) {
+    e?.preventDefault();
+    if (!matches || busy) return;
+    setBusy(true); setErr("");
+    try { await onConfirm(); }
+    catch (ex) { setErr(ex.message || "Delete failed"); setBusy(false); }
+  }
+
+  return (
+    <ModalShell
+      title={`Delete route ${route.code}?`}
+      sub="This cannot be undone. Type the route code to confirm."
+      onClose={onClose}
+      width={460}
+    >
+      <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{
+          background: "var(--err-soft, #fbe1d8)",
+          border: "1px solid var(--err, #b13c1c)",
+          color: "var(--ink-2)",
+          borderRadius: 8,
+          padding: "10px 12px",
+          fontSize: 12.5,
+          lineHeight: 1.55,
+        }}>
+          You're about to delete <b>{route.code}{route.name && route.name !== route.code ? ` · ${route.name}` : ""}</b>.
+          {studentCount > 0 ? (
+            <> This route is currently used by <b>{studentCount} student{studentCount === 1 ? "" : "s"}</b> — their transport assignment will be lost.</>
+          ) : (
+            <> No students are currently assigned to this route.</>
+          )}
+          {Array.isArray(route.stops) && route.stops.length > 0 && (
+            <div style={{ marginTop: 4, color: "var(--ink-3)" }}>
+              {route.stops.length} stop{route.stops.length === 1 ? "" : "s"}: {route.stops.slice(0, 4).map((s) => s.name).join(", ")}{route.stops.length > 4 ? "…" : ""}
+            </div>
+          )}
+        </div>
+
+        <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>
+            Type <b style={{ fontFamily: "var(--font-mono)", color: "var(--ink)" }}>{route.code}</b> to confirm
+          </span>
+          <input
+            className="input"
+            autoFocus
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            placeholder={route.code}
+            style={typed && !matches ? { borderColor: "var(--err, #b13c1c)" } : undefined}
+          />
+          <span style={{ fontSize: 11, color: matches ? "var(--ok)" : "var(--ink-4)" }}>
+            {matches ? "✓ Match — delete is now enabled" : "The Delete button stays disabled until the code matches exactly."}
+          </span>
+        </label>
+
+        {err && (
+          <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "8px 12px", borderRadius: 7, fontSize: 12 }}>{err}</div>
+        )}
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+          <button
+            type="submit"
+            className="btn"
+            disabled={!matches || busy}
+            style={{
+              background: matches ? "var(--err, #b13c1c)" : "var(--bg-2)",
+              color: matches ? "#fff" : "var(--ink-4)",
+              borderColor: matches ? "var(--err, #b13c1c)" : "var(--rule)",
+            }}
+          >
+            <Icon name="x" size={13} />{busy ? "Deleting…" : "Delete route"}
+          </button>
+        </div>
+      </form>
+    </ModalShell>
+  );
+}
 
 // Status chip for the route — covers idle/running/completed/delayed.
 function RunStatusChip({ status }) {
