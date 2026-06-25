@@ -33,14 +33,16 @@ function buildMessages({ event, route, direction }) {
   if (event.type === "started") {
     return {
       title: "🚌 Transport started",
-      description: `${routeLabel} · next: ${event.toStopName}${eta ? ` · ETA ${eta}` : ""}`,
+      description: `${routeLabel} · running · first stop: ${event.toStopName}${eta ? ` · ETA ${eta}` : ""}`,
+      // Goes to EVERY parent on this route (not just first-stop parents),
+      // so phrase it as a "bus is now running" message — they'll get a
+      // second message when the bus actually approaches their child's stop.
       whatsapp:
         `🚌 *Transport Started*\n\n` +
-        `The school vehicle has started today's ${directionLabel} route.\n\n` +
-        `📍 Current Location: *School Campus*\n` +
-        `🚏 Next Stop: *${event.toStopName}*\n` +
-        (eta ? `🕒 Estimated Arrival: *${eta}*\n` : "") +
-        `\nPlease have your child ready 5 minutes before arrival.`,
+        `The school vehicle has just started today's ${directionLabel} route.\n\n` +
+        `🚏 First stop: *${event.toStopName}*\n` +
+        (eta ? `🕒 First-stop ETA: *${eta}*\n` : "") +
+        `\nYou'll get another message when the bus reaches your child's stop. Please have them ready by then.`,
     };
   }
   if (event.type === "departed") {
@@ -71,14 +73,18 @@ function buildMessages({ event, route, direction }) {
 
 // Pick the students who should trigger a notification for this event.
 //
-//   "started" / "departed"  → students at the upcoming stop (event.toStopName)
+//   "started"               → EVERY student on this route (the bus has just
+//                             left school — all parents on this route want
+//                             to know it's now in motion, not just the
+//                             first-stop parents)
+//   "departed"              → students at the upcoming stop (event.toStopName)
 //                             in the direction matching the route
 //   "completed"             → every student on this route in that direction
 function selectTargetStudents({ allStudents, route, event, direction }) {
   const routeFieldOf = (s) => direction === "evening" ? s.transportEvening : s.transport;
   const stopFieldOf  = (s) => direction === "evening" ? s.pickupStopEvening : s.pickupStop;
 
-  if (event.type === "completed") {
+  if (event.type === "started" || event.type === "completed") {
     return allStudents.filter((s) => routeFieldOf(s) === route.code);
   }
   const target = event.toStopName;

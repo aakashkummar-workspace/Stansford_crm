@@ -412,7 +412,19 @@ export default function ScreenTransport({ E, refresh, role, session }) {
           <div className="page-eyebrow">Operations · Transport</div>
           <div className="page-title">Transport <span className="amber">live boarding</span></div>
           <div style={{ color: "var(--ink-3)", fontSize: 12, marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <span className="live-pill"><span className="pulse-dot" />Live GPS · {routes.length} bus{routes.length === 1 ? "" : "es"}</span>
+            {(() => {
+              const runningCount = routes.filter((r) => r.status === "running").length;
+              if (runningCount > 0) {
+                return (
+                  <span className="live-pill"><span className="pulse-dot" />Live GPS · {runningCount} bus{runningCount === 1 ? "" : "es"} running</span>
+                );
+              }
+              return (
+                <span className="live-pill" style={{ background: "var(--bg-2)" }}>
+                  <span className="dot" />No buses running · {routes.length} route{routes.length === 1 ? "" : "s"} on file
+                </span>
+              );
+            })()}
             <span>Morning run · 07:00 – 08:00</span>
           </div>
         </div>
@@ -461,19 +473,47 @@ export default function ScreenTransport({ E, refresh, role, session }) {
             })),
           }}
         />
-        <KPI
-          label="Buses running" value={routes.length}
-          sub={routes.length ? `${routes.filter((r) => r.status === "delayed").length} delayed` : "no routes yet"}
-          puck="peach" puckIcon="bus"
-          details={{
-            title: `Buses · ${routes.length} on the road`,
-            items: routes.map((r) => ({
-              label: `${r.code} · ${r.name}`, value: r.status || "idle",
-              sub: `${r.bus} · ${r.driver}`,
-            })),
-          }}
-        />
-        <KPI label="Avg on-time %" value={routes.length ? `${Math.round(((routes.length - routes.filter((r) => r.status === "delayed").length) / routes.length) * 100)}%` : "—"} sub={routes.length ? "based on status" : "needs run history"} puck="cream" puckIcon="trending" />
+        {(() => {
+          // Real "running" count = routes whose teacher hit Start and hasn't
+          // hit Finish/Reset yet. Idle and Completed don't count, otherwise
+          // the indicator never resets between morning and afternoon runs
+          // and the parent thinks tracking is still live.
+          const runningRoutes = routes.filter((r) => r.status === "running");
+          const completedToday = routes.filter((r) => r.status === "completed").length;
+          const delayedCount = runningRoutes.filter((r) => r.status === "delayed").length;
+          return (
+            <>
+              <KPI
+                label="Buses running" value={runningRoutes.length}
+                sub={
+                  runningRoutes.length === 0 && completedToday > 0
+                    ? `${completedToday} completed today`
+                    : runningRoutes.length === 0
+                      ? "no live runs"
+                      : delayedCount
+                        ? `${delayedCount} delayed`
+                        : `${runningRoutes.length} on the road`
+                }
+                puck="peach" puckIcon="bus"
+                details={{
+                  title: `Buses · ${runningRoutes.length} running · ${completedToday} completed today`,
+                  items: routes.map((r) => ({
+                    label: `${r.code} · ${r.name}`, value: r.status || "idle",
+                    sub: `${r.bus} · ${r.driver}`,
+                  })),
+                }}
+              />
+              <KPI
+                label="Avg on-time %"
+                value={runningRoutes.length
+                  ? `${Math.round(((runningRoutes.length - delayedCount) / runningRoutes.length) * 100)}%`
+                  : "—"}
+                sub={runningRoutes.length ? "based on running buses" : "needs an active run"}
+                puck="cream" puckIcon="trending"
+              />
+            </>
+          );
+        })()}
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
