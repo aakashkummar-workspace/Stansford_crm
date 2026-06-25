@@ -98,6 +98,7 @@ export default function ScreenDashboard({ E, role, session, refresh }) {
         todayIso={todayIso}
         E={E}
         session={session}
+        refresh={refresh}
       />
     );
   }
@@ -600,7 +601,25 @@ export default function ScreenDashboard({ E, role, session, refresh }) {
 // ---------- Parent dashboard ----------
 // Focused on a single child: today's daily log (attendance / classwork /
 // homework / handwriting), bus status, recent announcements, fees summary.
-function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, session }) {
+function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, session, refresh }) {
+  // Auto-refresh the dashboard data every 20 seconds so live bus tracking
+  // updates without the parent having to manually reload the page. Only
+  // active when the tab is visible (no point polling in the background) —
+  // saves bandwidth on phones. Pauses while the page is hidden, resumes
+  // when it becomes visible again.
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    let timer = null;
+    const tick = () => { if (document.visibilityState === "visible") refresh?.(); };
+    timer = setInterval(tick, 20_000);
+    const onVis = () => { if (document.visibilityState === "visible") refresh?.(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      if (timer) clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [refresh]);
+
   if (!child) {
     return (
       <div className="page">
@@ -630,8 +649,19 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
   // Both legs of the child's commute. Either may be missing (parent drop-off
   // one direction is common). The route objects come pre-filtered by
   // /api/data so this scope only ever sees the child's own buses.
-  const morningRoute = (E.ROUTES || []).find((r) => r.code === child.transport);
-  const eveningRoute = (E.ROUTES || []).find((r) => r.code === child.transportEvening);
+  //
+  // A '—' or empty value means "no bus that direction" — we coerce those
+  // to null so the .find() below doesn't accidentally match a route whose
+  // code happens to be empty.
+  const morningCode = child.transport && child.transport !== "—" ? child.transport : null;
+  const eveningCode = child.transportEvening && child.transportEvening !== "—" ? child.transportEvening : null;
+  const morningRoute = morningCode ? (E.ROUTES || []).find((r) => r.code === morningCode) : null;
+  const eveningRoute = eveningCode ? (E.ROUTES || []).find((r) => r.code === eveningCode) : null;
+  // When morning + evening codes are identical the student rides the same
+  // bus both ways. Render a single card labeled 'both' instead of two
+  // duplicate cards; that prevents the parent from seeing the same route
+  // listed twice in a row.
+  const sameBothLegs = morningCode && eveningCode && morningCode === eveningCode;
   const route = morningRoute || eveningRoute; // legacy alias kept for the KPI strip
   const myFees    = (E.PENDING_FEES || []).filter((f) => f.id === child.id);
   const myPaid    = (E.RECENT_FEES || []).filter((f) => (f.studentId || f.id) === child.id);
@@ -841,10 +871,21 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
                   Your child isn't assigned to a school route. Speak to the office to set this up.
                 </div>
               )}
-              {morningRoute && (
+              {/* If both legs share the same route, render ONE combined card
+                  showing "Morning + Evening" so the parent doesn't see the
+                  same R-code listed twice. Otherwise render each leg
+                  separately. Each card derives its label from the actual
+                  route.direction (not just our leg prop) so a route
+                  tagged 'evening' in the routes table never renders as
+                  'Morning' just because it sits in the student.transport
+                  slot. */}
+              {sameBothLegs && morningRoute && (
+                <ParentBusRouteCard route={morningRoute} child={child} leg="both" />
+              )}
+              {!sameBothLegs && morningRoute && (
                 <ParentBusRouteCard route={morningRoute} child={child} leg="morning" />
               )}
-              {eveningRoute && morningRoute?.code !== eveningRoute?.code && (
+              {!sameBothLegs && eveningRoute && (
                 <ParentBusRouteCard route={eveningRoute} child={child} leg="evening" />
               )}
             </div>
@@ -1368,7 +1409,20 @@ function ParentBusRouteCard({ route, child, leg }) {
   const curIdx = stops.findIndex((s) => s.status === "current");
   const cur = curIdx >= 0 ? stops[curIdx] : null;
   const next = curIdx >= 0 && curIdx + 1 < stops.length ? stops[curIdx + 1] : null;
-  const childStopName = leg === "evening" ? child.pickupStopEvening : child.pickupStop;
+  // The "your stop" callout. For a same-bus-both-ways card (leg='both'),
+  // prefer the evening pickup if it exists, else the morning one — works
+  // because they're the same stop in practice.
+  const childStopName =
+    leg === "evening" ? child.pickupStopEvening :
+    leg === "both"    ? (child.pickupStopEvening || child.pickupStop) :
+                        child.pickupStop;
+  // Heading reflects what the route is ACTUALLY used for by this student.
+  // 'both' wins when the student rides this same route both legs; otherwise
+  // we use the leg the parent passed in.
+  const legLabel =
+    leg === "both"    ? "Morning + Evening" :
+    leg === "evening" ? "Evening" :
+                        "Morning";
   const isRunning = route.status === "running";
   const isCompleted = route.status === "completed";
   const isIdle = !isRunning && !isCompleted;
@@ -1392,7 +1446,7 @@ function ParentBusRouteCard({ route, child, leg }) {
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
           <Icon name="bus" size={14} style={{ color: "var(--accent-2)" }} />
           <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--ink)" }}>
-            {leg === "evening" ? "Evening" : "Morning"} · {route.code}
+            {legLabel} · {route.code}
           </span>
           <span style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{route.name}</span>
         </div>
