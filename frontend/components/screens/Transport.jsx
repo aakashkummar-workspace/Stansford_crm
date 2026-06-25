@@ -57,7 +57,20 @@ export default function ScreenTransport({ E, refresh, role, session }) {
   const [toast, setToast] = useState(null);
   const [busyAction, setBusyAction] = useState(null);
 
-  const routes = E.ROUTES || [];
+  // Routes feed: when the signed-in user is a teacher, scope to routes
+  // where they're the named attendant. Server-side /api/data already does
+  // this scoping for teachers — this is the matching client guard so the
+  // UI stays honest even if a stale cached payload sneaks through, and so
+  // the route picker on the left only shows what the teacher can act on.
+  const routes = useMemo(() => {
+    const all = E.ROUTES || [];
+    if (!isTeacher) return all;
+    if (!meLower) return [];
+    return all.filter((r) => {
+      const att = (r.attendant || "").trim().toLowerCase();
+      return att && att !== "—" && att === meLower;
+    });
+  }, [E.ROUTES, isTeacher, meLower]);
   const route = routes[routeIdx];
 
   // Reset selection when the active route disappears.
