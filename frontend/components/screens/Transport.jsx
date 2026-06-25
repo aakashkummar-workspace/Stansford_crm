@@ -3135,16 +3135,13 @@ function TemplateEditModal({ template, existingCodes, onClose, onSave }) {
   const windowLabel = form.direction === "morning" ? "7 – 10 AM" : "3 – 6 PM";
 
   return (
-    <div className="modal-shell" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 720 }}>
-        <div className="modal-head">
-          <div>
-            <div className="modal-title">{isNew ? "Add template" : `Edit template · ${template.code}`}</div>
-            <div className="modal-sub">Master timetable entry. Stop names and times are the school's permanent schedule.</div>
-          </div>
-          <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
-        </div>
-        <form onSubmit={submit} className="modal-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+    <ModalShell
+      title={isNew ? "Add template" : `Edit template · ${template.code}`}
+      sub="Master timetable entry. Stop names and times are the school's permanent schedule."
+      onClose={onClose}
+      width={720}
+    >
+      <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <div style={{ display: "grid", gridTemplateColumns: "100px 1fr", gap: 10 }}>
             <Field label="Code">
               <input className="input" value={form.code} disabled={!isNew}
@@ -3213,8 +3210,7 @@ function TemplateEditModal({ template, existingCodes, onClose, onSave }) {
             <button type="submit" className="btn accent" disabled={busy}>{busy ? "Saving…" : isNew ? "Create template" : "Save changes"}</button>
           </div>
         </form>
-      </div>
-    </div>
+      </ModalShell>
   );
 }
 
