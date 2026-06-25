@@ -18,6 +18,7 @@ const TYPE_ICONS = {
   leave_request:  "calendar",
   gov_doc_expiry: "warning",
   remark_reward:  "shield",
+  transport:      "bus",
 };
 function iconForType(t) {
   return TYPE_ICONS[t] || "bell";

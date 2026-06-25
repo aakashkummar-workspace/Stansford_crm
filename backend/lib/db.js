@@ -2144,6 +2144,13 @@ export async function advanceRoute(code, action) {
   const curIdx = stops.findIndex((s) => s.status === "current");
   const now = new Date().toISOString();
 
+  // Notification event metadata — derived inline so the caller (the API
+  // route) can fan out external notifications (in-app + WhatsApp) without
+  // re-reading the route. Set to null for prev/reset since those are
+  // admin corrections, not parent-facing changes.
+  let patch = null;
+  let event = null;  // { type: 'started'|'departed'|'completed', fromStopName?, toStopName?, toStop? }
+
   if (action === "start") {
     for (let i = 0; i < stops.length; i++) {
       stops[i] = {
@@ -2153,43 +2160,52 @@ export async function advanceRoute(code, action) {
         doneAt: null,
       };
     }
-    return writeRoute(found, { stops, status: "running", startedAt: now });
-  }
-  if (action === "next") {
+    patch = { stops, status: "running", startedAt: now };
+    event = { type: "started", fromStopName: "School Campus", toStopName: stops[0].name, toStop: stops[0] };
+  } else if (action === "next") {
     if (curIdx === -1) {
-      // Treat next as start when nothing is current yet
       stops[0] = { ...stops[0], status: "current", arrivedAt: now };
-      return writeRoute(found, { stops, status: "running", startedAt: found.row.startedAt || now });
+      patch = { stops, status: "running", startedAt: found.row.startedAt || now };
+      event = { type: "started", fromStopName: "School Campus", toStopName: stops[0].name, toStop: stops[0] };
+    } else {
+      const prevStop = stops[curIdx];
+      stops[curIdx] = { ...stops[curIdx], status: "done", doneAt: now };
+      if (curIdx + 1 < stops.length) {
+        stops[curIdx + 1] = { ...stops[curIdx + 1], status: "current", arrivedAt: now };
+        patch = { stops, status: "running" };
+        event = { type: "departed", fromStopName: prevStop.name, toStopName: stops[curIdx + 1].name, toStop: stops[curIdx + 1] };
+      } else {
+        // Was at the last stop → mark whole run as completed
+        patch = { stops, status: "completed", completedAt: now };
+        event = { type: "completed" };
+      }
     }
-    stops[curIdx] = { ...stops[curIdx], status: "done", doneAt: now };
-    if (curIdx + 1 < stops.length) {
-      stops[curIdx + 1] = { ...stops[curIdx + 1], status: "current", arrivedAt: now };
-      return writeRoute(found, { stops, status: "running" });
-    }
-    // Was at the last stop → mark whole run as completed
-    return writeRoute(found, { stops, status: "completed", completedAt: now });
-  }
-  if (action === "prev") {
-    if (curIdx === -1) return found.row;
+  } else if (action === "prev") {
+    if (curIdx === -1) return { route: found.row, event: null };
     stops[curIdx] = { ...stops[curIdx], status: "pending", arrivedAt: null };
     if (curIdx > 0) {
       stops[curIdx - 1] = { ...stops[curIdx - 1], status: "current", doneAt: null };
     }
-    return writeRoute(found, { stops, status: "running" });
-  }
-  if (action === "finish") {
+    patch = { stops, status: "running" };
+    // No notification — admin correction
+  } else if (action === "finish") {
     for (let i = 0; i < stops.length; i++) {
       stops[i] = { ...stops[i], status: "done", doneAt: stops[i].doneAt || now };
     }
-    return writeRoute(found, { stops, status: "completed", completedAt: now });
-  }
-  if (action === "reset") {
+    patch = { stops, status: "completed", completedAt: now };
+    event = { type: "completed" };
+  } else if (action === "reset") {
     for (let i = 0; i < stops.length; i++) {
       stops[i] = { ...stops[i], status: "pending", boarded: 0, absent: 0, arrivedAt: null, doneAt: null };
     }
-    return writeRoute(found, { stops, status: "idle", startedAt: null, completedAt: null });
+    patch = { stops, status: "idle", startedAt: null, completedAt: null };
+    // No notification — reset is a fresh start, parents will get notified on the next "start"
+  } else {
+    throw new Error(`Unknown action: ${action}`);
   }
-  throw new Error(`Unknown action: ${action}`);
+
+  const route = await writeRoute(found, patch);
+  return { route, event };
 }
 
 // ---------- daily logs ----------

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { advanceRoute, logAudit, readAllData } from "@/lib/db";
+import { dispatchTransportNotifications } from "@/lib/transport-notify";
 import { getSession } from "@/lib/auth";
 
 const ALLOWED = new Set(["start", "next", "prev", "finish", "reset"]);
@@ -41,8 +42,9 @@ export async function POST(req) {
   }
 
   try {
-    const route = await advanceRoute(body.code, body.action);
-    if (!route) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 });
+    const result = await advanceRoute(body.code, body.action);
+    if (!result) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 });
+    const { route, event } = result;
 
     // Build a friendly audit-line message
     const stops = Array.isArray(route.stops) ? route.stops : [];
@@ -57,7 +59,19 @@ export async function POST(req) {
     else if (body.action === "reset")  summary = "Run reset for next trip";
     try { await logAudit(actor, "Bus run · " + body.action, `${route.code} · ${summary}`); } catch {}
 
-    return NextResponse.json({ ok: true, route, summary });
+    // External notification fan-out (in-app + WhatsApp). Best-effort —
+    // a downstream notification failure must never break the bus advance.
+    // prev/reset return event=null so this is a no-op for admin corrections.
+    let notify = null;
+    if (event) {
+      try {
+        notify = await dispatchTransportNotifications(route, event);
+      } catch (e) {
+        console.warn(`[advance] notification fan-out failed (non-fatal): ${e.message}`);
+      }
+    }
+
+    return NextResponse.json({ ok: true, route, summary, notify });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e.message || "Failed" }, { status: 500 });
   }
