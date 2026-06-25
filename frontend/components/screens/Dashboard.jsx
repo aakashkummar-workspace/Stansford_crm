@@ -663,6 +663,24 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
   const eveningCode = child.transportEvening && child.transportEvening !== "—" ? child.transportEvening : null;
   const morningRoute = morningCode ? (E.ROUTES || []).find((r) => r.code === morningCode) : null;
   const eveningRoute = eveningCode ? (E.ROUTES || []).find((r) => r.code === eveningCode) : null;
+  // Temporary debug — surfaces what the parent dashboard sees so we can
+  // pinpoint why the bus card sometimes shows "No transport assigned"
+  // even when the student row has transport assignments.
+  if (typeof window !== "undefined") {
+    console.log("[parent-dashboard] debug", {
+      childId: child.id,
+      childName: child.name,
+      childTransport: child.transport,
+      childTransportEvening: child.transportEvening,
+      childPickupStop: child.pickupStop,
+      childPickupStopEvening: child.pickupStopEvening,
+      morningCode,
+      eveningCode,
+      morningRouteFound: !!morningRoute,
+      eveningRouteFound: !!eveningRoute,
+      routesAvailable: (E.ROUTES || []).map((r) => r.code),
+    });
+  }
   const route = morningRoute || eveningRoute; // legacy alias kept for the KPI strip
   const myFees    = (E.PENDING_FEES || []).filter((f) => f.id === child.id);
   const myPaid    = (E.RECENT_FEES || []).filter((f) => (f.studentId || f.id) === child.id);
