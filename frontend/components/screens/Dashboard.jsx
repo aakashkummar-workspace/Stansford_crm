@@ -650,18 +650,19 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
   // one direction is common). The route objects come pre-filtered by
   // /api/data so this scope only ever sees the child's own buses.
   //
-  // A '—' or empty value means "no bus that direction" — we coerce those
-  // to null so the .find() below doesn't accidentally match a route whose
-  // code happens to be empty.
+  // A '—' or empty value means "no bus that direction" — coerce those to
+  // null so the .find() below doesn't accidentally match a route with an
+  // empty code.
+  //
+  // Note: even when morningCode === eveningCode (same bus both legs), we
+  // still render TWO separate cards — one Morning, one Evening — because
+  // the parent wants to track pickup and drop as independent journeys.
+  // The bus run state is the same on the backend (one route), but the
+  // labels and "Your stop" callouts can differ per leg.
   const morningCode = child.transport && child.transport !== "—" ? child.transport : null;
   const eveningCode = child.transportEvening && child.transportEvening !== "—" ? child.transportEvening : null;
   const morningRoute = morningCode ? (E.ROUTES || []).find((r) => r.code === morningCode) : null;
   const eveningRoute = eveningCode ? (E.ROUTES || []).find((r) => r.code === eveningCode) : null;
-  // When morning + evening codes are identical the student rides the same
-  // bus both ways. Render a single card labeled 'both' instead of two
-  // duplicate cards; that prevents the parent from seeing the same route
-  // listed twice in a row.
-  const sameBothLegs = morningCode && eveningCode && morningCode === eveningCode;
   const route = morningRoute || eveningRoute; // legacy alias kept for the KPI strip
   const myFees    = (E.PENDING_FEES || []).filter((f) => f.id === child.id);
   const myPaid    = (E.RECENT_FEES || []).filter((f) => (f.studentId || f.id) === child.id);
@@ -871,21 +872,15 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
                   Your child isn't assigned to a school route. Speak to the office to set this up.
                 </div>
               )}
-              {/* If both legs share the same route, render ONE combined card
-                  showing "Morning + Evening" so the parent doesn't see the
-                  same R-code listed twice. Otherwise render each leg
-                  separately. Each card derives its label from the actual
-                  route.direction (not just our leg prop) so a route
-                  tagged 'evening' in the routes table never renders as
-                  'Morning' just because it sits in the student.transport
-                  slot. */}
-              {sameBothLegs && morningRoute && (
-                <ParentBusRouteCard route={morningRoute} child={child} leg="both" />
-              )}
-              {!sameBothLegs && morningRoute && (
+              {/* Always render morning and evening as SEPARATE cards even if
+                  they share the same route code — the parent tracks pickup
+                  and drop-off as independent journeys. Each card displays
+                  its own "Your stop" callout based on the matching
+                  pickup_stop / pickup_stop_evening field. */}
+              {morningRoute && (
                 <ParentBusRouteCard route={morningRoute} child={child} leg="morning" />
               )}
-              {!sameBothLegs && eveningRoute && (
+              {eveningRoute && (
                 <ParentBusRouteCard route={eveningRoute} child={child} leg="evening" />
               )}
             </div>
@@ -1409,20 +1404,11 @@ function ParentBusRouteCard({ route, child, leg }) {
   const curIdx = stops.findIndex((s) => s.status === "current");
   const cur = curIdx >= 0 ? stops[curIdx] : null;
   const next = curIdx >= 0 && curIdx + 1 < stops.length ? stops[curIdx + 1] : null;
-  // The "your stop" callout. For a same-bus-both-ways card (leg='both'),
-  // prefer the evening pickup if it exists, else the morning one — works
-  // because they're the same stop in practice.
-  const childStopName =
-    leg === "evening" ? child.pickupStopEvening :
-    leg === "both"    ? (child.pickupStopEvening || child.pickupStop) :
-                        child.pickupStop;
-  // Heading reflects what the route is ACTUALLY used for by this student.
-  // 'both' wins when the student rides this same route both legs; otherwise
-  // we use the leg the parent passed in.
-  const legLabel =
-    leg === "both"    ? "Morning + Evening" :
-    leg === "evening" ? "Evening" :
-                        "Morning";
+  // The "Your stop" callout uses the leg-specific pickup_stop column.
+  const childStopName = leg === "evening" ? child.pickupStopEvening : child.pickupStop;
+  // Heading: always "Morning" or "Evening" — the parent wants the two
+  // legs as separate cards regardless of whether they share a route code.
+  const legLabel = leg === "evening" ? "Evening" : "Morning";
   const isRunning = route.status === "running";
   const isCompleted = route.status === "completed";
   const isIdle = !isRunning && !isCompleted;
