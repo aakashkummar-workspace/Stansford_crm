@@ -256,7 +256,13 @@ export async function readAllData() {
       // Master timetable templates — pulled via the dedicated helper
       // (handles the schema-miss fallback to file store internally).
       // Errors are swallowed so a missing migration can't break /api/data.
-      routeTemplates: await listRouteTemplates().catch(() => []),
+      // Belt-and-braces try/catch on top of the listRouteTemplates internal
+      // schema-miss handling, so even a totally unexpected exception in the
+      // helper can't take down the whole readAllData payload.
+      routeTemplates: await (async () => {
+        try { return await listRouteTemplates(); }
+        catch (e) { console.warn(`[db] listRouteTemplates failed (returning empty): ${e.message}`); return []; }
+      })(),
       audit:         al.map(fromAudit),
       activities:    ac.map(fromActivity),
       // Active staff only — soft-deleted rows stay in the row but are filtered out of the working list.
