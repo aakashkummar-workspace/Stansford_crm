@@ -97,6 +97,16 @@ function scopeForRole(data, session) {
     sanitised.staff = (data.staff || []).filter(
       (s) => s.email && s.email.toLowerCase() === myEmail
     );
+    // Routes — show only routes where this teacher is the attendant.
+    // Otherwise a teacher opening the Transport screen would see every
+    // school route in the dropdown. The bus-progress controls already
+    // server-check attendant on /api/transport/advance, but tightening
+    // the read side here keeps the payload small and the UI honest.
+    const me = (session.name || "").trim().toLowerCase();
+    sanitised.routes = (data.routes || []).filter((r) => {
+      const att = (r.attendant || "").trim().toLowerCase();
+      return att && att !== "—" && att === me;
+    });
     return sanitised;
   }
 

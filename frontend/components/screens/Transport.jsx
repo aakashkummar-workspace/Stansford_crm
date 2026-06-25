@@ -23,6 +23,20 @@ export default function ScreenTransport({ E, refresh, role, session }) {
   const actor  = session?.name || null;
   const canEdit = role === "principal" || role === "admin";
   const isParent = role === "parent";
+  const isTeacher = role === "teacher";
+  // True when the signed-in user is allowed to drive the bus-progress
+  // controls (Start / Next stop / Reset) on this specific route.
+  // Admin/principal can run any route; a teacher can only run the route
+  // they're listed as attendant on. Server enforces the same rule —
+  // /api/transport/advance rejects mismatched callers — so this is a UI
+  // gate, not a security boundary.
+  const meLower = (session?.name || "").trim().toLowerCase();
+  const canRunRoute = (r) => {
+    if (canEdit) return true;
+    if (!isTeacher || !r) return false;
+    const att = (r.attendant || "").trim().toLowerCase();
+    return att && att !== "—" && att === meLower;
+  };
   const [view, setView] = useState("live"); // 'live' | 'history'
   const [routeIdx, setRouteIdx] = useState(0);
   const [showAdd, setShowAdd] = useState(false);
@@ -489,7 +503,13 @@ export default function ScreenTransport({ E, refresh, role, session }) {
           </div>
           <div>
             {routes.length === 0 && (
-              <div className="empty">No transport routes yet. {canEdit ? "Click “Add route” to set one up." : "The principal hasn’t added any routes."}</div>
+              <div className="empty">{
+                isTeacher
+                  ? "You haven't been assigned to any bus route yet. Ask the principal to assign you as the attendant on a route — it will then appear here with the Start / Next stop controls."
+                  : canEdit
+                    ? "No transport routes yet. Click “Add route” to set one up."
+                    : "The principal hasn’t added any routes."
+              }</div>
             )}
             {routes.map((r, i) => {
               const boarded = (r.stops || []).reduce((a, s) => a + (s.boarded || 0), 0);
@@ -609,8 +629,11 @@ export default function ScreenTransport({ E, refresh, role, session }) {
               </div>
             </div>
 
-            {/* Run controls — drive the bus through its route */}
-            {canEdit && (() => {
+            {/* Run controls — drive the bus through its route. Visible to
+                admins on any route, and to the teacher named as attendant
+                on this specific route (so they can mark each stop done
+                from their own login). */}
+            {canRunRoute(route) && (() => {
               const stops = route.stops || [];
               const status = route.status || "idle";
               const curIdx = stops.findIndex((s) => s.status === "current");

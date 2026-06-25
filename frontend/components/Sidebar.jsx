@@ -128,6 +128,7 @@ export const NAV_BY_ROLE = {
     { id: "syllabus",      label: "Syllabus",       icon: "academic" },
     { id: "exams",      label: "Exams & Marks", icon: "reports" },
     { id: "students",   label: "My students",  icon: "students" },
+    { id: "transport",  label: "Transport",    icon: "bus" },
     { id: "communication", label: "Broadcasts", icon: "megaphone" },
     { id: "messages",      label: "Parent messages", icon: "send" },
     { id: "meetings",   label: "Meetings",     icon: "clock" },
