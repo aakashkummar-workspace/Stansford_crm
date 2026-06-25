@@ -3,19 +3,9 @@
 import { useState } from "react";
 import Icon from "@/components/Icon";
 
-// Each role gets a unique accent so the picker reads as a glanceable
-// palette instead of a wall of identical cards. Tones are tuned to feel
-// professional (no neon) and to stay legible against the soft backgrounds.
-const ROLE_CARDS = [
-  { k: "admin",             label: "Admin",             icon: "shield",  blurb: "Full school access",         tint: "#c11d1d", soft: "#fde7e7" },
-  { k: "principal",         label: "Principal",         icon: "school",  blurb: "Fees, staff, ops",           tint: "#1f3f8b", soft: "#e6ebf5" },
-  { k: "academic_director", label: "Academic Dir.",     icon: "academic",blurb: "Curriculum & logs",          tint: "#6d28d9", soft: "#ede7fe" },
-  { k: "teacher",           label: "Teacher",           icon: "book",    blurb: "Classroom & daily logs",     tint: "#1f7a3a", soft: "#e3f2e7" },
-  { k: "school_accountant", label: "School Accountant", icon: "fees",    blurb: "School finance & fees",      tint: "#0d6e9a", soft: "#e0f1f8" },
-  { k: "trust_accountant",  label: "Trust Accountant",  icon: "money",   blurb: "Donations & trust ledger",   tint: "#a04020", soft: "#fbeae0" },
-  { k: "parent",            label: "Parent",            icon: "heart",   blurb: "My child's updates",         tint: "#e8530e", soft: "#fde6d6" },
-];
-
+// Brand-side highlights shown on the left pane. The right pane is now a
+// single email + password form — role is resolved server-side from the
+// user record, so no tile picker is needed.
 const HIGHLIGHTS = [
   { icon: "fees",        title: "Fees & receipts",     blurb: "UPI collection, online payments, auto receipts on WhatsApp." },
   { icon: "academic",    title: "Daily classroom log", blurb: "Attendance, classwork, homework — visible to every parent." },
@@ -23,26 +13,12 @@ const HIGHLIGHTS = [
   { icon: "shield",      title: "Role-based access",   blurb: "Each role sees exactly what it needs — nothing more." },
 ];
 
-export default function LoginScreen({ demo, next }) {
-  const [picked, setPicked] = useState(null);
+export default function LoginScreen({ next }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-
-  function pick(roleKey) {
-    setPicked(roleKey);
-    setErr("");
-    const account = demo.find((a) => a.role === roleKey);
-    if (account) {
-      setEmail(account.email);
-      setPassword(account.password);
-    } else {
-      setEmail("");
-      setPassword("");
-    }
-  }
 
   async function submit(e) {
     e.preventDefault();
@@ -63,7 +39,6 @@ export default function LoginScreen({ demo, next }) {
     }
   }
 
-  const pickedRole = ROLE_CARDS.find((r) => r.k === picked);
   const year = new Date().getFullYear();
 
   return (
@@ -104,7 +79,7 @@ export default function LoginScreen({ demo, next }) {
       {/* Right: sign-in panel ------------------------------------------------- */}
       <main className="login-pane-right">
         <div className="lp-form-wrap">
-          {/* Compact brand for mobile */}
+          {/* Compact brand for mobile (left pane is hidden) */}
           <div className="lp-brand-mobile">
             <img src="/logo.png" alt="" />
             <div>
@@ -112,91 +87,62 @@ export default function LoginScreen({ demo, next }) {
             </div>
           </div>
 
-          <header className="lp-form-head">
-            <h2>{picked
-              ? (picked === "__other__" ? "Sign in with email" : `Welcome back, ${pickedRole?.label || ""}`)
-              : "Welcome back"}</h2>
-            <p>{picked
-              ? (picked === "__other__"
-                  ? "Enter the email and password your admin issued you. Works for every role, including custom ones."
-                  : "Enter your credentials to continue. Use the back link to switch roles.")
-              : "Sign in to your account. Pick the role that matches your access."}</p>
-          </header>
-
-          {!picked && (
-            <>
-              <div className="lp-roles">
-                {ROLE_CARDS.map((r) => (
-                  <button
-                    key={r.k}
-                    type="button"
-                    className="lp-role"
-                    onClick={() => pick(r.k)}
-                    style={{ "--tint": r.tint, "--tint-soft": r.soft }}
-                  >
-                    <span className="lp-role-ic"><Icon name={r.icon} size={15} /></span>
-                    <span className="lp-role-lbl">{r.label}</span>
-                    <span className="lp-role-blurb">{r.blurb}</span>
-                  </button>
-                ))}
+          <div className="lp-card">
+            <header className="lp-form-head">
+              <div className="lp-greet-ic" aria-hidden>
+                <Icon name="user" size={18} />
               </div>
+              <h2>Welcome back</h2>
+              <p>Sign in with your school email and password.</p>
+            </header>
 
-              {/* Direct email + password sign-in. Used by anyone the admin
-                  has provisioned with a custom role (Office, Mid-office,
-                  Sports head…) — they don't have a role tile of their own
-                  but their email + password still let them in. */}
-              <div className="lp-other">
-                <div className="lp-divider"><span>or</span></div>
-                <button
-                  type="button"
-                  className="lp-other-btn"
-                  onClick={() => { setPicked("__other__"); setEmail(""); setPassword(""); }}
-                  title="Sign in with your school-issued email + password (works for custom roles too)"
-                >
-                  <Icon name="user" size={13} />
-                  Sign in with email &amp; password
-                </button>
-                <div className="lp-other-hint">
-                  Use this if your admin gave you a login that doesn't match the tiles above.
-                </div>
-              </div>
-            </>
-          )}
-
-          {picked && (
-            <form onSubmit={submit} className="lp-form">
-              <button
-                type="button" className="lp-back"
-                onClick={() => { setPicked(null); setErr(""); }}
-              >
-                <Icon name="arrowLeft" size={12} /> Back to roles
-              </button>
-
+            <form onSubmit={submit} className="lp-form" autoComplete="on">
               <label className="lp-field">
                 <span>Email address</span>
-                <input
-                  type="email" autoComplete="username" required autoFocus
-                  value={email} onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@school.com"
-                />
+                <div className="lp-input-wrap">
+                  <span className="lp-input-ic" aria-hidden><Icon name="mail" size={15} /></span>
+                  <input
+                    type="email"
+                    inputMode="email"
+                    autoComplete="username"
+                    required
+                    autoFocus
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="you@school.com"
+                  />
+                </div>
               </label>
 
               <label className="lp-field">
-                <span className="lp-field-row">
-                  <span>Password</span>
-                  <button type="button" className="lp-show" onClick={() => setShowPassword((v) => !v)}>
+                <span>Password</span>
+                <div className="lp-input-wrap">
+                  <span className="lp-input-ic" aria-hidden><Icon name="shield" size={15} /></span>
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    autoComplete="current-password"
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                  />
+                  <button
+                    type="button"
+                    className="lp-eye"
+                    onClick={() => setShowPassword((v) => !v)}
+                    aria-label={showPassword ? "Hide password" : "Show password"}
+                  >
                     {showPassword ? "Hide" : "Show"}
                   </button>
-                </span>
-                <input
-                  type={showPassword ? "text" : "password"}
-                  autoComplete="current-password" required
-                  value={password} onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                />
+                </div>
               </label>
 
-              {err && <div className="lp-err"><Icon name="warning" size={12} /> <span>{err}</span></div>}
+              {err && (
+                <div className="lp-err" role="alert">
+                  <Icon name="warning" size={12} />
+                  <span>{err}</span>
+                </div>
+              )}
 
               <button className="lp-submit" type="submit" disabled={busy}>
                 {busy
@@ -208,7 +154,7 @@ export default function LoginScreen({ demo, next }) {
                 Trouble signing in? Contact the school office.
               </div>
             </form>
-          )}
+          </div>
 
           <div className="lp-credit-line">
             Developed by{" "}
@@ -230,7 +176,7 @@ export default function LoginScreen({ demo, next }) {
           color: var(--ink);
         }
 
-        /* ===== Left: brand panel =============================================== */
+        /* ===== Left: brand panel (unchanged) ================================== */
         .login-pane-left {
           position: relative;
           overflow: hidden;
@@ -325,20 +271,27 @@ export default function LoginScreen({ demo, next }) {
         }
         .lp-credit:hover { text-decoration: underline; }
 
-        /* ===== Right: form panel =============================================== */
+        /* ===== Right: sign-in panel =========================================== */
         .login-pane-right {
           display: flex; align-items: center; justify-content: center;
           padding: 48px 32px;
           background: var(--bg);
+          position: relative;
         }
         .lp-form-wrap {
           width: 100%; max-width: 420px;
-          display: flex; flex-direction: column; gap: 22px;
+          display: flex; flex-direction: column; gap: 18px;
+          animation: lp-rise 0.45s cubic-bezier(0.2, 0.7, 0.2, 1) both;
         }
+        @keyframes lp-rise {
+          from { opacity: 0; transform: translateY(10px); }
+          to   { opacity: 1; transform: none; }
+        }
+
         .lp-brand-mobile {
           display: none;
           align-items: center; gap: 12px;
-          padding-bottom: 8px;
+          padding-bottom: 4px;
         }
         .lp-brand-mobile :global(img) {
           width: 44px; height: 44px; border-radius: 10px;
@@ -347,112 +300,107 @@ export default function LoginScreen({ demo, next }) {
         }
         .lp-brand-mobile .lp-school { color: var(--brand-blue); font-size: 17px; }
         .lp-brand-mobile .lp-school :global(span) { color: var(--accent); font-style: italic; }
-        .lp-brand-mobile .lp-trust { color: var(--ink-3); }
 
-        .lp-form-head h2 {
-          font-family: var(--font-serif, Georgia, serif);
-          font-size: 26px; font-weight: 600; margin: 0 0 6px;
-          letter-spacing: -0.02em;
-        }
-        .lp-form-head p {
-          font-size: 13px; color: var(--ink-3); margin: 0; line-height: 1.55;
-        }
-
-        /* role tiles — compact 2-column grid, per-role accent.
-           Last row has a single tile (Parent) which gets centered via the
-           odd:last-child rule below. */
-        .lp-roles {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 8px;
-        }
-        .lp-role {
-          position: relative;
-          display: flex; flex-direction: column; align-items: center;
-          gap: 5px;
-          padding: 12px 10px 10px;
+        /* Card wrapper — a softer container around the form so the right pane
+           doesn't read as a flat slab. Subtle lift, no heavy border. */
+        .lp-card {
           background: var(--card, #fff);
           border: 1px solid var(--rule, #e5dfd1);
-          border-radius: 10px; cursor: pointer; text-align: center;
-          color: var(--ink-2);
-          transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease;
-          overflow: hidden;
-        }
-        /* Coloured accent strip on top — same hue as the icon. Subtle but
-           gives each card its own identity even before hover. */
-        .lp-role::before {
-          content: ""; position: absolute; left: 0; right: 0; top: 0;
-          height: 3px; background: var(--tint, var(--accent));
-          opacity: 0.85;
-        }
-        .lp-role:hover {
-          border-color: var(--tint, var(--accent));
-          box-shadow: 0 8px 20px -14px var(--tint, rgba(232,83,14,0.5));
-          transform: translateY(-2px);
-        }
-        .lp-role-ic {
-          width: 32px; height: 32px; border-radius: 8px;
-          background: var(--tint-soft, var(--accent-soft));
-          color: var(--tint, var(--accent));
-          display: grid; place-items: center; flex-shrink: 0;
-          margin-top: 2px;
-        }
-        .lp-role-lbl {
-          font-size: 12.5px; font-weight: 600; color: var(--ink);
-          line-height: 1.2;
-        }
-        .lp-role-blurb {
-          font-size: 10.5px; color: var(--ink-4); line-height: 1.35;
-          white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-          max-width: 100%;
-        }
-        /* When the last child is alone in its row (odd count, e.g. Parent in
-           the 5-role list) we span both columns but center the tile and
-           constrain its width to match the others, so it visually sits
-           between the two tiles in the row above. */
-        .lp-role:last-child:nth-child(odd) {
-          grid-column: 1 / -1;
-          justify-self: center;
-          width: calc(50% - 4px); /* 50% minus half of the 8px column gap */
+          border-radius: 16px;
+          padding: 30px 28px 26px;
+          box-shadow:
+            0 1px 0 rgba(255,255,255,0.6) inset,
+            0 18px 40px -28px rgba(15, 30, 70, 0.18),
+            0 6px 14px -10px rgba(15, 30, 70, 0.08);
         }
 
-        /* sign-in form */
-        .lp-form { display: flex; flex-direction: column; gap: 16px; }
-        .lp-back {
-          align-self: flex-start;
-          display: inline-flex; align-items: center; gap: 5px;
-          background: transparent; border: 0;
-          color: var(--ink-3); font-size: 12px;
-          cursor: pointer; padding: 4px 0;
+        .lp-form-head {
+          display: flex; flex-direction: column; align-items: center;
+          text-align: center; gap: 6px;
+          margin-bottom: 22px;
         }
-        .lp-back:hover { color: var(--accent); }
+        .lp-greet-ic {
+          width: 44px; height: 44px; border-radius: 12px;
+          background: linear-gradient(160deg, var(--accent-soft, #fde6d6), rgba(232,83,14,0.08));
+          color: var(--accent, #e8530e);
+          display: grid; place-items: center;
+          margin-bottom: 6px;
+          border: 1px solid rgba(232,83,14,0.18);
+        }
+        .lp-form-head h2 {
+          font-family: var(--font-serif, Georgia, serif);
+          font-size: 24px; font-weight: 600; margin: 0;
+          letter-spacing: -0.02em; color: var(--ink);
+        }
+        .lp-form-head p {
+          font-size: 13px; color: var(--ink-3); margin: 0; line-height: 1.5;
+        }
+
+        /* form ----------------------------------------------------------------- */
+        .lp-form { display: flex; flex-direction: column; gap: 14px; }
 
         .lp-field { display: flex; flex-direction: column; gap: 6px; }
         .lp-field > span {
           font-size: 11.5px; color: var(--ink-2);
-          font-weight: 500; letter-spacing: 0.02em;
+          font-weight: 600; letter-spacing: 0.02em;
         }
-        .lp-field-row {
-          display: flex; justify-content: space-between; align-items: center;
+
+        /* Input wrapper — owns the border + focus ring so we can sit icon and
+           "Show" button cleanly inside. Keeps the field looking like one piece. */
+        .lp-input-wrap {
+          position: relative;
+          display: flex; align-items: center;
+          background: var(--card, #fff);
+          border: 1px solid var(--rule, #e5dfd1);
+          border-radius: 10px;
+          transition: border-color .12s ease, box-shadow .12s ease;
         }
-        .lp-show {
-          background: transparent; border: 0; cursor: pointer;
-          font-size: 11px; color: var(--accent); font-weight: 500;
-          padding: 0; letter-spacing: 0.02em;
-        }
-        .lp-show:hover { text-decoration: underline; }
-        .lp-field input {
-          padding: 11px 13px; font-size: 13.5px;
-          background: var(--card, #fff); color: var(--ink);
-          border: 1px solid var(--rule, #e5dfd1); border-radius: 9px;
-          outline: none; transition: all .12s ease;
-          font-family: inherit;
-        }
-        .lp-field input:hover { border-color: var(--ink-4); }
-        .lp-field input:focus {
+        .lp-input-wrap:hover { border-color: var(--ink-4); }
+        .lp-input-wrap:focus-within {
           border-color: var(--accent);
           box-shadow: 0 0 0 3px rgba(232,83,14,0.15);
         }
+        .lp-input-ic {
+          display: grid; place-items: center;
+          width: 38px; height: 100%;
+          color: var(--ink-4);
+          flex-shrink: 0;
+        }
+        .lp-input-wrap:focus-within .lp-input-ic { color: var(--accent); }
+        .lp-input-wrap input {
+          flex: 1; min-width: 0;
+          padding: 11px 12px 11px 0;
+          font-size: 13.5px; color: var(--ink);
+          background: transparent;
+          border: 0; outline: none;
+          font-family: inherit;
+        }
+        .lp-input-wrap input::placeholder { color: var(--ink-4); }
+
+        /* Kill Chrome / Edge / Safari autofill background — the browser
+           paints a yellow/grey tint on inputs it thinks are autofilled
+           (saved password or text matching a saved entry). The 5000s
+           transition is the standard trick: it delays the browser's
+           background swap long enough that the user never sees it. */
+        .lp-input-wrap input:-webkit-autofill,
+        .lp-input-wrap input:-webkit-autofill:hover,
+        .lp-input-wrap input:-webkit-autofill:focus,
+        .lp-input-wrap input:-webkit-autofill:active {
+          -webkit-text-fill-color: var(--ink);
+          -webkit-box-shadow: 0 0 0 1000px var(--card, #fff) inset;
+          box-shadow: 0 0 0 1000px var(--card, #fff) inset;
+          transition: background-color 5000s ease-in-out 0s, color 5000s ease-in-out 0s;
+          caret-color: var(--ink);
+        }
+
+        .lp-eye {
+          background: transparent; border: 0; cursor: pointer;
+          font-size: 11.5px; font-weight: 600;
+          color: var(--accent); letter-spacing: 0.02em;
+          padding: 6px 12px; margin-right: 2px;
+          border-radius: 6px;
+        }
+        .lp-eye:hover { background: var(--accent-soft, rgba(232,83,14,0.08)); }
 
         .lp-err {
           background: var(--err-soft, #fbe1d8); color: var(--err, #b13c1c);
@@ -460,19 +408,26 @@ export default function LoginScreen({ demo, next }) {
           font-size: 12px; line-height: 1.45;
           display: flex; align-items: center; gap: 8px;
           border: 1px solid rgba(177,60,28,0.18);
+          animation: lp-shake 0.3s ease;
+        }
+        @keyframes lp-shake {
+          0%, 100% { transform: translateX(0); }
+          25%      { transform: translateX(-3px); }
+          75%      { transform: translateX(3px); }
         }
 
         .lp-submit {
-          margin-top: 4px;
+          margin-top: 6px;
           padding: 12px 16px; font-size: 13.5px; font-weight: 600;
           background: var(--accent); color: var(--accent-ink, #fff);
-          border: 0; border-radius: 9px; cursor: pointer;
-          transition: all .15s ease;
+          border: 0; border-radius: 10px; cursor: pointer;
+          transition: background .15s ease, transform .15s ease, box-shadow .15s ease;
           display: inline-flex; align-items: center; justify-content: center; gap: 8px;
           box-shadow: 0 6px 18px -10px rgba(232,83,14,0.5);
         }
-        .lp-submit:hover { background: var(--accent-2); transform: translateY(-1px); }
-        .lp-submit:disabled { opacity: 0.7; cursor: wait; transform: none; }
+        .lp-submit:hover { background: var(--accent-2); transform: translateY(-1px); box-shadow: 0 10px 22px -12px rgba(232,83,14,0.55); }
+        .lp-submit:active { transform: translateY(0); }
+        .lp-submit:disabled { opacity: 0.7; cursor: wait; transform: none; box-shadow: none; }
 
         .lp-spinner {
           width: 12px; height: 12px; border-radius: 50%;
@@ -487,45 +442,9 @@ export default function LoginScreen({ demo, next }) {
           margin-top: 2px;
         }
 
-        /* Direct sign-in (used by custom-role users who don't have a tile). */
-        .lp-other {
-          margin-top: 4px;
-          display: flex; flex-direction: column; gap: 8px;
-        }
-        .lp-divider {
-          display: flex; align-items: center; gap: 10px;
-          color: var(--ink-4);
-          font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em;
-          margin: 4px 0 2px;
-        }
-        .lp-divider::before, .lp-divider::after {
-          content: ""; flex: 1; height: 1px; background: var(--rule, #e5dfd1);
-        }
-        .lp-other-btn {
-          display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-          padding: 10px 14px;
-          background: var(--card, #fff);
-          border: 1.5px solid var(--brand-blue, #1f3f8b);
-          color: var(--brand-blue, #1f3f8b);
-          border-radius: 9px; cursor: pointer;
-          font-size: 12.5px; font-weight: 600;
-          transition: all .15s ease;
-        }
-        .lp-other-btn:hover {
-          background: var(--brand-blue, #1f3f8b); color: #fff;
-          transform: translateY(-1px);
-          box-shadow: 0 6px 18px -10px rgba(31,63,139,0.5);
-        }
-        .lp-other-hint {
-          font-size: 10.5px; color: var(--ink-4); text-align: center;
-          line-height: 1.5;
-        }
-
-        /* "Developed by Sirah Digital" — sits under the role tiles in the
-           main login dashboard (always visible, not just on mobile). */
+        /* "Developed by Sirah Digital" — sits below the card. */
         .lp-credit-line {
-          margin-top: 6px; padding-top: 14px;
-          border-top: 1px dashed var(--rule, #e5dfd1);
+          margin-top: 4px;
           font-size: 11.5px; color: var(--ink-3);
           text-align: center; letter-spacing: 0.02em;
         }
@@ -544,6 +463,11 @@ export default function LoginScreen({ demo, next }) {
           .login-pane-right { padding: 28px 20px; min-height: 100vh; }
           .lp-brand-mobile { display: flex; }
           .lp-foot-mobile { display: block; }
+          .lp-card { padding: 26px 22px 22px; border-radius: 14px; }
+        }
+        @media (max-width: 420px) {
+          .lp-card { padding: 22px 18px 20px; }
+          .lp-form-head h2 { font-size: 22px; }
         }
       `}</style>
     </div>
