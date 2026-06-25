@@ -239,7 +239,41 @@ export const fromRoute = (r) => r && {
   // advanceRoute timestamp upgrade — UI treats null as "unknown".
   startedAt:   r.started_at   ?? r.startedAt   ?? null,
   completedAt: r.completed_at ?? r.completedAt ?? null,
+  // Link back to the master timetable template this route was spawned
+  // from (null = legacy free-hand route, no template).
+  templateId:  r.template_id  ?? r.templateId  ?? null,
 };
+
+// Master timetable templates — see backend/migrations/route_templates.sql
+// Stops here are the static spec only ({name, t}) — run-state fields
+// (status, arrivedAt, boarded, absent) only live on the spawned routes row.
+export const fromRouteTemplate = (r) => r && {
+  code: r.code,
+  name: r.name,
+  bus: r.bus || "—",
+  direction: r.direction === "evening" ? "evening" : "morning",
+  tripNo: r.trip_no ?? r.tripNo ?? 1,
+  active: r.active !== false,
+  stops: Array.isArray(r.stops) ? r.stops.map((s) => ({
+    name: s.name || "",
+    t: s.t || "—",
+  })) : [],
+  createdAt: r.created_at ?? r.createdAt ?? null,
+  updatedAt: r.updated_at ?? r.updatedAt ?? null,
+};
+
+export const toRouteTemplate = (r) => ({
+  code: String(r.code || "").trim().toUpperCase(),
+  name: String(r.name || r.code || "").trim(),
+  bus: r.bus || "—",
+  direction: r.direction === "evening" ? "evening" : "morning",
+  trip_no: Number(r.tripNo || r.trip_no || 1) || 1,
+  active: r.active === false ? false : true,
+  stops: Array.isArray(r.stops) ? r.stops.map((s, i) => ({
+    name: String(s.name || "").trim() || `Stop ${i + 1}`,
+    t: s.t || "—",
+  })) : [],
+});
 
 // ---------- new mappers ----------
 

@@ -46,7 +46,7 @@ function scopeForRole(data, session) {
       inventory: [], inventoryCategories: [],
       library: [], libraryLoans: [],
       maintenanceLogs: [],
-      routes: [], transportAttendance: [],
+      routes: [], routeTemplates: [], transportAttendance: [],
       complaints: [], enquiries: [],
       broadcasts: [], templates: [], recipientLists: [], movements: [],
       meetings: [], volunteers: [],
@@ -124,6 +124,7 @@ function scopeForRole(data, session) {
         dailyLogs: [],
         transportAttendance: [],
         routes: [],
+        routeTemplates: [],
         complaints: [],
         scaleEntries: [], scaleSessions: [],
       };
@@ -145,6 +146,9 @@ function scopeForRole(data, session) {
        routes:       (data.routes       || []).filter((r) =>
          r.code === myChild.transport || r.code === myChild.transportEvening
        ),
+       // Parents never see the master timetable — it's an admin-side
+       // schedule manager. Live route data is enough for their view.
+       routeTemplates: [],
       complaints:   (data.complaints   || []).filter((c) => c.studentId === myChild.id || c.student === myChild.name),
       scaleEntries: (data.scaleEntries || []).filter((e) => e.studentId === myChild.id),
       scaleSessions: [], // sessions are teacher-side

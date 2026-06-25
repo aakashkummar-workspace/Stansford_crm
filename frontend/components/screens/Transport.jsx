@@ -524,6 +524,11 @@ export default function ScreenTransport({ E, refresh, role, session }) {
           <button className={view === "history" ? "active" : ""} onClick={() => setView("history")}>
             Attendance history
           </button>
+          {canEdit && (
+            <button className={view === "templates" ? "active" : ""} onClick={() => setView("templates")}>
+              Master timetable
+            </button>
+          )}
         </div>
         {view === "live" && !isParent && (
           <div className="segmented" title="Which trip you're marking right now">
@@ -545,6 +550,16 @@ export default function ScreenTransport({ E, refresh, role, session }) {
           isParent={isParent}
           school={school}
           actor={actor}
+        />
+      )}
+
+      {view === "templates" && canEdit && (
+        <MasterTimetablePanel
+          templates={E.ROUTE_TEMPLATES || []}
+          routes={routes}
+          role={role}
+          showToast={showToast}
+          refresh={refresh}
         />
       )}
 
@@ -2844,3 +2859,362 @@ function TransportHistoryView({ rows, students, routes, isParent, school, actor 
     </div>
   );
 }
+
+// ===================================================================
+// Master timetable — admin/principal manages the school's static
+// schedule (R1-R6 from the master PDF). Edits propagate to the live
+// `routes` row with the same code. "Apply" replaces the live route
+// with a fresh row spawned from the template (preserves attendant).
+// ===================================================================
+function MasterTimetablePanel({ templates, routes, role, showToast, refresh }) {
+  const [editing, setEditing] = useState(null);   // template object or "new"
+  const [busyCode, setBusyCode] = useState(null);
+  const [seeding, setSeeding] = useState(false);
+
+  // Sort: morning first, then evening; within each, by tripNo then code.
+  const sorted = useMemo(() => {
+    return [...(templates || [])].sort((a, b) => {
+      if (a.direction !== b.direction) return a.direction === "morning" ? -1 : 1;
+      if ((a.tripNo || 1) !== (b.tripNo || 1)) return (a.tripNo || 1) - (b.tripNo || 1);
+      return String(a.code).localeCompare(String(b.code));
+    });
+  }, [templates]);
+
+  // Index live routes by code so we can show "Active" / "Idle" / "Running"
+  // alongside each template card.
+  const liveByCode = useMemo(() => {
+    const m = new Map();
+    for (const r of routes || []) m.set(r.code, r);
+    return m;
+  }, [routes]);
+
+  async function handleApply(t) {
+    const live = liveByCode.get(t.code);
+    const runningWarning = live && live.status === "running";
+    const ok = window.confirm(
+      runningWarning
+        ? `${t.code} is currently RUNNING — applying the template will reset today's run state. Continue?`
+        : `Apply template ${t.code} to today's live route? Any existing route with this code will be replaced (teacher/driver assignments are preserved).`
+    );
+    if (!ok) return;
+    setBusyCode(t.code);
+    try {
+      const r = await fetch("/api/transport/templates/apply", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code: t.code }),
+      });
+      const json = await r.json().catch(() => ({}));
+      if (!r.ok || !json.ok) throw new Error(json.error || "Failed to apply");
+      showToast(`Applied ${t.code} · attendant: ${json.preserved?.attendant || "—"}`, "ok");
+      await refresh?.();
+    } catch (e) { showToast(e.message, "err"); }
+    finally { setBusyCode(null); }
+  }
+
+  async function handleArchive(t) {
+    if (!window.confirm(`Archive template ${t.code}? It will be hidden from the list but can be restored later. The live route is not affected.`)) return;
+    setBusyCode(t.code);
+    try {
+      const r = await fetch("/api/transport/templates", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code: t.code }),
+      });
+      const json = await r.json().catch(() => ({}));
+      if (!r.ok || !json.ok) throw new Error(json.error || "Failed");
+      showToast(`Archived ${t.code}`, "ok");
+      await refresh?.();
+    } catch (e) { showToast(e.message, "err"); }
+    finally { setBusyCode(null); }
+  }
+
+  async function handleSeed() {
+    if (!window.confirm("Seed R1-R6 from the school's master PDF? This skips templates that already exist.")) return;
+    setSeeding(true);
+    try {
+      const r = await fetch("/api/transport/templates/seed", { method: "POST" });
+      const json = await r.json().catch(() => ({}));
+      if (!r.ok || !json.ok) throw new Error(json.error || "Failed");
+      showToast(`Seeded · created ${json.created.length}, skipped ${json.skipped.length}`, "ok");
+      await refresh?.();
+    } catch (e) { showToast(e.message, "err"); }
+    finally { setSeeding(false); }
+  }
+
+  async function handleSave(payload) {
+    const isNew = !payload._origCode;
+    const url = "/api/transport/templates";
+    const method = isNew ? "POST" : "PATCH";
+    const body = isNew ? payload : { ...payload, code: payload._origCode };
+    delete body._origCode;
+    const r = await fetch(url, {
+      method,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const json = await r.json().catch(() => ({}));
+    if (!r.ok || !json.ok) throw new Error(json.error || "Failed");
+    setEditing(null);
+    showToast(`${isNew ? "Created" : "Updated"} template ${json.template.code}`, "ok");
+    await refresh?.();
+  }
+
+  const empty = sorted.length === 0;
+
+  return (
+    <>
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div className="card-head">
+          <div>
+            <div className="card-title">Master timetable</div>
+            <div className="card-sub">
+              The school's permanent route schedule. Edits here flow down to today's live route. Click <b>Apply to today</b> to spawn / reset the live route from this template.
+            </div>
+          </div>
+          <div className="card-actions" style={{ display: "flex", gap: 6 }}>
+            {role === "admin" && empty && (
+              <button className="btn sm accent" onClick={handleSeed} disabled={seeding}>
+                <Icon name="download" size={12} />{seeding ? "Seeding…" : "Seed from school PDF (R1–R6)"}
+              </button>
+            )}
+            <button className="btn sm accent" onClick={() => setEditing("new")}>
+              <Icon name="plus" size={12} />Add template
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {empty && (
+        <div className="card empty" style={{ padding: 24, textAlign: "center" }}>
+          No templates yet. {role === "admin" ? "Click \"Seed from school PDF\" to import R1-R6 from the master timetable, or \"Add template\" to create one by hand." : "Ask the admin to seed the master timetable."}
+        </div>
+      )}
+
+      {!empty && (
+        <div className="grid g-3" style={{ gap: 12 }}>
+          {sorted.map((t) => {
+            const live = liveByCode.get(t.code);
+            const dirChip = t.direction === "morning"
+              ? { label: "MORNING", bg: "var(--accent-soft, #fde6d6)", fg: "var(--accent-2, #b13c1c)" }
+              : { label: "EVENING", bg: "var(--info-soft, #e6ebf5)",   fg: "var(--info, #1f3f8b)" };
+            const liveChip = !live
+              ? { label: "no live route", bg: "var(--bg-2)", fg: "var(--ink-4)" }
+              : live.status === "running"
+                ? { label: "RUNNING NOW",  bg: "var(--ok-soft, #e7f3e8)",  fg: "var(--ok, #1f7a3a)" }
+                : live.status === "completed"
+                  ? { label: "completed today", bg: "var(--bg-2)",       fg: "var(--ink-3)" }
+                  : { label: "idle",            bg: "var(--bg-2)",       fg: "var(--ink-3)" };
+            return (
+              <div key={t.code} className="card" style={{ padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontFamily: "var(--font-serif)", fontSize: 22, fontWeight: 600, color: "var(--ink)" }}>{t.code}</span>
+                    <span style={{
+                      padding: "2px 8px", borderRadius: 999, fontSize: 10, fontWeight: 600,
+                      background: dirChip.bg, color: dirChip.fg, letterSpacing: 0.5,
+                    }}>{dirChip.label}{t.tripNo > 1 ? ` · TRIP ${t.tripNo}` : ""}</span>
+                  </div>
+                  <span style={{
+                    padding: "2px 8px", borderRadius: 999, fontSize: 10, fontWeight: 500,
+                    background: liveChip.bg, color: liveChip.fg,
+                  }}>{liveChip.label}</span>
+                </div>
+                <div style={{ fontSize: 12.5, fontWeight: 500, color: "var(--ink-2)" }}>{t.name}</div>
+                <div style={{ fontSize: 11.5, color: "var(--ink-3)" }}>
+                  Bus: <b style={{ color: "var(--ink-2)" }}>{t.bus || "—"}</b>
+                  {" · "}{t.stops.length} stop{t.stops.length === 1 ? "" : "s"}
+                  {t.stops[0]?.t && t.stops[t.stops.length - 1]?.t ? (
+                    <> · {formatTplTime(t.stops[0].t, t.direction)} → {formatTplTime(t.stops[t.stops.length - 1].t, t.direction)}</>
+                  ) : null}
+                </div>
+                <ol style={{ margin: 0, paddingLeft: 18, fontSize: 11, color: "var(--ink-3)", lineHeight: 1.6, maxHeight: 120, overflowY: "auto" }}>
+                  {t.stops.map((s, i) => (
+                    <li key={`${s.name}-${i}`}>
+                      <span style={{ fontWeight: 500, color: "var(--ink-2)" }}>{s.name}</span>
+                      {s.t ? <span style={{ color: "var(--ink-4)" }}> · {formatTplTime(s.t, t.direction)}</span> : null}
+                    </li>
+                  ))}
+                </ol>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: "auto" }}>
+                  <button className="btn sm" onClick={() => setEditing(t)} disabled={busyCode === t.code}>
+                    <Icon name="pencil" size={11} />Edit
+                  </button>
+                  <button className="btn sm accent" onClick={() => handleApply(t)} disabled={busyCode === t.code}>
+                    <Icon name="check" size={11} />{busyCode === t.code ? "Applying…" : "Apply to today"}
+                  </button>
+                  <button className="btn sm" onClick={() => handleArchive(t)} disabled={busyCode === t.code} title="Soft delete">
+                    <Icon name="x" size={11} />Archive
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {editing && (
+        <TemplateEditModal
+          template={editing === "new" ? null : editing}
+          existingCodes={sorted.map((t) => t.code)}
+          onClose={() => setEditing(null)}
+          onSave={handleSave}
+        />
+      )}
+    </>
+  );
+}
+
+// "03:30" with a direction-derived suffix. Morning routes are already
+// 24-hour-readable as AM; evening routes are written PM-implied per
+// school convention (03:30 means 15:30). Internal storage stays "03:30".
+function formatTplTime(t, direction) {
+  if (!t || t === "—") return "—";
+  return direction === "evening" ? `${t} PM` : `${t} AM`;
+}
+
+function TemplateEditModal({ template, existingCodes, onClose, onSave }) {
+  const isNew = !template;
+  const [form, setForm] = useState({
+    code: template?.code || "",
+    name: template?.name || "",
+    bus:  template?.bus || "SML",
+    direction: template?.direction || "morning",
+    tripNo: template?.tripNo || 1,
+  });
+  const [stops, setStops] = useState(
+    template?.stops?.length
+      ? template.stops.map((s) => ({ name: s.name, t: s.t }))
+      : [{ name: "SCHOOL", t: "" }]
+  );
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const setStop = (i, k, v) => setStops((arr) => arr.map((s, j) => j === i ? { ...s, [k]: v } : s));
+  const addStop = () => setStops((arr) => [...arr, { name: "", t: "" }]);
+  const rmStop  = (i) => setStops((arr) => arr.length > 1 ? arr.filter((_, j) => j !== i) : arr);
+  const moveStop = (i, dir) => setStops((arr) => {
+    const j = i + dir;
+    if (j < 0 || j >= arr.length) return arr;
+    const next = arr.slice();
+    [next[i], next[j]] = [next[j], next[i]];
+    return next;
+  });
+
+  async function submit(e) {
+    e.preventDefault();
+    if (busy) return;
+    setBusy(true); setErr("");
+    try {
+      const code = String(form.code || "").trim().toUpperCase();
+      if (!code) throw new Error("Template code is required");
+      if (isNew && existingCodes.includes(code)) {
+        throw new Error(`Template ${code} already exists`);
+      }
+      const cleanStops = stops
+        .filter((s) => s.name.trim())
+        .map((s) => ({ name: s.name.trim().toUpperCase(), t: s.t || "—" }));
+      if (cleanStops.length === 0) throw new Error("Add at least one stop with a name");
+      const payload = {
+        code,
+        name: form.name.trim() || code,
+        bus: form.bus.trim() || "—",
+        direction: form.direction,
+        tripNo: Number(form.tripNo) || 1,
+        stops: cleanStops,
+      };
+      if (!isNew) payload._origCode = template.code;
+      await onSave(payload);
+    } catch (ex) {
+      setErr(ex.message || String(ex));
+      setBusy(false);
+    }
+  }
+
+  const windowLabel = form.direction === "morning" ? "7 – 10 AM" : "3 – 6 PM";
+
+  return (
+    <div className="modal-shell" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 720 }}>
+        <div className="modal-head">
+          <div>
+            <div className="modal-title">{isNew ? "Add template" : `Edit template · ${template.code}`}</div>
+            <div className="modal-sub">Master timetable entry. Stop names and times are the school's permanent schedule.</div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
+        <form onSubmit={submit} className="modal-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "100px 1fr", gap: 10 }}>
+            <Field label="Code">
+              <input className="input" value={form.code} disabled={!isNew}
+                onChange={(e) => set("code", e.target.value.toUpperCase())}
+                placeholder="R1" />
+            </Field>
+            <Field label="Name">
+              <input className="input" value={form.name}
+                onChange={(e) => set("name", e.target.value)}
+                placeholder="MORNING - SML" />
+            </Field>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+            <Field label="Direction" hint={`Window: ${windowLabel}`}>
+              <select className="input" value={form.direction} onChange={(e) => set("direction", e.target.value)}>
+                <option value="morning">Morning</option>
+                <option value="evening">Evening</option>
+              </select>
+            </Field>
+            <Field label="Bus">
+              <input className="input" value={form.bus}
+                onChange={(e) => set("bus", e.target.value)}
+                placeholder="SML / FORCE" />
+            </Field>
+            <Field label="Trip no." hint="2 if this bus does a second trip in the same direction">
+              <input className="input" type="number" min={1} max={5}
+                value={form.tripNo} onChange={(e) => set("tripNo", e.target.value)} />
+            </Field>
+          </div>
+
+          <div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+              <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--ink-2)", textTransform: "uppercase", letterSpacing: 0.5 }}>Stops</span>
+              <button type="button" className="btn sm" onClick={addStop}><Icon name="plus" size={11} />Add stop</button>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 320, overflowY: "auto", padding: 2 }}>
+              {stops.map((s, i) => (
+                <div key={i} style={{ display: "grid", gridTemplateColumns: "26px 1fr 90px 96px", gap: 6, alignItems: "center" }}>
+                  <span style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "var(--font-mono)", textAlign: "right" }}>{i + 1}.</span>
+                  <input className="input" value={s.name}
+                    onChange={(e) => setStop(i, "name", e.target.value)}
+                    placeholder="Stop name" />
+                  <input className="input" value={s.t}
+                    onChange={(e) => setStop(i, "t", e.target.value)}
+                    placeholder="07:30" />
+                  <div style={{ display: "flex", gap: 4 }}>
+                    <button type="button" className="icon-btn" title="Move up" onClick={() => moveStop(i, -1)} disabled={i === 0}>
+                      <Icon name="arrowUp" size={11} />
+                    </button>
+                    <button type="button" className="icon-btn" title="Move down" onClick={() => moveStop(i, 1)} disabled={i === stops.length - 1}>
+                      <Icon name="arrowDown" size={11} />
+                    </button>
+                    <button type="button" className="icon-btn" title="Remove" onClick={() => rmStop(i)} disabled={stops.length === 1}>
+                      <Icon name="x" size={11} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {err && <div className="lp-err" style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "8px 12px", borderRadius: 8, fontSize: 12 }}>{err}</div>}
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <button type="button" className="btn" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn accent" disabled={busy}>{busy ? "Saving…" : isNew ? "Create template" : "Save changes"}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+

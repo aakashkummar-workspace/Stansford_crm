@@ -13,7 +13,7 @@ import {
   toStudent, toPendingFee, toStaff, toInventory, toBroadcast, toTemplate,
   toDonor, toCampaign,
   fromStudent, fromPendingFee, fromRecentFee, fromDailyLog,
-  fromAudit, fromActivity, fromComplaint, fromEnquiry, fromRoute, fromStaff,
+  fromAudit, fromActivity, fromComplaint, fromEnquiry, fromRoute, fromRouteTemplate, toRouteTemplate, fromStaff,
   fromInventory, fromMovement,
   fromBroadcast, fromTemplate, fromRecipientList,
   fromDonor, fromCampaign,
@@ -61,6 +61,7 @@ const EMPTY_DB = {
   enquiries: [],
   dailyLogs: [],
   routes: [],
+  routeTemplates: [],
   audit: [],
   activities: [],
   staff: [],
@@ -252,6 +253,10 @@ export async function readAllData() {
       // Union with file-store routes in case writes fell back to file
       // (PostgREST cache lag or table missing).
       routes:        [...(rt || []).map(fromRoute), ...fileRoutesSafe()],
+      // Master timetable templates — pulled via the dedicated helper
+      // (handles the schema-miss fallback to file store internally).
+      // Errors are swallowed so a missing migration can't break /api/data.
+      routeTemplates: await listRouteTemplates().catch(() => []),
       audit:         al.map(fromAudit),
       activities:    ac.map(fromActivity),
       // Active staff only — soft-deleted rows stay in the row but are filtered out of the working list.
@@ -1986,6 +1991,15 @@ export async function addRoute(row) {
   if (!route.stops.length) throw new Error("Add at least one stop");
 
   if (supabaseEnabled) {
+    // Belt-and-braces uniqueness check. The DB has a UNIQUE constraint
+    // on routes.code (added by the route_templates migration), but a
+    // friendly app-level error beats a raw "duplicate key" Postgres
+    // message and keeps the code path safe pre-migration. This is the
+    // fix for the prod duplicate-R5 incident.
+    const existing = await supabase.from("routes").select("code").eq("code", code).maybeSingle();
+    if (existing.data) {
+      throw new Error(`Route ${code} already exists — pick a different code or edit the existing one`);
+    }
     let ins = await supabase.from("routes").insert(route).select().single();
     // PostgREST schema cache may not yet know about `direction`. Retry
     // without it; the column defaults to 'both' on the server side once
@@ -2207,6 +2221,343 @@ export async function advanceRoute(code, action) {
   const route = await writeRoute(found, patch);
   return { route, event };
 }
+
+// =====================================================================
+// Route templates — master timetable (R1-R6 from the school's PDF)
+// =====================================================================
+// Templates are the static, school-managed source of truth: code, name,
+// bus, direction, ordered stops with their scheduled times. They never
+// carry per-trip run state — that lives on the spawned `routes` row.
+//
+// CRUD flow:
+//   listRouteTemplates / getRouteTemplate    — read
+//   addRouteTemplate / updateRouteTemplate   — write (admin/principal only)
+//   removeRouteTemplate                      — soft delete (active=false)
+//   applyRouteTemplate                       — replace live route from template
+//   seedRouteTemplates                       — one-shot bulk import (R1-R6)
+//
+// Edit propagation: updateRouteTemplate() also pushes stop changes down
+// onto the live `routes` row if one exists with the same code. Existing
+// stop status (current/done/arrivedAt) is preserved on stops whose names
+// still match the new spec; new stops slot in with status='pending'.
+
+const ROUTE_TEMPLATES_TABLE = "route_templates";
+
+function fileRouteTemplatesSafe() {
+  try {
+    const db = fileRead();
+    return Array.isArray(db.routeTemplates) ? db.routeTemplates : [];
+  } catch { return []; }
+}
+
+export async function listRouteTemplates({ includeArchived = false } = {}) {
+  if (supabaseEnabled) {
+    let q = supabase.from(ROUTE_TEMPLATES_TABLE).select("*");
+    if (!includeArchived) q = q.eq("active", true);
+    const sel = await q.order("direction", { ascending: true }).order("trip_no", { ascending: true });
+    if (sel.error) {
+      if (isSchemaMissError(sel.error)) return fileRouteTemplatesSafe();
+      throw new Error(`Could not list templates: ${sel.error.message}`);
+    }
+    return (sel.data || []).map(fromRouteTemplate);
+  }
+  const all = fileRouteTemplatesSafe();
+  return includeArchived ? all : all.filter((t) => t.active !== false);
+}
+
+export async function getRouteTemplate(code) {
+  if (!code) return null;
+  const want = String(code).trim().toUpperCase();
+  if (supabaseEnabled) {
+    const sel = await supabase.from(ROUTE_TEMPLATES_TABLE).select("*").eq("code", want).maybeSingle();
+    if (sel.error && !isSchemaMissError(sel.error)) throw new Error(sel.error.message);
+    if (sel.data) return fromRouteTemplate(sel.data);
+  }
+  return fileRouteTemplatesSafe().find((t) => t.code === want) || null;
+}
+
+export async function addRouteTemplate(row) {
+  const persistRow = toRouteTemplate(row);
+  if (!persistRow.code) throw new Error("Template code is required");
+  if (!persistRow.stops.length) throw new Error("Add at least one stop");
+  if (supabaseEnabled) {
+    const dup = await supabase.from(ROUTE_TEMPLATES_TABLE).select("code").eq("code", persistRow.code).maybeSingle();
+    if (dup.data) throw new Error(`Template ${persistRow.code} already exists — edit it instead`);
+    const ins = await supabase.from(ROUTE_TEMPLATES_TABLE).insert(persistRow).select().single();
+    if (ins.error) {
+      if (isSchemaMissError(ins.error)) {
+        return fileAddRouteTemplate(persistRow);
+      }
+      throw new Error(`Could not save template: ${ins.error.message}`);
+    }
+    return fromRouteTemplate(ins.data);
+  }
+  return fileAddRouteTemplate(persistRow);
+}
+
+function fileAddRouteTemplate(row) {
+  const db = fileRead();
+  if (!Array.isArray(db.routeTemplates)) db.routeTemplates = [];
+  if (db.routeTemplates.find((t) => t.code === row.code)) {
+    throw new Error(`Template ${row.code} already exists`);
+  }
+  const stamped = {
+    ...row,
+    direction: row.direction,
+    tripNo: row.trip_no || 1,
+    active: row.active !== false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  delete stamped.trip_no;
+  db.routeTemplates.unshift(stamped);
+  fileWrite(db);
+  return stamped;
+}
+
+export async function updateRouteTemplate(code, patch) {
+  const want = String(code || "").trim().toUpperCase();
+  if (!want) throw new Error("Template code required");
+  const persistPatch = {};
+  if (patch.name      !== undefined) persistPatch.name      = String(patch.name).trim();
+  if (patch.bus       !== undefined) persistPatch.bus       = patch.bus || "—";
+  if (patch.direction !== undefined) persistPatch.direction = patch.direction === "evening" ? "evening" : "morning";
+  if (patch.tripNo    !== undefined) persistPatch.trip_no   = Number(patch.tripNo) || 1;
+  if (patch.active    !== undefined) persistPatch.active    = !!patch.active;
+  if (patch.stops     !== undefined) {
+    if (!Array.isArray(patch.stops) || !patch.stops.length) throw new Error("Stops list cannot be empty");
+    persistPatch.stops = patch.stops.map((s, i) => ({
+      name: String(s.name || "").trim() || `Stop ${i + 1}`,
+      t: s.t || "—",
+    }));
+  }
+  persistPatch.updated_at = new Date().toISOString();
+
+  let updated = null;
+  if (supabaseEnabled) {
+    const upd = await supabase.from(ROUTE_TEMPLATES_TABLE).update(persistPatch).eq("code", want).select().single();
+    if (upd.error && !isSchemaMissError(upd.error)) throw new Error(upd.error.message);
+    if (upd.data) updated = fromRouteTemplate(upd.data);
+  }
+  if (!updated) {
+    // File fallback (and the path Supabase falls through to on schema miss).
+    const db = fileRead();
+    if (!Array.isArray(db.routeTemplates)) db.routeTemplates = [];
+    const idx = db.routeTemplates.findIndex((t) => t.code === want);
+    if (idx === -1) return null;
+    const merged = { ...db.routeTemplates[idx] };
+    if (persistPatch.name      !== undefined) merged.name      = persistPatch.name;
+    if (persistPatch.bus       !== undefined) merged.bus       = persistPatch.bus;
+    if (persistPatch.direction !== undefined) merged.direction = persistPatch.direction;
+    if (persistPatch.trip_no   !== undefined) merged.tripNo    = persistPatch.trip_no;
+    if (persistPatch.active    !== undefined) merged.active    = persistPatch.active;
+    if (persistPatch.stops     !== undefined) merged.stops     = persistPatch.stops;
+    merged.updatedAt = persistPatch.updated_at;
+    db.routeTemplates[idx] = merged;
+    fileWrite(db);
+    updated = merged;
+  }
+
+  // Edit propagation — if a live route with this code exists, update its
+  // stops to match the template. Existing run state (status / arrivedAt /
+  // doneAt) on stops whose names still match is preserved; new stops slot
+  // in with status='pending'; deleted stops are dropped (with a snap-to-
+  // next if the deleted stop was 'current').
+  if (persistPatch.stops || persistPatch.name || persistPatch.bus || persistPatch.direction) {
+    try {
+      const found = await readRoute(want);
+      if (found) {
+        const livePatch = {};
+        if (persistPatch.name)      livePatch.name      = persistPatch.name;
+        if (persistPatch.bus)       livePatch.bus       = persistPatch.bus;
+        if (persistPatch.direction) livePatch.direction = persistPatch.direction;
+        if (persistPatch.stops) {
+          const oldStops = Array.isArray(found.row.stops) ? found.row.stops : [];
+          const byName = new Map(oldStops.map((s) => [s.name, s]));
+          const newStops = persistPatch.stops.map((spec, i) => {
+            const existing = byName.get(spec.name);
+            return existing
+              ? { ...existing, name: spec.name, t: spec.t }
+              : { name: spec.name, t: spec.t, cap: 0, boarded: 0, absent: 0, status: "pending", arrivedAt: null, doneAt: null };
+          });
+          // If the previously-'current' stop got dropped, snap to the
+          // first not-done stop in the new list to keep the run sane.
+          const hasCurrent = newStops.some((s) => s.status === "current");
+          if (!hasCurrent && found.row.status === "running") {
+            const snapIdx = newStops.findIndex((s) => s.status !== "done");
+            if (snapIdx >= 0) newStops[snapIdx] = { ...newStops[snapIdx], status: "current", arrivedAt: new Date().toISOString() };
+          }
+          livePatch.stops = newStops;
+        }
+        await writeRoute(found, livePatch);
+      }
+    } catch (e) {
+      console.warn(`[templates] live-route propagation failed (non-fatal): ${e.message}`);
+    }
+  }
+
+  return updated;
+}
+
+export async function removeRouteTemplate(code) {
+  // Soft delete — flip active=false. Keeps history + lets the route stay
+  // pointed at it via template_id.
+  return updateRouteTemplate(code, { active: false });
+}
+
+export async function applyRouteTemplate(code, { actor } = {}) {
+  const want = String(code || "").trim().toUpperCase();
+  if (!want) throw new Error("Template code required");
+  const tpl = await getRouteTemplate(want);
+  if (!tpl) throw new Error(`Template ${want} not found`);
+  if (tpl.active === false) throw new Error(`Template ${want} is archived`);
+
+  // Preserve attendant/driver/bus from the existing live route if it
+  // exists, so re-applying doesn't unassign the teacher. Template bus
+  // value only wins if the live row has none.
+  let preserved = { attendant: "—", driver: "—", bus: tpl.bus || "—" };
+  const existing = await readRoute(want);
+  if (existing) {
+    preserved = {
+      attendant: existing.row.attendant && existing.row.attendant !== "—" ? existing.row.attendant : "—",
+      driver:    existing.row.driver    && existing.row.driver    !== "—" ? existing.row.driver    : "—",
+      bus:       existing.row.bus       && existing.row.bus       !== "—" ? existing.row.bus       : (tpl.bus || "—"),
+    };
+    await removeRoute(want);
+  }
+
+  // Build the fresh route row from the template + preserved fields.
+  const newRoute = await addRoute({
+    code: tpl.code,
+    name: tpl.name,
+    direction: tpl.direction,
+    driver: preserved.driver,
+    attendant: preserved.attendant,
+    bus: preserved.bus,
+    status: "idle",
+    eta: tpl.direction === "morning" ? "07:00 – 10:00" : "15:00 – 18:00",
+    stops: tpl.stops.map((s, i) => ({
+      name: s.name,
+      t: s.t,
+      cap: 0,
+    })),
+  });
+
+  // Stamp the template_id link on the new route. Best-effort: don't fail
+  // the apply if the column doesn't exist yet (pre-migration).
+  if (supabaseEnabled) {
+    try {
+      await supabase.from("routes").update({ template_id: tpl.code }).eq("code", tpl.code);
+    } catch {}
+  }
+  return { route: newRoute, template: tpl, preserved };
+}
+
+// One-shot seed — populates R1-R6 from the school's master PDF.
+// Idempotent: skips templates that already exist. Returns the created
+// + skipped lists so the UI can show what happened.
+export async function seedRouteTemplates() {
+  const created = [];
+  const skipped = [];
+  for (const spec of MASTER_TIMETABLE_R1_R6) {
+    try {
+      const existing = await getRouteTemplate(spec.code);
+      if (existing) { skipped.push(spec.code); continue; }
+      const row = await addRouteTemplate(spec);
+      created.push(row.code);
+    } catch (e) {
+      console.warn(`[templates] seed ${spec.code} failed: ${e.message}`);
+    }
+  }
+  return { created, skipped, total: MASTER_TIMETABLE_R1_R6.length };
+}
+
+// Transcribed from the school's master timetable PDF (June 2026).
+// Times kept as-written (PM implied for evening per school convention,
+// 7-10am for morning runs / 3-6pm for evening runs).
+const MASTER_TIMETABLE_R1_R6 = [
+  {
+    code: "R1", name: "MORNING - SML", bus: "SML", direction: "morning", tripNo: 1,
+    stops: [
+      { name: "SCHOOL",              t: "07:15" },
+      { name: "KIRUMAPAKKAM",        t: "07:30" },
+      { name: "TN PALAYAM",          t: "07:45" },
+      { name: "KAATUPALAYAM",        t: "07:50" },
+      { name: "VILLUPALAYAM",        t: "07:55" },
+      { name: "SIVANARPURAM",        t: "08:00" },
+      { name: "SRINIVASA APARTMENT", t: "08:05" },
+      { name: "ANNA NAGAR",          t: "08:10" },
+      { name: "ACHARIYA SCHOOL",     t: "08:15" },
+      { name: "THANAMPALAYAM",       t: "08:20" },
+      { name: "STAGE",               t: "08:25" },
+      { name: "PUDHUKUPPAM OUTER",   t: "08:30" },
+      { name: "PUDHUKUPPAM QUARTERS",t: "08:35" },
+      { name: "SCHOOL",              t: "08:40" },
+    ],
+  },
+  {
+    code: "R2", name: "MORNING - FORCE - TRIP 1", bus: "FORCE", direction: "morning", tripNo: 1,
+    stops: [
+      { name: "SCHOOL",            t: "07:00" },
+      { name: "NONANKUPPAM",       t: "07:20" },
+      { name: "NANAMEDU",          t: "07:40" },
+      { name: "NALLAVADU QUARTERS",t: "07:45" },
+      { name: "SCHOOL",            t: "08:20" },
+    ],
+  },
+  {
+    code: "R3", name: "MORNING - FORCE - TRIP 2", bus: "FORCE", direction: "morning", tripNo: 2,
+    stops: [
+      { name: "SCHOOL",     t: "08:20" },
+      { name: "WATER TANK", t: "08:30" },
+      { name: "SCHOOL",     t: "08:45" },
+    ],
+  },
+  {
+    code: "R4", name: "EVENING - SML", bus: "SML", direction: "evening", tripNo: 1,
+    stops: [
+      { name: "SCHOOL",              t: "03:30" },
+      { name: "VIP NAGAR",           t: "03:35" },
+      { name: "NALLAVADU QUARTERS",  t: "03:40" },
+      { name: "STAGE",               t: "04:00" },
+      { name: "SIVANARPURAM",        t: "04:10" },
+      { name: "KAATUPALAYAM",        t: "04:15" },
+      { name: "KORUKKAMEDU",         t: "04:20" },
+      { name: "SRINIVASA APARTMENT", t: "04:25" },
+      { name: "KIRUMAPAKKAM",        t: "04:40" },
+      { name: "SCHOOL",              t: "04:50" },
+    ],
+  },
+  {
+    code: "R5", name: "EVENING - FORCE TRIP 1", bus: "FORCE", direction: "evening", tripNo: 1,
+    stops: [
+      { name: "SCHOOL",          t: "03:30" },
+      { name: "PUDHUKUPPAM",     t: "03:45" },
+      { name: "WATER TANK",      t: "03:55" },
+      { name: "THANAMPALAYAM",   t: "04:00" },
+      { name: "ACHARIYA SCHOOL", t: "04:05" },
+      { name: "SCHOOL",          t: "04:10" },
+    ],
+  },
+  {
+    code: "R6", name: "EVENING - FORCE TRIP 2", bus: "FORCE", direction: "evening", tripNo: 2,
+    stops: [
+      { name: "SCHOOL",         t: "04:10" },
+      { name: "SADA NAGAR",     t: "04:12" },
+      { name: "NANAMEDU",       t: "04:15" },
+      { name: "NONANKUPPAM",    t: "04:25" },
+      { name: "EDAIYAR PALAYAM",t: "04:30" },
+      { name: "ROHINI NAGAR",   t: "04:35" },
+      { name: "NATIONAL SCHOOL",t: "04:40" },
+      { name: "THAVALAKUPPAM",  t: "04:42" },
+      { name: "MANDABAM",       t: "04:45" },
+      { name: "KAATUPALAYAM",   t: "04:55" },
+      { name: "TN PALAYAM",     t: "05:05" },
+      { name: "THEDUVARNATHAM", t: "05:10" },
+      { name: "SCHOOL",         t: "05:20" },
+    ],
+  },
+];
 
 // ---------- daily logs ----------
 export async function upsertDailyLog(row) {
