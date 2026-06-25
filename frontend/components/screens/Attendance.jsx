@@ -46,6 +46,10 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
   const [marks, setMarks] = useState({}); // { studentId: { state: 'present'|'absent', reason: '' } }
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState(null);
+  // Same-day grace: when true the lock is bypassed so the teacher can fix
+  // a mistake they just made. Reset whenever the class or date changes so
+  // it never bleeds across selections.
+  const [editMode, setEditMode] = useState(false);
 
   // Pin "today" by the system clock and re-check every 60s so a screen left
   // open across midnight will auto-roll forward (which also releases the
@@ -86,7 +90,8 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
         : { state: null, reason: "", saved: false };
     }
     setMarks(next);
-  }, [todayIso, roster.length, E.DAILY_LOGS]); // eslint-disable-line react-hooks/exhaustive-deps
+    setEditMode(false);
+  }, [todayIso, roster.length, E.DAILY_LOGS, cls, sec]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setMark = (id, state) => setMarks((m) => ({ ...m, [id]: { ...(m[id] || {}), state, saved: false } }));
   const setReason = (id, reason) => setMarks((m) => ({ ...m, [id]: { ...(m[id] || {}), reason, saved: false } }));
@@ -99,8 +104,10 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
   const dirty = roster.some((s) => marks[s.id] && marks[s.id].saved === false && marks[s.id].state);
   // Once attendance is recorded for everyone in the class today, the screen
   // is locked until the system date changes — staff take attendance for each
-  // class once per day. Re-opens automatically next day via the tick() above.
-  const lockedForToday = roster.length > 0 && roster.every((s) => marks[s.id]?.saved === true && marks[s.id]?.state);
+  // class once per day. The teacher can tap "Edit attendance" to flip
+  // editMode on and bypass the lock for in-session corrections.
+  const fullyMarked = roster.length > 0 && roster.every((s) => marks[s.id]?.saved === true && marks[s.id]?.state);
+  const lockedForToday = fullyMarked && !editMode;
 
   const showToast = (msg, tone) => {
     setToast({ msg, tone });
@@ -132,20 +139,26 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
       const r = await fetch("/api/academic/attendance", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ date: todayIso, cls: `${cls}-${sec}`, marks: list }),
+        body: JSON.stringify({
+          date: todayIso,
+          cls: `${cls}-${sec}`,
+          marks: list,
+          mode: editMode ? "edit" : "initial",
+        }),
       });
       const json = await r.json().catch(() => ({}));
       if (!r.ok || !json.ok) throw new Error(json.error || "Failed");
       showToast(
-        `Saved · ${json.present || 0} present · ${json.late || 0} late · ${json.absent || 0} absent · ${json.leave || 0} on leave`,
+        `${editMode ? "Updated" : "Saved"} · ${json.present || 0} present · ${json.late || 0} late · ${json.absent || 0} absent · ${json.leave || 0} on leave`,
         "ok",
       );
-      // Mark all saved=true locally
+      // Mark all saved=true locally, then drop back into locked view.
       setMarks((m) => {
         const next = { ...m };
         for (const k of Object.keys(next)) if (next[k].state) next[k].saved = true;
         return next;
       });
+      setEditMode(false);
       await refresh?.();
     } catch (e) { showToast(e.message, "err"); }
     finally { setBusy(false); }
@@ -155,7 +168,7 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
   // Principal/admin can also take staff (teacher) attendance from this screen.
   // Mode flips between the existing student roster view and a new teacher panel.
   const canMarkTeachers = role === "principal" || role === "admin";
-  const [mode, setMode] = useState("students"); // "students" | "teachers"
+  const [mode, setMode] = useState("students"); // "students" | "teachers" | "correct"
 
   return (
     <div className="page">
@@ -189,11 +202,12 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
 
       {/* Mode tab strip — only relevant for principal / admin */}
       {canMarkTeachers && (
-        <div className="card" style={{ marginBottom: 14, padding: "10px 14px", display: "flex", gap: 6, alignItems: "center" }}>
+        <div className="card" style={{ marginBottom: 14, padding: "10px 14px", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
           <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 500, marginRight: 4 }}>Take attendance for:</span>
           {[
             { k: "students", label: "Students" },
             { k: "teachers", label: "Teachers" },
+            { k: "correct",  label: "Correct past" },
           ].map((t) => (
             <button
               key={t.k}
@@ -214,6 +228,15 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
           E={E}
           today={todayIso}
           todayLabel={todayLabel}
+          refresh={refresh}
+          showToast={(m, t) => setToast({ msg: m, tone: t })}
+        />
+      ) : null}
+
+      {mode === "correct" && canMarkTeachers ? (
+        <CorrectPastAttendancePanel
+          E={E}
+          todayIso={todayIso}
           refresh={refresh}
           showToast={(m, t) => setToast({ msg: m, tone: t })}
         />
@@ -288,12 +311,50 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
           border: "1px solid var(--ok, #1f7a3a)", borderRadius: 10,
           padding: "10px 14px", marginBottom: 14,
           display: "flex", alignItems: "center", gap: 10, fontSize: 12.5,
+          flexWrap: "wrap",
         }}>
           <Icon name="check" size={14} />
-          <span>
+          <span style={{ flex: 1, minWidth: 200 }}>
             Attendance for <b>{formatClassLabel(`${cls}-${sec}`)}</b> is already recorded for today
-            ({todayLabel || todayIso}). The roster is locked — it will reopen automatically tomorrow.
+            ({todayLabel || todayIso}).
           </span>
+          <button
+            type="button"
+            onClick={() => setEditMode(true)}
+            style={{
+              padding: "6px 12px", borderRadius: 7,
+              background: "#fff", color: "var(--ok, #1f7a3a)",
+              border: "1px solid var(--ok, #1f7a3a)",
+              fontSize: 12, fontWeight: 500, cursor: "pointer",
+              display: "inline-flex", alignItems: "center", gap: 6,
+            }}
+            title="Re-open today's attendance to fix a mistake"
+          >
+            <Icon name="pencil" size={12} />Edit attendance
+          </button>
+        </div>
+      )}
+      {editMode && fullyMarked && (
+        <div style={{
+          background: "var(--warn-soft, #fff4e0)", color: "var(--warn, #a05a00)",
+          border: "1px solid var(--warn, #d98c00)", borderRadius: 10,
+          padding: "10px 14px", marginBottom: 14,
+          display: "flex", alignItems: "center", gap: 10, fontSize: 12.5,
+        }}>
+          <Icon name="pencil" size={14} />
+          <span style={{ flex: 1 }}>
+            Editing today's attendance for <b>{formatClassLabel(`${cls}-${sec}`)}</b>. Change any marks below and tap <b>Save attendance</b>. Every change is logged in the audit trail.
+          </span>
+          <button
+            type="button"
+            onClick={() => setEditMode(false)}
+            style={{
+              padding: "4px 10px", borderRadius: 6,
+              background: "transparent", color: "var(--warn, #a05a00)",
+              border: "1px solid var(--warn, #d98c00)",
+              fontSize: 11.5, cursor: "pointer",
+            }}
+          >Cancel</button>
         </div>
       )}
 
@@ -718,7 +779,7 @@ function ParentAttendanceView({ E }) {
                     ? { label: "Absent",  color: "var(--bad)" }
                     : row.state === "weekend"
                       ? { label: "Holiday", color: "var(--ink-4)" }
-                      : { label: "—",       color: "var(--ink-4)" };
+                      : { label: "—", color: "var(--ink-4)" };
                 return (
                   <tr key={row.iso} style={{ borderTop: "1px solid var(--rule-2)" }}>
                     <td style={{ padding: "10px 12px", fontSize: 12.5, color: "var(--ink-2)" }}>
@@ -740,6 +801,302 @@ function ParentAttendanceView({ E }) {
                     </td>
                     <td style={{ padding: "10px 12px", fontSize: 12, color: "var(--ink-3)" }}>
                       {row.reason || (row.state === "absent" ? "No reason recorded" : "—")}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Principal/Admin "Correct past attendance" — pick any past or current date
+// + class, edit any student's mark with a mandatory reason, save. Audit log
+// captures who corrected what, when, and why. The same /api/academic/attendance
+// endpoint handles the write (UPSERT in markAttendanceBulk preserves classwork
+// and homework on the row), and `mode: "correction"` tells the audit-log
+// writer to use the "Corrected class attendance" verb.
+function CorrectPastAttendancePanel({ E, todayIso, refresh, showToast }) {
+  const ATT_STATES = new Set(["present", "late", "absent", "leave"]);
+
+  const firstClassKey = (() => {
+    const c = (E.CLASSES || [])[0];
+    if (!c) return { cls: 1, sec: "A" };
+    const sec = Array.isArray(c.sections) && c.sections.length ? c.sections[0] : "A";
+    return { cls: c.n, sec };
+  })();
+
+  const [date, setDate] = useState(todayIso || "");
+  const [cls, setCls] = useState(firstClassKey.cls);
+  const [sec, setSec] = useState(firstClassKey.sec);
+  const [marks, setMarks] = useState({});
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const roster = useMemo(() => {
+    const want = `${cls}-${sec}`;
+    return (E.ADDED_STUDENTS || [])
+      .filter((s) => s.cls === want)
+      .map((s, i) => ({ id: s.id, name: s.name, cls: s.cls, parent: s.parent, roll: i + 1 }));
+  }, [E.ADDED_STUDENTS, cls, sec]);
+
+  // Pre-fill marks from existing daily_logs for the chosen date + class.
+  // Students with no row that day come in unmarked so the principal can
+  // either fill them in or leave them blank (blanks are skipped on save).
+  useEffect(() => {
+    if (!date) return;
+    const next = {};
+    for (const stu of roster) {
+      const log = (E.DAILY_LOGS || []).find((l) => l.studentId === stu.id && l.date === date);
+      next[stu.id] = log
+        ? {
+            state: ATT_STATES.has(log.attendance) ? log.attendance : "present",
+            reason: log.leaveReason || "",
+            original: ATT_STATES.has(log.attendance) ? log.attendance : "present",
+          }
+        : { state: null, reason: "", original: null };
+    }
+    setMarks(next);
+  }, [date, roster.length, E.DAILY_LOGS, cls, sec]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const setMark = (id, state) => setMarks((m) => ({ ...m, [id]: { ...(m[id] || {}), state } }));
+  const setStudentReason = (id, r) => setMarks((m) => ({ ...m, [id]: { ...(m[id] || {}), reason: r } }));
+
+  // What actually changed vs the existing record. The Save action sends
+  // ONLY changed rows + ones that were previously unmarked but now have a
+  // state, so a partial correction doesn't accidentally re-stamp untouched
+  // students' postedBy / timestamp.
+  const changed = roster.filter((s) => {
+    const m = marks[s.id];
+    if (!m || !m.state) return false;
+    return m.state !== m.original;
+  });
+
+  const dateLabel = (() => {
+    if (!date) return "";
+    const d = new Date(`${date}T00:00:00`);
+    return d.toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  })();
+  const isFutureDate = date && date > (todayIso || "");
+
+  async function save() {
+    if (busy) return;
+    if (changed.length === 0) { showToast("No changes to save", "err"); return; }
+    if (!reason.trim()) { showToast("Reason for correction is required", "err"); return; }
+    if (isFutureDate) { showToast("Cannot correct a future date", "err"); return; }
+    setBusy(true);
+    try {
+      const list = changed.map((s) => ({
+        studentId: s.id,
+        studentName: s.name,
+        attendance: marks[s.id].state,
+        leaveReason: marks[s.id].state === "present" ? "" : (marks[s.id].reason || ""),
+      }));
+      const r = await fetch("/api/academic/attendance", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          date,
+          cls: `${cls}-${sec}`,
+          marks: list,
+          mode: "correction",
+          correctionReason: reason.trim(),
+        }),
+      });
+      const json = await r.json().catch(() => ({}));
+      if (!r.ok || !json.ok) throw new Error(json.error || "Failed");
+      showToast(`Corrected ${list.length} student${list.length === 1 ? "" : "s"} for ${date}`, "ok");
+      setReason("");
+      setMarks((m) => {
+        const next = {};
+        for (const k of Object.keys(m)) next[k] = { ...m[k], original: m[k].state };
+        return next;
+      });
+      await refresh?.();
+    } catch (e) { showToast(e.message || "Failed", "err"); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <div>
+      {/* Date + class picker */}
+      <div className="card" style={{ marginBottom: 14, padding: "12px 16px", display: "flex", gap: 14, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>Date</span>
+          <input
+            type="date"
+            value={date}
+            max={todayIso || undefined}
+            onChange={(e) => setDate(e.target.value)}
+            className="input"
+            style={{ height: 32, fontSize: 13, minWidth: 160 }}
+          />
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>Class</span>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {(E.CLASSES || []).map((c) => (
+              <button
+                key={c.n}
+                onClick={() => setCls(c.n)}
+                className="btn sm"
+                style={{
+                  background: cls === c.n ? "var(--ink)" : "var(--card)",
+                  color: cls === c.n ? "var(--bg)" : "var(--ink-2)",
+                  borderColor: cls === c.n ? "var(--ink)" : "var(--rule)",
+                }}
+              >{c.label || formatClassLabel(String(c.n))}</button>
+            ))}
+          </div>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>Section</span>
+          <div style={{ display: "flex", gap: 6 }}>
+            {(() => {
+              const klass = (E.CLASSES || []).find((c) => c.n === cls);
+              const secs = (klass?.sections && klass.sections.length) ? klass.sections : ["A"];
+              return secs.map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setSec(s)}
+                  className="btn sm"
+                  style={{
+                    background: sec === s ? "var(--ink)" : "var(--card)",
+                    color: sec === s ? "var(--bg)" : "var(--ink-2)",
+                    borderColor: sec === s ? "var(--ink)" : "var(--rule)",
+                  }}
+                >{s}</button>
+              ));
+            })()}
+          </div>
+        </div>
+        <div style={{ marginLeft: "auto", fontSize: 11.5, color: "var(--ink-3)", textAlign: "right" }}>
+          {date && <div><b>{dateLabel}</b></div>}
+          <div>{roster.length} student{roster.length === 1 ? "" : "s"} · {changed.length} change{changed.length === 1 ? "" : "s"} pending</div>
+        </div>
+      </div>
+
+      {/* Reason banner — required for any correction. The reason is included
+          in the audit log so anyone reviewing later understands WHY a past
+          day's mark was flipped. */}
+      <div className="card" style={{ marginBottom: 14, padding: "12px 14px", background: "var(--warn-soft, #fff4e0)", border: "1px solid var(--warn, #d98c00)" }}>
+        <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--warn, #a05a00)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>
+          Reason for correction <span style={{ color: "var(--bad, #b13c1c)" }}>*</span>
+        </div>
+        <input
+          className="input"
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder="e.g. Student attended after medical leave / teacher tapped wrong row / register was late to update"
+          style={{ width: "100%", fontSize: 12.5 }}
+        />
+      </div>
+
+      {/* Roster */}
+      <div className="card">
+        <div className="card-head">
+          <div>
+            <div className="card-title">Roster · {formatClassLabel(`${cls}-${sec}`)} · {date || "(no date)"}</div>
+            <div className="card-sub">
+              {date
+                ? `Edit any student below. Only changed rows are saved. ${changed.length} pending.`
+                : "Pick a date above to load the roster."}
+            </div>
+          </div>
+          <div>
+            <button
+              className="btn accent"
+              onClick={save}
+              disabled={busy || changed.length === 0 || !reason.trim() || isFutureDate || !date}
+              title={!date ? "Pick a date first" : !reason.trim() ? "Reason required" : changed.length === 0 ? "No changes" : ""}
+            >
+              {busy ? "Saving…" : <><Icon name="check" size={13} />Save corrections{changed.length > 0 ? ` (${changed.length})` : ""}</>}
+            </button>
+          </div>
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table className="table">
+            <thead>
+              <tr>
+                <th style={{ width: 36 }}>#</th>
+                <th>Student</th>
+                <th>Roll · ID</th>
+                <th>Was</th>
+                <th style={{ width: 320 }}>Now</th>
+                <th>Reason (late · absent · leave)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!date && (
+                <tr><td colSpan={6} className="empty">Pick a date to begin.</td></tr>
+              )}
+              {date && roster.length === 0 && (
+                <tr><td colSpan={6} className="empty">No students in {formatClassLabel(`${cls}-${sec}`)} yet.</td></tr>
+              )}
+              {date && roster.map((s, i) => {
+                const m = marks[s.id] || { state: null, reason: "", original: null };
+                const STATE_PILLS = [
+                  { k: "present", label: "Present", icon: "check", soft: "ok-soft",  fg: "ok" },
+                  { k: "late",    label: "Late",    icon: "clock", soft: "warn-soft", fg: "warn" },
+                  { k: "absent",  label: "Absent",  icon: "x",     soft: "bad-soft",  fg: "bad" },
+                  { k: "leave",   label: "Leave",   icon: "calendar", soft: "accent-soft", fg: "accent" },
+                ];
+                const needsReason = m.state && m.state !== "present";
+                const isChanged = m.state && m.state !== m.original;
+                return (
+                  <tr key={s.id} style={isChanged ? { background: "var(--accent-soft, rgba(232,83,14,0.06))" } : null}>
+                    <td style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-4)" }}>{String(i + 1).padStart(2, "0")}</td>
+                    <td>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <AvatarChip initials={(s.name || "?").split(" ").map((n) => n[0]).join("")} />
+                        <span style={{ fontSize: 12.5, fontWeight: 500 }}>{s.name}</span>
+                      </div>
+                    </td>
+                    <td style={{ fontSize: 11, color: "var(--ink-3)", fontFamily: "var(--font-mono)" }}>
+                      {String(s.roll).padStart(2, "0")} · {s.id}
+                    </td>
+                    <td style={{ fontSize: 11.5, color: "var(--ink-3)" }}>
+                      {m.original
+                        ? <span style={{ textTransform: "capitalize" }}>{m.original}</span>
+                        : <span style={{ color: "var(--ink-4)" }}>not marked</span>}
+                    </td>
+                    <td>
+                      <div className="segmented" style={{ width: "fit-content", flexWrap: "wrap" }}>
+                        {STATE_PILLS.map((p) => {
+                          const active = m.state === p.k;
+                          return (
+                            <button
+                              key={p.k}
+                              type="button"
+                              className={active ? "active" : ""}
+                              onClick={() => setMark(s.id, p.k)}
+                              style={active ? { background: `var(--${p.soft})`, color: `var(--${p.fg})` } : {}}
+                            >
+                              <Icon name={p.icon} size={11} />{p.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </td>
+                    <td>
+                      {needsReason ? (
+                        <input
+                          className="input"
+                          style={{ height: 28, fontSize: 12 }}
+                          value={m.reason}
+                          onChange={(e) => setStudentReason(s.id, e.target.value)}
+                          placeholder={
+                            m.state === "late"  ? "Traffic / late bus …" :
+                            m.state === "leave" ? "Pre-approved leave reason …" :
+                                                  "Sick / family event …"
+                          }
+                        />
+                      ) : (
+                        <span style={{ fontSize: 11, color: "var(--ink-4)" }}>—</span>
+                      )}
                     </td>
                   </tr>
                 );
