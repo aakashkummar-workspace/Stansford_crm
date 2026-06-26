@@ -68,13 +68,25 @@ function Field({ label, hint, children }) {
   );
 }
 
-// All class-section keys ("1-A", "5-B"…) derived from the live class roster.
+// All class-section keys ("1-A", "5-A"…) derived from the live class roster.
+// School is single-stream so each class is "<n>-A" exactly once.
 function buildClassKeys(classes) {
   const out = [];
   (classes || []).forEach((c) => {
     (c.sections || ["A"]).forEach((sec) => out.push(`${c.n}-${sec}`));
   });
   return out;
+}
+
+// Friendly label for a class key like "1-A". Prefers the live label on
+// the class record ("Class 1", "PRE-MONT") since that's what the rest of
+// the school already uses. Falls back to the raw key for keys whose class
+// number isn't in the supplied list (defensive — shouldn't happen).
+function labelForKey(key, classes) {
+  const [head] = String(key).split("-");
+  const n = Number(head);
+  const found = (classes || []).find((c) => Number(c.n) === n);
+  return found?.label || `Class ${key}`;
 }
 
 // --------------------------------------------------------------------------
@@ -197,7 +209,7 @@ export default function ScreenTimetable({ E, refresh, role, session }) {
   const headerSub =
     isManager ? "Set the weekly grid per class · click any cell to assign a subject + teacher." :
     isTeacher ? "Periods you're scheduled to teach this week." :
-    myChildCls ? `Class ${myChildCls} · standard 6-day week.` :
+    myChildCls ? `${labelForKey(myChildCls, allClasses)} · standard 6-day week.` :
                  "No child linked to this account yet.";
 
   return (
@@ -219,6 +231,7 @@ export default function ScreenTimetable({ E, refresh, role, session }) {
               value={pickedClass}
               isTeacher={isTeacher}
               onChange={setPickedClass}
+              allClasses={allClasses}
             />
           </div>
         )}
@@ -259,7 +272,7 @@ export default function ScreenTimetable({ E, refresh, role, session }) {
                     items: coveredCls.map((cls) => {
                       const inCls = allEntries.filter((e) => e.cls === cls).sort(sortByTime);
                       return {
-                        label: `Class ${cls}`,
+                        label: labelForKey(cls, allClasses),
                         value: slotsByCls[cls] || 0,
                         sub: `${slotsByCls[cls] || 0} slot${(slotsByCls[cls] || 0) === 1 ? "" : "s"} · click to expand`,
                         children: inCls.map((e) => ({
@@ -283,7 +296,7 @@ export default function ScreenTimetable({ E, refresh, role, session }) {
                       const total  = DAYS.length * PERIODS.length;
                       const inCls = allEntries.filter((e) => e.cls === cls).sort(sortByTime);
                       return {
-                        label: `Class ${cls}`,
+                        label: labelForKey(cls, allClasses),
                         value: `${filled}/${total}`,
                         sub: `${Math.round((filled / total) * 100)}% filled · click to expand`,
                         children: inCls.map((e) => ({
@@ -316,7 +329,7 @@ export default function ScreenTimetable({ E, refresh, role, session }) {
                           children: mine.map((e) => ({
                             label: fmtSlot(e),
                             value: e.subject || "—",
-                            sub: `Class ${e.cls}`,
+                            sub: labelForKey(e.cls, allClasses),
                           })),
                         };
                       }),
@@ -340,7 +353,7 @@ export default function ScreenTimetable({ E, refresh, role, session }) {
                           sub: `${n} period${n === 1 ? "" : "s"} · click to expand`,
                           children: mine.map((e) => ({
                             label: fmtSlot(e),
-                            value: `Class ${e.cls}`,
+                            value: labelForKey(e.cls, allClasses),
                             sub: e.teacherName || "Unassigned teacher",
                           })),
                         };
@@ -355,7 +368,7 @@ export default function ScreenTimetable({ E, refresh, role, session }) {
 
       {/* Grid */}
       {isTeacher && pickedClass === null ? (
-        <TeacherGrid schedule={teacherSchedule} />
+        <TeacherGrid schedule={teacherSchedule} allClasses={allClasses} />
       ) : pickedClass ? (
         <ClassGrid
           cls={pickedClass}
@@ -363,6 +376,7 @@ export default function ScreenTimetable({ E, refresh, role, session }) {
           canEdit={isManager}
           isTeacher={isTeacher}
           myStaffId={myStaffId}
+          allClasses={allClasses}
           onCellClick={(day, period) => {
             if (!isManager) return;
             const current = entryByKey.get(`${pickedClass}-${day}-${period}`);
@@ -388,6 +402,7 @@ export default function ScreenTimetable({ E, refresh, role, session }) {
           subjects={E.SUBJECTS || []}
           canManageSubjects={isManager}
           onSubjectsChanged={refresh}
+          allClasses={allClasses}
           onClose={() => setEditingSlot(null)}
           onSubmit={handleSave}
           onClear={editingSlot.current ? () => { handleClear(editingSlot.current); setEditingSlot(null); } : null}
@@ -401,7 +416,7 @@ export default function ScreenTimetable({ E, refresh, role, session }) {
 // --------------------------------------------------------------------------
 // Class picker — segmented control of classes (or "My schedule" for teachers)
 // --------------------------------------------------------------------------
-function ClassPicker({ classKeys, value, isTeacher, onChange }) {
+function ClassPicker({ classKeys, value, isTeacher, onChange, allClasses }) {
   return (
     <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
       <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 500 }}>View</span>
@@ -413,7 +428,9 @@ function ClassPicker({ classKeys, value, isTeacher, onChange }) {
       >
         {isTeacher && <option value="">My schedule</option>}
         {classKeys.length === 0 && !isTeacher && <option value="">No classes yet</option>}
-        {classKeys.map((k) => <option key={k} value={k}>Class {k}</option>)}
+        {classKeys.map((k) => (
+          <option key={k} value={k}>{labelForKey(k, allClasses)}</option>
+        ))}
       </select>
     </div>
   );
@@ -422,12 +439,12 @@ function ClassPicker({ classKeys, value, isTeacher, onChange }) {
 // --------------------------------------------------------------------------
 // Class grid — shows a full week × 7 periods for one class.
 // --------------------------------------------------------------------------
-function ClassGrid({ cls, entryByKey, canEdit, isTeacher, myStaffId, onCellClick }) {
+function ClassGrid({ cls, entryByKey, canEdit, isTeacher, myStaffId, onCellClick, allClasses }) {
   return (
     <div className="card" style={{ overflowX: "auto" }}>
       <div className="card-head">
         <div>
-          <div className="card-title">Class {cls}</div>
+          <div className="card-title">{labelForKey(cls, allClasses)}</div>
           <div className="card-sub">{canEdit ? "Click any cell to assign a subject + teacher" : "Read-only weekly schedule"}</div>
         </div>
       </div>
@@ -508,7 +525,7 @@ function ClassGrid({ cls, entryByKey, canEdit, isTeacher, myStaffId, onCellClick
 // Teacher's "my schedule" grid — same layout as ClassGrid but each cell shows
 // the class instead of the teacher (since the teacher is always *me*).
 // --------------------------------------------------------------------------
-function TeacherGrid({ schedule }) {
+function TeacherGrid({ schedule, allClasses }) {
   const slotsToday = schedule ? schedule.size : 0;
   return (
     <div className="card" style={{ overflowX: "auto" }}>
@@ -546,7 +563,7 @@ function TeacherGrid({ schedule }) {
                     {entry ? (
                       <>
                         <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--accent-2)" }}>{entry.subject}</span>
-                        <span style={{ fontSize: 10.5, color: "var(--ink-3)" }}>Class {entry.cls}</span>
+                        <span style={{ fontSize: 10.5, color: "var(--ink-3)" }}>{labelForKey(entry.cls, allClasses)}</span>
                         {entry.room && <span style={{ fontSize: 10, color: "var(--ink-4)" }}>Room {entry.room}</span>}
                       </>
                     ) : (
@@ -569,7 +586,7 @@ function TeacherGrid({ schedule }) {
 function SlotEditorModal({
   cls, day, period, current, staff,
   subjects = [], canManageSubjects = false, onSubjectsChanged, onToast,
-  onClose, onSubmit, onClear,
+  onClose, onSubmit, onClear, allClasses = [],
 }) {
   // The dropdown options come from the managed list at /api/subjects
   // (`subjects` prop). Fall back to the bundled list if it's still empty
@@ -640,7 +657,7 @@ function SlotEditorModal({
 
   return (
     <ModalShell
-      title={`Class ${cls} · ${day} · Period ${period}`}
+      title={`${labelForKey(cls, allClasses)} · ${day} · Period ${period}`}
       sub={current ? "Edit this slot or clear it" : "Assign a subject + teacher"}
       onClose={onClose}
       width={460}
