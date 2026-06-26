@@ -7,6 +7,7 @@ import MobileShell from "./MobileShell";
 import Tweaks from "./Tweaks";
 import GlobalSearch from "./GlobalSearch";
 import NotificationsPanel, { buildAlerts } from "./NotificationsPanel";
+import TransportEventPopup from "./TransportEventPopup";
 
 import ScreenDashboard from "./screens/Dashboard";
 import ScreenTrust from "./screens/Trust";
@@ -630,6 +631,11 @@ export default function AppShell({ initialData, session }) {
       />
       <div className="main">
         {role === "parent" && <ParentContactBanner settings={data?.SETTINGS} />}
+        {/* Full-screen pop-up for transport events (bus started / approaching
+            your stop / completed). Only renders for parents, polls
+            /api/notifications independently, shows ONE modal at a time
+            with a 20s auto-dismiss + soft chime. */}
+        {role === "parent" && <TransportEventPopup />}
         <div className="topbar">
           <button
             className="icon-btn"

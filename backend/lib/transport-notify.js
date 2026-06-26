@@ -21,7 +21,6 @@
 //     child is at the upcoming stop.
 
 import { addNotification, listUsers, readAllData } from "./db.js";
-import { notifyWhatsApp } from "./whatsapp.js";
 
 // Build the per-event WhatsApp + in-app copy. Kept here (not in component
 // land) so the same wording is used regardless of channel.
@@ -94,13 +93,20 @@ function selectTargetStudents({ allStudents, route, event, direction }) {
 
 // Public entry point. The caller (the /api/transport/advance API route)
 // invokes this AFTER advanceRoute() succeeds. Always swallows its own
-// errors — never throws — so a downstream WhatsApp glitch can't break
+// errors — never throws — so a downstream notification glitch can't break
 // the teacher's "Mark stop done" tap.
 //
+// Channel policy: IN-APP ONLY for transport events. WhatsApp was disabled
+// because parents already get a full-screen pop-up on their dashboard
+// (TransportEventPopup) when a transport notification arrives, plus the
+// persistent bell-icon history. Per-stop WhatsApps were too spammy
+// (4-6 messages per child per day across both legs). Manual broadcasts
+// from the route header still use WhatsApp — that's a different path.
+//
 // Returns a summary object useful for tests / logging:
-//   { dispatched, inAppOk, inAppFail, whatsappOk, whatsappFail, skippedNoParent }
+//   { dispatched, inAppOk, inAppFail, skippedNoParent }
 export async function dispatchTransportNotifications(route, event) {
-  const empty = { dispatched: 0, inAppOk: 0, inAppFail: 0, whatsappOk: 0, whatsappFail: 0, skippedNoParent: 0 };
+  const empty = { dispatched: 0, inAppOk: 0, inAppFail: 0, skippedNoParent: 0 };
   if (!route || !event || !event.type) return empty;
 
   const direction = route.direction === "evening" ? "evening" : "morning";
@@ -156,36 +162,23 @@ export async function dispatchTransportNotifications(route, event) {
   empty.dispatched = fanout.length;
 
   // Fan out — independent per parent, errors logged but not thrown.
+  // In-app only: surfaced as a full-screen pop-up on the parent dashboard
+  // (see frontend/components/TransportEventPopup.jsx) and in the bell
+  // history list.
   await Promise.all(fanout.map(async (t) => {
-    // 1. In-app notification (skip if parent doesn't have a login)
-    if (t.parentUserId) {
-      try {
-        await addNotification({
-          userId: t.parentUserId,
-          type: "transport",
-          title: msgs.title,
-          description: msgs.description,
-          redirectUrl: "?screen=dashboard",
-        });
-        empty.inAppOk += 1;
-      } catch (e) {
-        empty.inAppFail += 1;
-        console.warn(`[transport-notify] in-app for ${t.parentUserId} failed: ${e.message}`);
-      }
-    }
-    // 2. WhatsApp — reaches the parent's phone regardless of login status
-    if (t.phone && msgs.whatsapp) {
-      try {
-        const r = await notifyWhatsApp("transport_update", {
-          phone: t.phone,
-          message: msgs.whatsapp,
-        });
-        if (r?.ok) empty.whatsappOk += 1;
-        else empty.whatsappFail += 1;
-      } catch (e) {
-        empty.whatsappFail += 1;
-        console.warn(`[transport-notify] whatsapp for ${t.phone} failed: ${e.message}`);
-      }
+    if (!t.parentUserId) return; // no login → can't deliver in-app
+    try {
+      await addNotification({
+        userId: t.parentUserId,
+        type: "transport",
+        title: msgs.title,
+        description: msgs.description,
+        redirectUrl: "?screen=dashboard",
+      });
+      empty.inAppOk += 1;
+    } catch (e) {
+      empty.inAppFail += 1;
+      console.warn(`[transport-notify] in-app for ${t.parentUserId} failed: ${e.message}`);
     }
   }));
 
