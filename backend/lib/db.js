@@ -251,8 +251,23 @@ export async function readAllData() {
       enquiries:     [...(eq || []).map(fromEnquiry), ...fileEnquiriesSafe()],
       dailyLogs:     applyDailyLogOverlays(dl.map(fromDailyLog)),
       // Union with file-store routes in case writes fell back to file
-      // (PostgREST cache lag or table missing).
-      routes:        [...(rt || []).map(fromRoute), ...fileRoutesSafe()],
+      // (PostgREST cache lag or table missing). Deduped by code with
+      // Supabase as source-of-truth — file-backed rows are only added if
+      // their code isn't already present in the Supabase result. Prevents
+      // duplicate route cards in the UI when both backends carry a row
+      // for the same code (happens after a template apply if the file
+      // backend has stale leftovers from earlier testing).
+      routes:        (() => {
+        const out = (rt || []).map(fromRoute);
+        const seen = new Set(out.map((r) => String(r.code || "").toUpperCase()));
+        for (const r of fileRoutesSafe()) {
+          const code = String(r.code || "").toUpperCase();
+          if (seen.has(code)) continue;
+          seen.add(code);
+          out.push(r);
+        }
+        return out;
+      })(),
       // Master timetable templates — pulled via the dedicated helper
       // (handles the schema-miss fallback to file store internally).
       // Errors are swallowed so a missing migration can't break /api/data.
