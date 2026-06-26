@@ -7,7 +7,13 @@ import MobileShell from "./MobileShell";
 import Tweaks from "./Tweaks";
 import GlobalSearch from "./GlobalSearch";
 import NotificationsPanel, { buildAlerts } from "./NotificationsPanel";
-import TransportEventPopup from "./TransportEventPopup";
+import dynamic from "next/dynamic";
+// Client-only mount — bypasses Next.js's default SSR pass for client
+// components. Hydration mismatches elsewhere on the page (date/time
+// formatters in the parent dashboard, etc.) corrupt the React tree in
+// production-minified mode; mounting the popup outside the SSR pipeline
+// guarantees it boots cleanly regardless.
+const TransportEventPopup = dynamic(() => import("./TransportEventPopup"), { ssr: false });
 
 import ScreenDashboard from "./screens/Dashboard";
 import ScreenTrust from "./screens/Trust";

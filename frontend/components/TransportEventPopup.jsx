@@ -37,6 +37,14 @@ export default function TransportEventPopup() {
   const countdownTimerRef = useRef(null);
   const audioCtxRef = useRef(null);
 
+  // Temporary diagnostic log so a missing popup in production is
+  // visible in DevTools. Remove once stable.
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      console.log("[TransportEventPopup] mounted");
+    }
+  }, []);
+
   // ----- Load last-seen id from localStorage on mount.
   // First-load fallback: if there's nothing stored, treat ALL existing
   // unread notifications as "already seen" by stamping the current top id.
