@@ -314,8 +314,8 @@ export default function ScreenLibrary({ E, refresh, role, session }) {
               : <>Library <span className="amber">management</span></>}
           </div>
           <div className="page-sub">
-            {isParent  ? "Books your child has borrowed from the school library." :
-             isTeacher ? "Books you have borrowed from the school library." :
+            {isParent  ? "Browse the school catalog · track books your child has borrowed." :
+             isTeacher ? "Browse the school catalog · track books you have borrowed." :
                          "Books · loans · stock · borrowers"}
           </div>
         </div>
@@ -481,14 +481,16 @@ export default function ScreenLibrary({ E, refresh, role, session }) {
         </div>
       )}
 
-      {/* Tab strip — managers can flip between Books / Loans. Borrowers only
-          have one view (their own loans), so we skip the strip entirely to
-          keep their screen clean. */}
-      {!isBorrowerOnly && (
+      {/* Tab strip — everyone (managers + borrowers) can flip between the
+          catalog (read-only for borrowers) and their loans. Lets parents
+          and teachers browse what books exist without losing the focused
+          "my loans" view they default to. Action buttons in the catalog
+          (Issue / Edit / Remove) are gated by canManage further down. */}
+      {(
         <div className="card" style={{ padding: "10px 14px", marginBottom: 14, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
           {[
-            { k: "books", label: "Books" },
-            { k: "loans", label: "Loans" },
+            { k: "books", label: isBorrowerOnly ? "Browse catalog" : "Books" },
+            { k: "loans", label: isBorrowerOnly ? "My loans"       : "Loans" },
           ].map((t) => (
             <button
               key={t.k}
@@ -504,8 +506,10 @@ export default function ScreenLibrary({ E, refresh, role, session }) {
         </div>
       )}
 
-      {/* Catalog (Books tab) — manager-only. */}
-      {!isBorrowerOnly && tab === "books" && (
+      {/* Catalog (Books tab) — managers get the full edit UI, borrowers see
+          a read-only browse. BooksTab gates Issue / Edit / Remove buttons
+          on canManage internally, so borrowers see just the catalog rows. */}
+      {tab === "books" && (
         <BooksTab
           books={books}
           activeByBook={activeByBook}
@@ -517,7 +521,7 @@ export default function ScreenLibrary({ E, refresh, role, session }) {
       )}
 
       {/* Loans — managers see all loans, borrowers see only their own. */}
-      {(isBorrowerOnly || tab === "loans") && (
+      {tab === "loans" && (
         <LoansTab
           loans={visibleLoans}
           canManage={canManage}
