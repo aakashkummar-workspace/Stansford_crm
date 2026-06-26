@@ -5,6 +5,35 @@ import Icon from "../Icon";
 import { KPI, BarChart, LineBarChart, Ring, AvatarChip } from "../ui";
 import { money, moneyK, formatClassLabel } from "@/lib/format";
 
+// Deferred current-time state. Returns 0 during SSR + the first client
+// render, then flips to a real Date.now() after mount and ticks every
+// `intervalMs` thereafter. Used to drive any relative-time labels on the
+// dashboard without causing hydration mismatches — server and client
+// both render the "now=0" branch initially, then the client re-renders
+// with the live timestamp once hydration is safely past.
+function useNow(intervalMs = 30_000) {
+  const [now, setNow] = useState(0);
+  useEffect(() => {
+    setNow(Date.now());
+    const t = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(t);
+  }, [intervalMs]);
+  return now;
+}
+
+// Same deferred pattern for today's day-name. The Mon/Tue/Wed string is
+// timezone-derived, so server-side (often UTC) and client-side (IST for
+// this school) can disagree around midnight → hydration mismatch on the
+// filtered timetable rows that depend on it. Returns "" on the first
+// render; effect populates after mount.
+function useTodayDayName() {
+  const [day, setDay] = useState("");
+  useEffect(() => {
+    setDay(new Date().toLocaleDateString("en-US", { weekday: "short" }));
+  }, []);
+  return day;
+}
+
 export default function ScreenDashboard({ E, role, session, refresh }) {
   const { KPIS, CLASS_STRENGTH, RECENT_FEES, PENDING_FEES, ACTIVITIES, ROUTES, INCOME_SERIES } = E;
   const isParent = role === "parent";
@@ -38,7 +67,10 @@ export default function ScreenDashboard({ E, role, session, refresh }) {
   // Teachers see periods they're teaching today; parents see their child's
   // class schedule for today. The day-name uses the same Mon/Tue/Wed
   // abbreviations the Timetable screen writes, so the filter lines up.
-  const todayDayName = new Date().toLocaleDateString("en-US", { weekday: "short" });
+  // Deferred via useTodayDayName so SSR and the first client render both
+  // see "" (empty filter result) — prevents hydration mismatch on the
+  // rendered period list. The list re-populates after mount.
+  const todayDayName = useTodayDayName();
   const teacherToday = mySid
     ? (E.TIMETABLE || [])
         .filter((t) => t.teacherId === mySid && t.day === todayDayName)
@@ -642,7 +674,10 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
     !l.returnedAt && l.borrowerType === "student" && l.borrowerId === child.id
   );
   // Today's class periods for the child — read straight from the timetable.
-  const todayDayName = new Date().toLocaleDateString("en-US", { weekday: "short" });
+  // Same deferred pattern as ScreenDashboard: useTodayDayName() returns ""
+  // until after hydration, so the filtered period list is empty on the
+  // first render. Re-populates after mount.
+  const todayDayName = useTodayDayName();
   const childToday = (E.TIMETABLE || [])
     .filter((t) => t.cls === child.cls && t.day === todayDayName)
     .sort((a, b) => (a.period || 0) - (b.period || 0));
@@ -1010,9 +1045,10 @@ function TodayScheduleCard({ title, sub, entries, mode }) {
   if (!entries || entries.length === 0) return null;
   // Highlight whichever period contains "now" (rough — uses the start hour
   // from PERIOD_TIMES, ignoring weekends since the parent component already
-  // filters by today's day name).
-  const now = new Date();
-  const minutes = now.getHours() * 60 + now.getMinutes();
+  // filters by today's day name). Deferred via useNow so the "live" pill
+  // doesn't render differently on server vs client.
+  const now = useNow(60_000);
+  const minutes = now ? new Date(now).getHours() * 60 + new Date(now).getMinutes() : -1;
   function isLive(periodNum) {
     const t = PERIOD_TIMES[periodNum];
     if (!t) return false;
@@ -1078,11 +1114,16 @@ function TodayScheduleCard({ title, sub, entries, mode }) {
 // ----------------------------------------------------------------------
 function LibraryLoansCard({ title, sub, loans, showBorrower = true }) {
   if (!loans || loans.length === 0) return null;
-  // Sort: overdue first, then earliest due date.
-  const now = Date.now();
+  // Sort: overdue first, then earliest due date. Uses useNow so the
+  // overdue/not-overdue partition doesn't differ between SSR (server's
+  // "now") and the first client render — would cause a hydration mismatch
+  // if a loan straddles the boundary. now === 0 makes everything count
+  // as "not yet due" pre-hydration; correct partition + sort kicks in
+  // after mount.
+  const now = useNow(60_000);
   const sorted = [...loans].sort((a, b) => {
-    const ao = new Date(a.dueAt).getTime() < now ? 0 : 1;
-    const bo = new Date(b.dueAt).getTime() < now ? 0 : 1;
+    const ao = now && new Date(a.dueAt).getTime() < now ? 0 : 1;
+    const bo = now && new Date(b.dueAt).getTime() < now ? 0 : 1;
     if (ao !== bo) return ao - bo;
     return new Date(a.dueAt) - new Date(b.dueAt);
   });
@@ -1100,10 +1141,13 @@ function LibraryLoansCard({ title, sub, loans, showBorrower = true }) {
       </div>
       <div style={{ padding: "8px 14px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
         {sorted.map((l) => {
+          // All "days left / overdue / since" math depends on `now`; when
+          // now === 0 (pre-hydration) we render neutral placeholders so
+          // server and client agree. After mount the live values populate.
           const due = new Date(l.dueAt).getTime();
-          const overdue = due < now;
-          const daysLeft = Math.ceil((due - now) / 86400000);
-          const since = Math.floor((now - new Date(l.borrowedAt).getTime()) / 86400000);
+          const overdue = now ? due < now : false;
+          const daysLeft = now ? Math.ceil((due - now) / 86400000) : null;
+          const since = now ? Math.floor((now - new Date(l.borrowedAt).getTime()) / 86400000) : null;
           return (
             <div key={l.id} style={{
               padding: 10, borderRadius: 8,
@@ -1116,18 +1160,20 @@ function LibraryLoansCard({ title, sub, loans, showBorrower = true }) {
                     {l.bookTitle}
                   </div>
                   <div style={{ fontSize: 10.5, color: "var(--ink-4)", marginTop: 2 }}>
-                    Borrowed {fmt(l.borrowedAt)} ({since} day{since === 1 ? "" : "s"} ago)
+                    Borrowed {fmt(l.borrowedAt)}{since != null && <> ({since} day{since === 1 ? "" : "s"} ago)</>}
                     {showBorrower && <> · <span style={{ textTransform: "capitalize" }}>{l.borrowerType}</span> {l.borrowerName}</>}
                   </div>
                 </div>
                 <div style={{ textAlign: "right" }}>
-                  <div style={{ fontSize: 11.5, fontWeight: 600, color: overdue ? "var(--err, #b13c1c)" : "var(--ink-2)" }}>
-                    {overdue
-                      ? `${Math.abs(daysLeft)} day${Math.abs(daysLeft) === 1 ? "" : "s"} overdue`
-                      : daysLeft === 0
-                        ? "due today"
-                        : `${daysLeft} day${daysLeft === 1 ? "" : "s"} left`}
-                  </div>
+                  {daysLeft != null && (
+                    <div style={{ fontSize: 11.5, fontWeight: 600, color: overdue ? "var(--err, #b13c1c)" : "var(--ink-2)" }}>
+                      {overdue
+                        ? `${Math.abs(daysLeft)} day${Math.abs(daysLeft) === 1 ? "" : "s"} overdue`
+                        : daysLeft === 0
+                          ? "due today"
+                          : `${daysLeft} day${daysLeft === 1 ? "" : "s"} left`}
+                    </div>
+                  )}
                   <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>by {fmt(l.dueAt)}</div>
                 </div>
               </div>
@@ -1228,6 +1274,10 @@ function MyLeaveCard({ title, sub, requests }) {
 function TeacherBusRouteCard({ route, refresh }) {
   const [busy, setBusy] = useState(null); // 'start' | 'next' | 'prev' | 'finish' | null
   const [err, setErr] = useState("");
+  // Deferred current-time for all relativeMins() calls in this card.
+  // Returns 0 pre-hydration so the strings render as "" both server-side
+  // and on first client render → no hydration mismatch.
+  const now = useNow();
   const stops = Array.isArray(route.stops) ? route.stops : [];
   const curIdx = stops.findIndex((s) => s.status === "current");
   const cur = curIdx >= 0 ? stops[curIdx] : null;
@@ -1296,7 +1346,7 @@ function TeacherBusRouteCard({ route, refresh }) {
             fontSize: 12.5, color: "var(--ink-2)",
           }}>
             Currently at <b>{cur.name}</b>
-            {cur.arrivedAt && <> · arrived {relativeMins(cur.arrivedAt)}</>}
+            {cur.arrivedAt && relativeMins(cur.arrivedAt, now) && <> · arrived {relativeMins(cur.arrivedAt, now)}</>}
             {next && <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 2 }}>
               Next: {next.name}{next.t ? ` · scheduled ${next.t}` : ""}
             </div>}
@@ -1304,7 +1354,7 @@ function TeacherBusRouteCard({ route, refresh }) {
         )}
         {isCompleted && (
           <div style={{ fontSize: 12.5, color: "var(--ink-3)" }}>
-            Run completed{route.completedAt ? ` · ${relativeMins(route.completedAt)}` : ""}.
+            Run completed{relativeMins(route.completedAt, now) ? ` · ${relativeMins(route.completedAt, now)}` : ""}.
             Tap <b>Reset for next trip</b> when you're ready to start again.
           </div>
         )}
@@ -1364,9 +1414,9 @@ function TeacherBusRouteCard({ route, refresh }) {
                     color: isCurrent ? "var(--ink)" : isDone ? "var(--ink-3)" : "var(--ink-2)",
                   }}>{s.name}</span>
                   <span style={{ fontSize: 10.5, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>
-                    {isDone && s.doneAt
-                      ? `done · ${relativeMins(s.doneAt)}`
-                      : isCurrent && s.arrivedAt
+                    {isDone && s.doneAt && relativeMins(s.doneAt, now)
+                      ? `done · ${relativeMins(s.doneAt, now)}`
+                      : isCurrent && s.arrivedAt && now
                         ? `at ${new Date(s.arrivedAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}`
                         : s.t || ""}
                   </span>
@@ -1381,13 +1431,15 @@ function TeacherBusRouteCard({ route, refresh }) {
 }
 
 // Human-friendly relative time. "just now" / "2 min ago" / "1 hr 12 min ago"
-// / null if the timestamp is missing. Kept local to the dashboard since this
-// is the only place we currently surface bus timestamps to end users.
-function relativeMins(iso) {
-  if (!iso) return null;
+// / null if the timestamp is missing OR if `now` is 0 (pre-hydration).
+// The `now` parameter must be supplied by the caller via useNow() — taking
+// Date.now() inline here would re-introduce the hydration mismatch this
+// function was refactored to avoid.
+function relativeMins(iso, now) {
+  if (!iso || !now) return null;
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return null;
-  const diff = Math.max(0, Date.now() - then);
+  const diff = Math.max(0, now - then);
   const mins = Math.floor(diff / 60000);
   if (mins < 1) return "just now";
   if (mins < 60) return `${mins} min ago`;
@@ -1400,6 +1452,9 @@ function relativeMins(iso) {
 // the route header (code + driver + status pill), then the stop timeline
 // with the current stop highlighted and the child's own stop marked.
 function ParentBusRouteCard({ route, child, leg }) {
+  // Deferred current-time so relativeMins() strings don't differ between
+  // the server-rendered HTML and the first client render.
+  const now = useNow();
   const stops = Array.isArray(route.stops) ? route.stops : [];
   const curIdx = stops.findIndex((s) => s.status === "current");
   const cur = curIdx >= 0 ? stops[curIdx] : null;
@@ -1412,7 +1467,7 @@ function ParentBusRouteCard({ route, child, leg }) {
   const isRunning = route.status === "running";
   const isCompleted = route.status === "completed";
   const isIdle = !isRunning && !isCompleted;
-  const arrivedAgo = cur ? relativeMins(cur.arrivedAt) : null;
+  const arrivedAgo = cur ? relativeMins(cur.arrivedAt, now) : null;
 
   const statusChip = isCompleted
     ? <span className="chip ok"><span className="dot" />Completed</span>
@@ -1478,7 +1533,7 @@ function ParentBusRouteCard({ route, child, leg }) {
           borderRadius: 7,
           fontSize: 12, color: "var(--ink-3)",
         }}>
-          Run completed{route.completedAt ? ` · ${relativeMins(route.completedAt)}` : ""}.
+          Run completed{relativeMins(route.completedAt, now) ? ` · ${relativeMins(route.completedAt, now)}` : ""}.
         </div>
       )}
 
@@ -1517,9 +1572,9 @@ function ParentBusRouteCard({ route, child, leg }) {
                   )}
                 </span>
                 <span style={{ fontSize: 10.5, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>
-                  {isDone && s.doneAt
-                    ? `done · ${relativeMins(s.doneAt)}`
-                    : isCurrent && s.arrivedAt
+                  {isDone && s.doneAt && relativeMins(s.doneAt, now)
+                    ? `done · ${relativeMins(s.doneAt, now)}`
+                    : isCurrent && s.arrivedAt && now
                       ? `at ${new Date(s.arrivedAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}`
                       : s.t || ""}
                 </span>
