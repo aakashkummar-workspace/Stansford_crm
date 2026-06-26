@@ -180,6 +180,10 @@ export const NAV_BY_ROLE = {
     { id: "reports",    label: "Reports",       icon: "reports" },
     { section: "Records" },
     { id: "students",   label: "Students",      icon: "students" },
+    // Staff visibility for payroll — server already returns the staff
+    // roster to this role (treated as a manager in /api/data); this entry
+    // surfaces the Staff screen in the nav so they can actually reach it.
+    { id: "staff",      label: "Staff",         icon: "staff" },
     { id: "audit",      label: "Audit log",     icon: "audit" },
     { section: "Account" },
     { id: "account",    label: "My account",    icon: "user" },
