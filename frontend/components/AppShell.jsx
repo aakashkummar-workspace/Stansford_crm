@@ -393,7 +393,13 @@ export default function AppShell({ initialData, session }) {
         RECENT_FEES:       (data.RECENT_FEES  || []).filter((f) => (f.studentId || f.id) === myChild.id),
         DAILY_LOGS:        (data.DAILY_LOGS   || []).filter((l) => l.studentId === myChild.id),
         TRANSPORT_ATTENDANCE: (data.TRANSPORT_ATTENDANCE || []).filter((t) => t.studentId === myChild.id),
-        ROUTES:            (data.ROUTES || []).filter((r) => r.code === myChild.transport),
+        // Keep BOTH legs the child rides on — morning bus and evening
+        // bus are commonly different routes. Previously this only matched
+        // child.transport (morning), so the evening card on the parent
+        // dashboard disappeared the moment the evening teacher hit Start.
+        ROUTES:            (data.ROUTES || []).filter((r) =>
+          r.code === myChild.transport || r.code === myChild.transportEvening
+        ),
         ROUTE_TEMPLATES:   [],
         COMPLAINTS:        (data.COMPLAINTS || []).filter((c) => c.studentId === myChild.id || c.student === myChild.name),
         STAFF: [], AUDIT: [], INVENTORY: [], DONORS: [],
