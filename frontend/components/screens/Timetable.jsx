@@ -4,24 +4,27 @@ import { useEffect, useMemo, useState } from "react";
 import Icon from "../Icon";
 import { KPI } from "../ui";
 
-// Standard Indian school week — 6 working days, 7 periods, with two short
-// breaks rendered as columns the editor can't write into.
+// Standard Indian school week — 6 working days. The number of periods and
+// their start/end times are a single whole-school setting (default 9 periods)
+// that only the admin can change, served by /api/settings/periods. The grid
+// renders whatever that setting returns.
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const PERIODS = [1, 2, 3, 4, 5, 6, 7];
 // Subjects come from the managed list at /api/subjects (E.SUBJECTS).
 // Fallback list is only used while data is loading or the API is empty.
 const FALLBACK_SUBJECTS = ["English", "Tamil", "Science", "Social Science", "Maths", "Hindi", "PT"];
-// Approximate slot times so the parent/teacher view feels concrete. Adjust
-// here once and every grid picks them up.
-const PERIOD_TIMES = {
-  1: "08:00 – 08:45",
-  2: "08:45 – 09:30",
-  3: "09:30 – 10:15", // short break after this
-  4: "10:30 – 11:15",
-  5: "11:15 – 12:00",
-  6: "12:00 – 12:45", // lunch after this
-  7: "13:30 – 14:15",
-};
+// Default 9-period day, used while the setting loads (or before it's ever
+// saved). Mirrors DEFAULT_PERIOD_TIMES in backend/lib/db.js.
+const DEFAULT_PERIOD_LIST = [
+  { period: 1, start: "08:00", end: "08:45" },
+  { period: 2, start: "08:45", end: "09:30" },
+  { period: 3, start: "09:30", end: "10:15" },
+  { period: 4, start: "10:30", end: "11:15" },
+  { period: 5, start: "11:15", end: "12:00" },
+  { period: 6, start: "12:45", end: "13:30" },
+  { period: 7, start: "13:30", end: "14:15" },
+  { period: 8, start: "14:15", end: "15:00" },
+  { period: 9, start: "15:00", end: "15:45" },
+];
 
 function Toast({ msg, tone, onClose }) {
   if (!msg) return null;
@@ -96,6 +99,27 @@ export default function ScreenTimetable({ E, refresh, role, session }) {
   const isManager = role === "admin" || role === "principal" || role === "academic_director";
   const isTeacher = role === "teacher";
   const isParent  = role === "parent";
+  // Only the super admin may customize period timings (per spec).
+  const canEditPeriods = role === "admin";
+
+  // Whole-school period timings (count + start/end). Loaded once from the
+  // admin-owned setting; falls back to the 9-period default while loading.
+  const [periodList, setPeriodList] = useState(DEFAULT_PERIOD_LIST);
+  const [periodEditorOpen, setPeriodEditorOpen] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/settings/periods")
+      .then((r) => r.json())
+      .then((j) => { if (alive && j?.ok && Array.isArray(j.periods) && j.periods.length) setPeriodList(j.periods); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  const PERIODS = useMemo(() => periodList.map((p) => p.period), [periodList]);
+  const periodTimes = useMemo(() => {
+    const m = {};
+    for (const p of periodList) m[p.period] = `${p.start} – ${p.end}`;
+    return m;
+  }, [periodList]);
 
   const allClasses = E.CLASSES || [];
   const classKeys  = useMemo(() => buildClassKeys(allClasses), [allClasses]);
@@ -224,6 +248,15 @@ export default function ScreenTimetable({ E, refresh, role, session }) {
         </div>
         {(isManager || isTeacher) && (
           <div className="page-actions">
+            {canEditPeriods && (
+              <button
+                className="btn"
+                onClick={() => setPeriodEditorOpen(true)}
+                title="Set the whole-school period start/end times (admin only)"
+              >
+                <Icon name="clock" size={13} />Period times
+              </button>
+            )}
             <ClassPicker
               classKeys={isTeacher
                 ? [...new Set(allEntries.filter((e) => e.teacherId === myStaffId).map((e) => e.cls))]
@@ -260,7 +293,7 @@ export default function ScreenTimetable({ E, refresh, role, session }) {
             // expanded list reads naturally top-to-bottom.
             const dayIdx = (d) => DAYS.indexOf(d);
             const sortByTime = (a, b) => (dayIdx(a.day) - dayIdx(b.day)) || ((a.period || 0) - (b.period || 0));
-            const fmtSlot = (e) => `${e.day || "—"} · P${e.period || "?"} · ${PERIOD_TIMES[e.period] || ""}`;
+            const fmtSlot = (e) => `${e.day || "—"} · P${e.period || "?"} · ${periodTimes[e.period] || ""}`;
             return (
               <>
                 <KPI
@@ -368,7 +401,7 @@ export default function ScreenTimetable({ E, refresh, role, session }) {
 
       {/* Grid */}
       {isTeacher && pickedClass === null ? (
-        <TeacherGrid schedule={teacherSchedule} allClasses={allClasses} />
+        <TeacherGrid schedule={teacherSchedule} allClasses={allClasses} periods={PERIODS} periodTimes={periodTimes} />
       ) : pickedClass ? (
         <ClassGrid
           cls={pickedClass}
@@ -377,6 +410,8 @@ export default function ScreenTimetable({ E, refresh, role, session }) {
           isTeacher={isTeacher}
           myStaffId={myStaffId}
           allClasses={allClasses}
+          periods={PERIODS}
+          periodTimes={periodTimes}
           onCellClick={(day, period) => {
             if (!isManager) return;
             const current = entryByKey.get(`${pickedClass}-${day}-${period}`);
@@ -409,6 +444,15 @@ export default function ScreenTimetable({ E, refresh, role, session }) {
           onToast={showToast}
         />
       )}
+
+      {periodEditorOpen && canEditPeriods && (
+        <PeriodEditorModal
+          initial={periodList}
+          onClose={() => setPeriodEditorOpen(false)}
+          onSaved={(saved) => { setPeriodList(saved); setPeriodEditorOpen(false); showToast(`Saved ${saved.length} period timings`, "ok"); }}
+          onError={(msg) => showToast(msg, "err")}
+        />
+      )}
     </div>
   );
 }
@@ -439,7 +483,7 @@ function ClassPicker({ classKeys, value, isTeacher, onChange, allClasses }) {
 // --------------------------------------------------------------------------
 // Class grid — shows a full week × 7 periods for one class.
 // --------------------------------------------------------------------------
-function ClassGrid({ cls, entryByKey, canEdit, isTeacher, myStaffId, onCellClick, allClasses }) {
+function ClassGrid({ cls, entryByKey, canEdit, isTeacher, myStaffId, onCellClick, allClasses, periods = [], periodTimes = {} }) {
   return (
     <div className="card" style={{ overflowX: "auto" }}>
       <div className="card-head">
@@ -460,11 +504,11 @@ function ClassGrid({ cls, entryByKey, canEdit, isTeacher, myStaffId, onCellClick
             ))}
           </div>
           {/* Body rows */}
-          {PERIODS.map((p) => (
+          {periods.map((p) => (
             <div key={p} style={{ display: "grid", gridTemplateColumns: `90px repeat(${DAYS.length}, 1fr)`, gap: 6, marginBottom: 6 }}>
               <div style={{ display: "flex", flexDirection: "column", justifyContent: "center", padding: "6px 8px", background: "var(--bg-2)", borderRadius: 6 }}>
                 <div style={{ fontSize: 12, fontWeight: 600 }}>P{p}</div>
-                <div style={{ fontSize: 10, color: "var(--ink-4)", whiteSpace: "nowrap" }}>{PERIOD_TIMES[p]}</div>
+                <div style={{ fontSize: 10, color: "var(--ink-4)", whiteSpace: "nowrap" }}>{periodTimes[p]}</div>
               </div>
               {DAYS.map((d) => {
                 const entry = entryByKey.get(`${cls}-${d}-${p}`);
@@ -525,7 +569,7 @@ function ClassGrid({ cls, entryByKey, canEdit, isTeacher, myStaffId, onCellClick
 // Teacher's "my schedule" grid — same layout as ClassGrid but each cell shows
 // the class instead of the teacher (since the teacher is always *me*).
 // --------------------------------------------------------------------------
-function TeacherGrid({ schedule, allClasses }) {
+function TeacherGrid({ schedule, allClasses, periods = [], periodTimes = {} }) {
   const slotsToday = schedule ? schedule.size : 0;
   return (
     <div className="card" style={{ overflowX: "auto" }}>
@@ -545,11 +589,11 @@ function TeacherGrid({ schedule, allClasses }) {
               </div>
             ))}
           </div>
-          {PERIODS.map((p) => (
+          {periods.map((p) => (
             <div key={p} style={{ display: "grid", gridTemplateColumns: `90px repeat(${DAYS.length}, 1fr)`, gap: 6, marginBottom: 6 }}>
               <div style={{ display: "flex", flexDirection: "column", justifyContent: "center", padding: "6px 8px", background: "var(--bg-2)", borderRadius: 6 }}>
                 <div style={{ fontSize: 12, fontWeight: 600 }}>P{p}</div>
-                <div style={{ fontSize: 10, color: "var(--ink-4)", whiteSpace: "nowrap" }}>{PERIOD_TIMES[p]}</div>
+                <div style={{ fontSize: 10, color: "var(--ink-4)", whiteSpace: "nowrap" }}>{periodTimes[p]}</div>
               </div>
               {DAYS.map((d) => {
                 const entry = schedule?.get(`${d}-${p}`);
@@ -802,6 +846,91 @@ function SlotEditorModal({
           </div>
         </div>
       </form>
+    </ModalShell>
+  );
+}
+
+// --------------------------------------------------------------------------
+// Period editor — admin-only modal to set the whole-school period timings.
+// Add/remove rows to change the number of periods; each needs an HH:MM
+// start + end. Saved via PUT /api/settings/periods (admin-gated server-side).
+// --------------------------------------------------------------------------
+function PeriodEditorModal({ initial, onClose, onSaved, onError }) {
+  const [rows, setRows] = useState(
+    (initial && initial.length ? initial : DEFAULT_PERIOD_LIST).map((p) => ({ start: p.start, end: p.end }))
+  );
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const setRow = (i, key, val) => setRows((rs) => rs.map((r, idx) => (idx === i ? { ...r, [key]: val } : r)));
+  const addRow = () => setRows((rs) => [...rs, { start: "", end: "" }]);
+  const removeRow = (i) => setRows((rs) => rs.filter((_, idx) => idx !== i));
+
+  async function save() {
+    const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+    const cleaned = rows
+      .map((r) => ({ start: String(r.start || "").trim(), end: String(r.end || "").trim() }))
+      .filter((r) => r.start && r.end);
+    if (!cleaned.length) { setErr("Add at least one period with a start and end time."); return; }
+    for (const r of cleaned) {
+      if (!HHMM.test(r.start) || !HHMM.test(r.end)) {
+        setErr(`"${r.start || "?"} – ${r.end || "?"}" isn't a valid HH:MM time.`); return;
+      }
+    }
+    const periods = cleaned.map((r, i) => ({ period: i + 1, start: r.start, end: r.end }));
+    setBusy(true); setErr("");
+    try {
+      const res = await fetch("/api/settings/periods", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ periods }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || !j.ok) throw new Error(j.error || "Failed to save");
+      onSaved?.(j.periods);
+    } catch (e) { setErr(e.message); onError?.(e.message); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <ModalShell
+      title="Period timings"
+      sub="Whole-school · applies to every class. Only the admin can change these."
+      onClose={onClose}
+      width={460}
+    >
+      <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "44px 1fr 1fr 32px", gap: 8, alignItems: "center" }}>
+          <div />
+          <div style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: 0.4 }}>Start</div>
+          <div style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: 0.4 }}>End</div>
+          <div />
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {rows.map((r, i) => (
+            <div key={i} style={{ display: "grid", gridTemplateColumns: "44px 1fr 1fr 32px", gap: 8, alignItems: "center" }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--ink-2)" }}>P{i + 1}</div>
+              <input className="input" type="time" value={r.start} onChange={(e) => setRow(i, "start", e.target.value)} />
+              <input className="input" type="time" value={r.end} onChange={(e) => setRow(i, "end", e.target.value)} />
+              <button type="button" className="icon-btn" title="Remove this period" onClick={() => removeRow(i)} disabled={rows.length <= 1}>
+                <Icon name="x" size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+        <button type="button" className="btn sm" onClick={addRow} style={{ alignSelf: "flex-start" }}>
+          <Icon name="plus" size={11} />Add period
+        </button>
+
+        {err && <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "9px 12px", borderRadius: 7, fontSize: 12 }}>{err}</div>}
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 2 }}>
+          <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+          <button type="button" className="btn accent" onClick={save} disabled={busy}>
+            <Icon name="check" size={13} />{busy ? "Saving…" : "Save timings"}
+          </button>
+        </div>
+      </div>
     </ModalShell>
   );
 }

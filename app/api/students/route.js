@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { addStudent, archiveStudent, addPendingFee, logAudit, updateStudent, provisionParentLogin } from "@/lib/db";
+import { addStudent, archiveStudent, seedStudentTermFees, logAudit, updateStudent, provisionParentLogin } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 
 const monthYear = () =>
@@ -66,30 +66,34 @@ export async function POST(req) {
     joined: monthYear(),
   };
 
-  // Fee amount: caller may override the auto-derived term fee at admission
-  // time (custom scholarship, sibling discount, sponsored seat, etc).
-  // Floor to integer rupees; reject negatives.
-  let feeAmount = termFeeFor(row.cls);
+  // Optional override of the auto-derived fee total at admission time (custom
+  // scholarship, sibling discount, sponsored seat). When given it becomes
+  // Term I; otherwise the per-class fee structure decides the term split.
+  let overrideTotal = null;
   if (body.feeAmount != null && body.feeAmount !== "") {
     const n = Math.floor(Number(body.feeAmount));
     if (!Number.isFinite(n) || n < 0) {
       return NextResponse.json({ ok: false, error: "Fee amount must be 0 or more" }, { status: 400 });
     }
-    feeAmount = n;
+    overrideTotal = n;
   }
 
   const student = await addStudent(row);
-  if (feeAmount > 0) {
-    await addPendingFee({
-      id: row.id,
-      name: row.name,
-      cls: row.cls,
-      amount: feeAmount,
-      due: "in 7 days",
-      overdue: false,
-    });
+
+  // Compulsory term-wise recording: every student gets Term I/II/III upfront
+  // (plus Application + Van when configured), created here and verified before
+  // we return — so a silent partial save can't leave a student fee-less.
+  let feeRows = [];
+  try {
+    feeRows = await seedStudentTermFees(student, { overrideTotal });
+  } catch (e) {
+    return NextResponse.json(
+      { ok: false, error: `Student saved but term-wise fee recording failed: ${e.message}` },
+      { status: 500 }
+    );
   }
-  await logAudit("Rashmi Iyer", "New admission", `${row.id} ${row.name} · fee ₹${feeAmount.toLocaleString("en-IN")}`);
+  const feeTotal = feeRows.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+  await logAudit("Rashmi Iyer", "New admission", `${row.id} ${row.name} · fee ₹${feeTotal.toLocaleString("en-IN")} (term-wise)`);
 
   // Auto-provision a parent login scoped to this child so the parent can sign
   // in immediately. Email may be supplied at admission time; otherwise we

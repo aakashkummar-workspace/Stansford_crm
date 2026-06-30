@@ -1,13 +1,9 @@
 import { NextResponse } from "next/server";
-import { restoreStudent, addPendingFee, logAudit } from "@/lib/db";
+import { restoreStudent, seedStudentTermFees, logAudit } from "@/lib/db";
 
-function termFeeFor(cls) {
-  const n = Number(String(cls).split("-")[0]) || 1;
-  return 14000 + n * 1000;
-}
-
-// Bring an archived student back to active. Re-creates a pending fee for the
-// current term so they show up in Fees & UPI again.
+// Bring an archived student back to active. Re-creates the full term-wise fee
+// record (Term I/II/III, + Application/Van when configured) so they show up in
+// Fees & UPI again.
 export async function POST(req) {
   let body; try { body = await req.json(); } catch { body = null; }
   const id = body?.id;
@@ -16,14 +12,7 @@ export async function POST(req) {
     const restored = await restoreStudent(id);
     if (!restored) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 });
     try {
-      await addPendingFee({
-        id: restored.id,
-        name: restored.name,
-        cls: restored.cls,
-        amount: termFeeFor(restored.cls),
-        due: "in 7 days",
-        overdue: false,
-      });
+      await seedStudentTermFees(restored);
     } catch {}
     try { await logAudit("Rashmi Iyer", "Restored student", `${restored.id} ${restored.name}`); } catch {}
     return NextResponse.json({ ok: true, student: restored });

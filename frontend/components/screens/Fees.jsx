@@ -18,6 +18,9 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
   const school = resolveSchool(E?.SETTINGS);
   const actor  = session?.name || null;
   const isParent = role === "parent";
+  // Admin, principal and the school accountant may edit the per-class fee
+  // structure (term amounts + application + van).
+  const canEditStructure = role === "admin" || role === "principal" || role === "school_accountant";
   // ---------- core state ----------
   // Parent-aware initial selection: pick the first PENDING (or the first
   // PAID) for the currently-logged-in child, not whichever happens to be
@@ -89,6 +92,7 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
   // brand-new pending row. Lets the school collect Application, Kit, ECA,
   // Uniform, Term I/II/III, Van, STEM, Annual Day fees as separate items.
   const [addFeeOpen, setAddFeeOpen] = useState(false);
+  const [structureOpen, setStructureOpen] = useState(false);
 
   const handleAddFee = async (payload) => {
     const r = await fetch("/api/fees/add", {
@@ -644,6 +648,11 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
               <button className="btn" onClick={() => setAddFeeOpen(true)} title="Create a new pending fee item (Kit, ECA, Term I…)">
                 <Icon name="plus" size={13} />Add fee
               </button>
+              {canEditStructure && (
+                <button className="btn" onClick={() => setStructureOpen(true)} title="Set per-class Term I/II/III, Application and Van fee amounts">
+                  <Icon name="settings" size={13} />Fee structure
+                </button>
+              )}
               <div style={{ position: "relative" }}>
                 <button className="btn accent" onClick={headerCollect}>
                   <Icon name="plus" size={13} />Collect fee
@@ -1189,6 +1198,14 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
           }}
         />
       )}
+
+      {structureOpen && canEditStructure && (
+        <FeeStructureModal
+          classes={E.CLASSES || []}
+          onClose={() => setStructureOpen(false)}
+          onSaved={() => { setStructureOpen(false); flash("Fee structure saved", "ok"); }}
+        />
+      )}
     </div>
   );
 }
@@ -1528,6 +1545,144 @@ function EditFeeAmountModal({ fee, onClose, onSave }) {
 // (Application, Kit, ECA, Uniform, Term I/II/III, Van, STEM, Annual Day).
 // Lets the school collect more than one fee per student per term, each
 // printed on its own receipt.
+// ---------- fee structure editor (admin / principal / school accountant) ----------
+// Per-class amounts for Term I/II/III + Application + Van. These drive the
+// term-wise records created for every new student at admission.
+function FeeStructureModal({ classes, onClose, onSaved }) {
+  const FIELDS = [
+    { key: "term1", label: "Term I" },
+    { key: "term2", label: "Term II" },
+    { key: "term3", label: "Term III" },
+    { key: "application", label: "Admission" },
+    { key: "transport", label: "Transport" },
+  ];
+  const classNums = useMemo(() => {
+    const set = new Set();
+    (classes || []).forEach((c) => { const n = Number(c.n); if (n) set.add(n); });
+    return [...set].sort((a, b) => a - b);
+  }, [classes]);
+
+  const [rows, setRows] = useState({});   // { [n]: { term1, term2, term3, application, van } }
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const r = await fetch("/api/fees/structure");
+        const j = await r.json().catch(() => ({}));
+        const perClass = (j?.ok && j.structure?.perClass) || {};
+        if (alive) setRows(perClass);
+      } catch {}
+      finally { if (alive) setLoading(false); }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  const setCell = (n, key, val) => setRows((r) => ({ ...r, [n]: { ...(r[n] || {}), [key]: val } }));
+
+  async function save() {
+    setBusy(true); setErr("");
+    const perClass = {};
+    for (const n of classNums) {
+      const row = rows[n] || {};
+      perClass[String(n)] = {
+        term1: Math.max(0, Math.floor(Number(row.term1) || 0)),
+        term2: Math.max(0, Math.floor(Number(row.term2) || 0)),
+        term3: Math.max(0, Math.floor(Number(row.term3) || 0)),
+        application: Math.max(0, Math.floor(Number(row.application) || 0)),
+        transport: Math.max(0, Math.floor(Number(row.transport) || 0)),
+      };
+    }
+    try {
+      const r = await fetch("/api/fees/structure", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ structure: { perClass } }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "Failed to save");
+      onSaved?.();
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)", display: "grid", placeItems: "center", zIndex: 250, padding: 16, overflowY: "auto" }}>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 640, maxHeight: "calc(100vh - 32px)", overflowY: "auto" }}>
+        <div className="card-head">
+          <div>
+            <div className="card-title">Fee structure</div>
+            <div className="card-sub">Per-class amounts (₹) · used to record Term I/II/III, Application and Van fees for every new student</div>
+          </div>
+          <button type="button" className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
+        <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {loading ? (
+            <div style={{ padding: 20, textAlign: "center", color: "var(--ink-4)", fontSize: 12 }}>Loading…</div>
+          ) : classNums.length === 0 ? (
+            <div style={{ padding: 20, textAlign: "center", color: "var(--ink-4)", fontSize: 12 }}>No classes on the roster yet.</div>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 560 }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: "left", padding: "6px 8px", color: "var(--ink-3)", fontWeight: 500 }}>Class</th>
+                    {FIELDS.map((f) => (
+                      <th key={f.key} style={{ textAlign: "right", padding: "6px 8px", color: "var(--ink-3)", fontWeight: 500 }}>{f.label}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {classNums.map((n) => (
+                    <tr key={n} style={{ borderTop: "1px solid var(--rule-2)" }}>
+                      <td style={{ padding: "6px 8px", whiteSpace: "nowrap", fontWeight: 600 }}>{formatClassLabel(`${n}-A`)}</td>
+                      {FIELDS.map((f) => (
+                        <td key={f.key} style={{ padding: "4px 4px" }}>
+                          <input
+                            className="input"
+                            type="number"
+                            min="0"
+                            inputMode="numeric"
+                            value={rows[n]?.[f.key] ?? ""}
+                            onChange={(e) => setCell(n, f.key, e.target.value)}
+                            style={{ width: 90, textAlign: "right" }}
+                          />
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div style={{ fontSize: 11, color: "var(--ink-4)" }}>
+            Term I/II/III are recorded for every student on admission. Application is added when its amount is above ₹0; Van is added only for students who have a transport route.
+          </div>
+
+          {err && <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "9px 12px", borderRadius: 7, fontSize: 12 }}>{err}</div>}
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="button" className="btn accent" onClick={save} disabled={busy || loading}>
+              <Icon name="check" size={13} />{busy ? "Saving…" : "Save structure"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AddFeeItemModal({ students, onClose, onSave }) {
   const [studentId, setStudentId] = useState(students[0]?.id || "");
   const [feeType, setFeeType]     = useState(FEE_TYPES[0].key);

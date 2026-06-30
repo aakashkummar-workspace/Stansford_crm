@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { addStudent, addPendingFee, logAudit, provisionParentLogin } from "@/lib/db";
+import { addStudent, seedStudentTermFees, logAudit, provisionParentLogin } from "@/lib/db";
 
 // Tiny CSV parser — handles quoted cells with commas inside.
 function parseCsv(text) {
@@ -187,18 +187,15 @@ export async function POST(req) {
       joined: monthYear(),
     };
     try {
-      await addStudent(row);
-      if (feeAmount) {
-        await addPendingFee({
-          id: row.id, name: row.name, cls: row.cls,
-          amount: feeAmount,
-          feeType: "annual",
-          due: "in 7 days", overdue: false,
-        });
-        feesIssued++;
-      } else {
-        feesSkipped++;
-      }
+      const saved = await addStudent(row);
+      // Compulsory term-wise recording for every imported student: Term I/II/III
+      // are always created. When the sheet quotes a per-row fees figure it
+      // becomes Term I (the school's annual total); otherwise the per-class
+      // fee structure decides the split.
+      await seedStudentTermFees(saved || row, {
+        overrideTotal: feeAmount ? feeAmount : null,
+      });
+      if (feeAmount) feesIssued++; else feesSkipped++;
       // Mirror the single-admission flow: each imported student gets a
       // parent login scoped to their own child. Failures here are
       // non-fatal — the student row is already saved, the admin can

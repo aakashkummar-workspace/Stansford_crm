@@ -104,27 +104,39 @@ export default function ScreenStudents({ E, refresh, role, session, searchFocus,
   // separate lines so admins see what they owe per category.
   const pendingFees = E.PENDING_FEES || [];
   const recentFees  = E.RECENT_FEES  || [];
+  // Per-student fee summary split into the five editable components — Term I,
+  // Term II, Term III, Application (admission) and Transport — plus an
+  // `academic` rollup (the three terms + application), an `other` catch-all
+  // for any extra fee types (Kit, ECA…), and the overall outstanding/paid.
+  // Each bucket carries outstanding (pending_fees) + paid (recent_fees).
+  // Legacy single-fee rows (id === studentId, type "annual"/"term1") fold
+  // into Term I so existing students still render until their breakdown is set.
+  const blankFee = () => ({ outstanding: 0, paid: 0 });
+  const KNOWN_BUCKET = { term1: "term1", term2: "term2", term3: "term3", application: "application", transport: "transport", annual: "term1", "": "term1" };
+  const bucketOf = (ft) => KNOWN_BUCKET[(ft || "").toLowerCase()] || "other";
   const feeSummary = useMemo(() => {
     const m = new Map();
     const getEntry = (sid) => {
       let e = m.get(sid);
       if (!e) {
         e = {
-          academic:  { outstanding: 0, paid: 0 },
-          transport: { outstanding: 0, paid: 0 },
-          outstanding: 0, paid: 0, // legacy aggregate (still consumed elsewhere)
+          term1: blankFee(), term2: blankFee(), term3: blankFee(),
+          application: blankFee(), transport: blankFee(), other: blankFee(),
+          academic: blankFee(),    // term1+term2+term3+application
+          outstanding: 0, paid: 0, // overall across every component
         };
         m.set(sid, e);
       }
       return e;
     };
     for (const f of pendingFees) {
-      const sid = f.studentId || f.id;
+      const sid = f.studentId || (f.id ? String(f.id).split("__")[0] : null);
       if (!sid) continue;
       const entry = getEntry(sid);
       const amt = Number(f.amount) || 0;
-      const bucket = (f.feeType || f.fee_type) === "transport" ? "transport" : "academic";
-      entry[bucket].outstanding += amt;
+      const b = bucketOf(f.feeType || f.fee_type);
+      entry[b].outstanding += amt;
+      if (b !== "transport" && b !== "other") entry.academic.outstanding += amt;
       entry.outstanding += amt;
     }
     for (const r of recentFees) {
@@ -132,16 +144,17 @@ export default function ScreenStudents({ E, refresh, role, session, searchFocus,
       if (!sid) continue;
       const entry = getEntry(sid);
       const amt = Number(r.amount) || 0;
-      const bucket = (r.feeType || r.fee_type) === "transport" ? "transport" : "academic";
-      entry[bucket].paid += amt;
+      const b = bucketOf(r.feeType || r.fee_type);
+      entry[b].paid += amt;
+      if (b !== "transport" && b !== "other") entry.academic.paid += amt;
       entry.paid += amt;
     }
     return m;
   }, [pendingFees, recentFees]);
   const summaryFor = (studentId) => feeSummary.get(studentId) || {
-    academic:  { outstanding: 0, paid: 0 },
-    transport: { outstanding: 0, paid: 0 },
-    outstanding: 0, paid: 0,
+    term1: blankFee(), term2: blankFee(), term3: blankFee(),
+    application: blankFee(), transport: blankFee(), other: blankFee(),
+    academic: blankFee(), outstanding: 0, paid: 0,
   };
 
   // Map of studentId → TC status, so we can stamp a "TC" chip next to
@@ -768,23 +781,19 @@ export default function ScreenStudents({ E, refresh, role, session, searchFocus,
           student={feeEditFor}
           summary={summaryFor(feeEditFor.id)}
           onClose={() => setFeeEditFor(null)}
-          onSubmit={async ({ newTotal, newPaid, newTransport }) => {
-            const payload = { id: feeEditFor.id, total: newTotal, paid: newPaid };
-            if (newTransport != null) payload.transport = newTransport;
-            const { ok, json } = await safeFetch("/api/fees/edit", {
+          onSubmit={async (components) => {
+            const payload = { id: feeEditFor.id, ...components };
+            const { ok, json } = await safeFetch("/api/fees/components", {
               method: "POST",
               headers: { "content-type": "application/json" },
               body: JSON.stringify(payload),
             });
             if (ok) {
-              const transportNote = newTransport != null
-                ? ` · transport ₹${Number(newTransport).toLocaleString("en-IN")}`
-                : "";
-              flash(`Updated ${feeEditFor.name}'s fees · total ₹${newTotal.toLocaleString("en-IN")} · paid ₹${newPaid.toLocaleString("en-IN")}${transportNote} · undo available for 1 hour`);
+              flash(`Updated ${feeEditFor.name}'s fees · overall ₹${Number(json.overall || 0).toLocaleString("en-IN")}`);
               await refresh?.();
               setFeeEditFor(null);
             } else {
-              flash(json.error || "Could not update fee amount", "bad");
+              flash(json.error || "Could not update fees", "bad");
             }
           }}
         />
@@ -836,17 +845,25 @@ function Toast({ toast }) {
 // modal and the API enforce increase-only so the Undo button is the only
 // way to legitimately shrink fees, and only within the 1-hour window.
 function FeeCell({ student, summary, canEdit, onEdit, undoable, onUndo }) {
-  const academic  = summary.academic  || { outstanding: 0, paid: 0 };
-  const transport = summary.transport || { outstanding: 0, paid: 0 };
+  const overallOut  = summary.outstanding || 0;
+  const overallPaid = summary.paid || 0;
+  const overallTotal = overallOut + overallPaid;
   const hasTransport = student.transport && student.transport !== "—";
 
-  const academicTotal  = academic.outstanding + academic.paid;
-  const transportTotal = transport.outstanding + transport.paid;
-  const everyTotal     = academicTotal + transportTotal;
-
-  if (everyTotal === 0 && !undoable) {
+  if (overallTotal === 0 && !undoable && !hasTransport) {
     return <span style={{ fontSize: 12, color: "var(--ink-4)" }}>—</span>;
   }
+
+  const fmt = (n) => "₹" + Number(n).toLocaleString("en-IN");
+  // Per-component outstanding breakdown (only the non-zero ones), shown as a
+  // compact line under the overall so admins see what makes up the total.
+  const breakdown = [
+    ["T1", summary.term1?.outstanding || 0],
+    ["T2", summary.term2?.outstanding || 0],
+    ["T3", summary.term3?.outstanding || 0],
+    ["Adm", summary.application?.outstanding || 0],
+    ["Trn", summary.transport?.outstanding || 0],
+  ].filter(([, v]) => v > 0);
 
   return (
     <div style={{ display: "inline-flex", alignItems: "flex-start", gap: 8 }}>
@@ -854,7 +871,7 @@ function FeeCell({ student, summary, canEdit, onEdit, undoable, onUndo }) {
         type="button"
         onClick={canEdit ? onEdit : undefined}
         disabled={!canEdit}
-        title={canEdit ? "Click to edit · fees can only be increased" : undefined}
+        title={canEdit ? "Click to edit the fee breakdown" : undefined}
         style={{
           background: "transparent", border: 0, padding: 0,
           cursor: canEdit ? "pointer" : "default",
@@ -862,18 +879,15 @@ function FeeCell({ student, summary, canEdit, onEdit, undoable, onUndo }) {
           color: "var(--ink)",
         }}
       >
-        {academicTotal > 0 ? (
-          <FeeLine label="Academic" outstanding={academic.outstanding} paid={academic.paid} canEdit={canEdit} showPencil />
+        {overallTotal > 0 ? (
+          <FeeLine label="Overall" outstanding={overallOut} paid={overallPaid} canEdit={canEdit} showPencil />
         ) : (
-          <FeeLine label="Academic" outstanding={0} paid={0} placeholder="—" canEdit={canEdit} showPencil />
+          <FeeLine label="Overall" outstanding={0} paid={0} placeholder="not set" canEdit={canEdit} showPencil />
         )}
-        {(transportTotal > 0 || hasTransport) && (
-          <FeeLine
-            label="Transport"
-            outstanding={transport.outstanding}
-            paid={transport.paid}
-            placeholder={transportTotal === 0 ? "not set" : null}
-          />
+        {breakdown.length > 0 && (
+          <span style={{ fontSize: 10, color: "var(--ink-4)", marginLeft: 66, fontFamily: "var(--font-mono)" }}>
+            {breakdown.map(([lbl, v]) => `${lbl} ${fmt(v)}`).join(" · ")}
+          </span>
         )}
       </button>
       {undoable && canEdit && (
@@ -949,30 +963,27 @@ function FeeLine({ label, outstanding, paid, placeholder = null, canEdit = false
   );
 }
 
-// Edit a student's fees. Three inputs:
-//   - Total fees: must be >= current academic total. Increase-only.
-//   - Already paid: must be >= currently-recorded academic paid. Increase-only.
-//   - Transport fee (only enabled when student has transport assigned):
-//     can be raised or cleared to 0, never silently shrunk.
-// The two academic inputs map to editStudentFee; transport maps to
-// setStudentTransportFee. Both are issued in the same POST so an admin
-// sees one row of toast feedback.
+// Edit a student's fee breakdown — five components: Term I/II/III, Admission
+// and Transport. Each input is that component's OUTSTANDING amount; the overall
+// fee is their live sum. Saving writes each via /api/fees/components (0 clears
+// it) and absorbs any legacy single-fee row so the total never double-counts.
 function EditFeeModal({ student, summary, onClose, onSubmit }) {
-  const academic  = summary.academic  || { outstanding: 0, paid: 0 };
-  const transport = summary.transport || { outstanding: 0, paid: 0 };
-  const outstanding = academic.outstanding;
-  const paid = academic.paid;
-  const currentTotal = outstanding + paid;
-  const currentTransport = transport.outstanding + transport.paid;
-  // Transport fee is always editable from this modal, even for students
-  // without a route assigned — the admin can charge the van fee before
-  // finalizing pickup. We still surface the route label when one exists.
-  const hasTransport = true;
+  const COMPONENTS = [
+    { key: "term1", label: "Term I" },
+    { key: "term2", label: "Term II" },
+    { key: "term3", label: "Term III" },
+    { key: "application", label: "Admission" },
+    { key: "transport", label: "Transport" },
+  ];
+  const fmt = (n) => "₹" + Number(n).toLocaleString("en-IN");
+  const cur = (k) => (summary[k]?.outstanding) || 0;
   const routeLabel = student.transport && student.transport !== "—" ? student.transport : null;
 
-  const [totalStr, setTotalStr] = useState(String(currentTotal));
-  const [paidStr,  setPaidStr]  = useState(String(paid));
-  const [transportStr, setTransportStr] = useState(String(currentTransport));
+  const [vals, setVals] = useState(() => {
+    const o = {};
+    for (const c of COMPONENTS) o[c.key] = String(cur(c.key));
+    return o;
+  });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -982,50 +993,23 @@ function EditFeeModal({ student, summary, onClose, onSubmit }) {
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const fmt = (n) => "₹" + Number(n).toLocaleString("en-IN");
-  const parsePositive = (s, { allowZero = false } = {}) => {
-    const digits = String(s).replace(/[^\d]/g, "");
-    if (!digits && !allowZero) return null;
-    if (!digits) return 0;
-    const n = parseInt(digits, 10);
-    return Number.isFinite(n) && n >= 0 ? n : null;
-  };
-  const newTotal = parsePositive(totalStr, { allowZero: true });
-  const newPaid  = parsePositive(paidStr,  { allowZero: true });
-  const newTransport = hasTransport ? parsePositive(transportStr, { allowZero: true }) : currentTransport;
+  const setVal = (k, v) => setVals((s) => ({ ...s, [k]: String(v).replace(/[^\d]/g, "") }));
+  const num = (k) => { const n = parseInt(vals[k] || "0", 10); return Number.isFinite(n) && n >= 0 ? n : 0; };
 
-  const totalReduced = newTotal != null && newTotal < currentTotal;
-  const paidReduced  = newPaid  != null && newPaid  < paid;
-  const paidExceedsTotal = newTotal != null && newPaid != null && newPaid > newTotal;
-  // Transport is increase-or-clear: you can keep it equal, raise it, or
-  // set it to 0. Any other reduction is rejected (same shape as academic).
-  const transportReduced =
-    hasTransport && newTransport != null && newTransport !== 0 && newTransport < currentTransport;
-  const academicChanged  = newTotal !== currentTotal || newPaid !== paid;
-  const transportChanged = hasTransport && newTransport !== currentTransport;
-  const nothingChanged = !academicChanged && !transportChanged;
-  const valid =
-    newTotal != null && newPaid != null
-    && (!hasTransport || newTransport != null)
-    && !totalReduced && !paidReduced && !paidExceedsTotal && !transportReduced && !nothingChanged;
-  const canSubmit = valid && !busy;
-
-  const totalDelta = (newTotal ?? currentTotal) - currentTotal;
-  const paidDelta  = (newPaid  ?? paid) - paid;
-  const transportDelta = hasTransport ? (newTransport ?? currentTransport) - currentTransport : 0;
-  const projectedOutstanding = (newTotal ?? currentTotal) - (newPaid ?? paid);
+  const overall = COMPONENTS.reduce((s, c) => s + num(c.key), 0);
+  const otherOutstanding = (summary.other?.outstanding) || 0;
+  const paidSoFar = (summary.paid) || 0;
+  const changed = COMPONENTS.some((c) => num(c.key) !== cur(c.key));
+  const canSubmit = changed && !busy;
 
   const submit = async (e) => {
     e?.preventDefault();
     if (!canSubmit) return;
     setBusy(true); setErr("");
     try {
-      await onSubmit({
-        newTotal, newPaid,
-        // Only forward transport if it actually changed — saves a no-op
-        // setStudentTransportFee call on the server.
-        newTransport: transportChanged ? newTransport : null,
-      });
+      const payload = {};
+      for (const c of COMPONENTS) payload[c.key] = num(c.key);
+      await onSubmit(payload);
     } catch (ex) {
       setErr(ex?.message || "Update failed");
       setBusy(false);
@@ -1037,138 +1021,52 @@ function EditFeeModal({ student, summary, onClose, onSubmit }) {
       onClick={onClose}
       style={{
         position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)",
-        display: "grid", placeItems: "center", zIndex: 250, padding: 16,
+        display: "grid", placeItems: "center", zIndex: 250, padding: 16, overflowY: "auto",
       }}
     >
-      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 480 }}>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 460, maxHeight: "calc(100vh - 32px)", overflowY: "auto" }}>
         <div className="card-head">
           <div>
             <div className="card-title">Edit fees · {student.name}</div>
-            <div className="card-sub">{student.id} · entries are increase-only · 1-hour undo after save</div>
+            <div className="card-sub">{student.id} · set each component — the overall is their sum</div>
           </div>
           <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
         </div>
-        <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {COMPONENTS.map((c) => (
+            <label key={c.key} style={{ display: "grid", gridTemplateColumns: "130px 1fr", gap: 10, alignItems: "center" }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: "var(--ink-2)" }}>
+                {c.label}
+                {c.key === "transport" && routeLabel ? <span style={{ fontWeight: 400, color: "var(--ink-4)" }}> · {routeLabel}</span> : null}
+                <span style={{ color: "var(--ink-4)", fontWeight: 400 }}> (₹)</span>
+              </span>
+              <input
+                className="input"
+                inputMode="numeric"
+                value={vals[c.key]}
+                onChange={(e) => setVal(c.key, e.target.value)}
+                placeholder="0"
+              />
+            </label>
+          ))}
+
           <div style={{
-            background: "var(--bg-2)", border: "1px solid var(--rule-2)",
-            borderRadius: 9, padding: "12px 14px",
-            display: "flex", flexDirection: "column", gap: 6, fontSize: 12.5,
+            background: "var(--accent-soft)", border: "1px solid var(--accent)",
+            borderRadius: 8, padding: "11px 13px",
+            display: "flex", justifyContent: "space-between", alignItems: "center",
           }}>
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <span style={{ color: "var(--ink-3)" }}>Current total</span>
-              <span style={{ fontFamily: "var(--font-mono)", color: "var(--ink)" }}>{fmt(currentTotal)}</span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <span style={{ color: "var(--ink-3)" }}>Recorded as paid</span>
-              <span style={{ fontFamily: "var(--font-mono)", color: paid > 0 ? "var(--ok)" : "var(--ink-3)" }}>{fmt(paid)}</span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <span style={{ color: "var(--ink-3)" }}>Outstanding</span>
-              <span style={{ fontFamily: "var(--font-mono)", color: outstanding > 0 ? "var(--warn)" : "var(--ink-3)" }}>{fmt(outstanding)}</span>
-            </div>
-            <div style={{
-              display: "flex", justifyContent: "space-between",
-              paddingTop: 6, marginTop: 2, borderTop: "1px dashed var(--rule-2)",
-            }}>
-              <span style={{ color: "var(--ink-3)" }}>
-                Transport fee{routeLabel ? ` · ${routeLabel}` : ""}
-              </span>
-              <span style={{ fontFamily: "var(--font-mono)", color: currentTransport > 0 ? "var(--ink)" : "var(--ink-4)" }}>
-                {currentTransport > 0 ? fmt(currentTransport) : "not set"}
-              </span>
-            </div>
+            <span style={{ color: "var(--ink-2)", fontWeight: 600, fontSize: 13 }}>Overall fees</span>
+            <span style={{ fontFamily: "var(--font-mono)", fontWeight: 700, fontSize: 15, color: "var(--ink)" }}>{fmt(overall)}</span>
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>
-                Total fees (₹)
-              </span>
-              <input
-                className="input"
-                autoFocus
-                inputMode="numeric"
-                value={totalStr}
-                onChange={(e) => setTotalStr(e.target.value.replace(/[^\d]/g, ""))}
-                placeholder={String(currentTotal)}
-                style={totalReduced ? { borderColor: "var(--bad)" } : undefined}
-              />
-              <span style={{ fontSize: 11, color: totalReduced ? "var(--bad)" : "var(--ink-4)" }}>
-                {totalReduced
-                  ? `Cannot reduce. Floor is ${fmt(currentTotal)}.`
-                  : `Floor ${fmt(currentTotal)} · type a higher number to add charges.`}
-              </span>
-            </label>
-
-            <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>
-                Already paid (₹)
-              </span>
-              <input
-                className="input"
-                inputMode="numeric"
-                value={paidStr}
-                onChange={(e) => setPaidStr(e.target.value.replace(/[^\d]/g, ""))}
-                placeholder={String(paid)}
-                style={paidReduced || paidExceedsTotal ? { borderColor: "var(--bad)" } : undefined}
-              />
-              <span style={{ fontSize: 11, color: (paidReduced || paidExceedsTotal) ? "var(--bad)" : "var(--ink-4)" }}>
-                {paidReduced
-                  ? `Cannot reduce. Floor is ${fmt(paid)}.`
-                  : paidExceedsTotal
-                    ? "Already paid can't exceed total."
-                    : `Floor ${fmt(paid)} · raise to record offline cash.`}
-              </span>
-            </label>
-          </div>
-
-          <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>
-              Transport fee{routeLabel ? ` · ${routeLabel}` : ""} (₹)
-            </span>
-            <input
-              className="input"
-              inputMode="numeric"
-              value={transportStr}
-              onChange={(e) => setTransportStr(e.target.value.replace(/[^\d]/g, ""))}
-              placeholder={String(currentTransport)}
-              style={transportReduced ? { borderColor: "var(--bad)" } : undefined}
-            />
-            <span style={{ fontSize: 11, color: transportReduced ? "var(--bad)" : "var(--ink-4)" }}>
-              {transportReduced
-                ? `Cannot reduce. Set to 0 to clear, or to ≥ ${fmt(currentTransport)} to raise.`
-                : currentTransport === 0
-                  ? routeLabel
-                    ? "Not yet set. Enter the van fee — it adds to this student's overall pending fees."
-                    : "Not yet set. Optional — leave 0 if this student doesn't use transport. Adds to overall pending fees once set."
-                  : `Current ${fmt(currentTransport)} · raise to add charges, or set to 0 to clear.`}
-            </span>
-          </label>
-
-          {valid && (
-            <div style={{
-              background: "var(--accent-soft)", border: "1px solid var(--accent)",
-              borderRadius: 8, padding: "10px 12px", fontSize: 12, color: "var(--ink-2)",
-              lineHeight: 1.55,
-            }}>
-              {totalDelta > 0 && (
-                <div>↑ Total +{fmt(totalDelta)} added as a new charge.</div>
-              )}
-              {paidDelta > 0 && (
-                <div>✓ Recording ₹{fmt(paidDelta).replace("₹", "")} as paid (method <strong>offline-entry</strong>).</div>
-              )}
-              {transportDelta > 0 && (
-                <div>🚐 Transport fee set to {fmt(newTransport)} (+{fmt(transportDelta)}). Adds to overall pending fees.</div>
-              )}
-              {transportChanged && newTransport === 0 && (
-                <div>🚐 Transport fee cleared (was {fmt(currentTransport)}).</div>
-              )}
-              <div style={{ marginTop: 4, color: "var(--ink-2)", fontWeight: 500 }}>
-                New academic outstanding: <span style={{ color: projectedOutstanding > 0 ? "var(--warn)" : "var(--ok)", fontFamily: "var(--font-mono)" }}>{fmt(projectedOutstanding)}</span>
-                {hasTransport && newTransport > 0 && (
-                  <> · transport: <span style={{ color: "var(--warn)", fontFamily: "var(--font-mono)" }}>{fmt(newTransport)}</span></>
-                )}
-              </div>
+          {otherOutstanding > 0 && (
+            <div style={{ fontSize: 11, color: "var(--ink-4)" }}>
+              + {fmt(otherOutstanding)} in other fee items (Kit, ECA…) not editable here — still counted in this student's total due.
+            </div>
+          )}
+          {paidSoFar > 0 && (
+            <div style={{ fontSize: 11, color: "var(--ink-4)" }}>
+              {fmt(paidSoFar)} already collected (recorded on the Fees screen). Enter the amounts still outstanding above.
             </div>
           )}
 

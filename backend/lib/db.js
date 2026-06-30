@@ -1771,10 +1771,6 @@ export async function convertEnquiryToAdmission(enquiryId, opts = {}) {
   // indistinguishable downstream.
   const monthYear = new Date().toLocaleDateString("en-IN", { month: "short", year: "numeric" });
   const newStudentId = `STN-${9000 + Math.floor(Math.random() * 999)}`;
-  const termFeeFor = (cls) => {
-    const n = Number(String(cls).split("-")[0]) || 1;
-    return 14000 + n * 1000;
-  };
 
   // Reuse / create the student.
   // If the enquiry already names a student id (set on a previous convert),
@@ -1804,16 +1800,10 @@ export async function convertEnquiryToAdmission(enquiryId, opts = {}) {
       pickupStop: null,
       joined: monthYear,
     });
-    // Raise the opening pending fee so it shows up on Fees.
+    // Record the full term-wise fee (Term I/II/III, + Application/Van when
+    // configured) so the child shows up on Fees with a complete record.
     try {
-      await addPendingFee({
-        id: student.id,
-        name: student.name,
-        cls: student.cls,
-        amount: termFeeFor(student.cls),
-        due: "in 7 days",
-        overdue: false,
-      });
+      await seedStudentTermFees(student);
     } catch {}
   }
 
@@ -3988,6 +3978,327 @@ export async function writeSettings(patch) {
   }
   fileWrite(db);
   return readSettings();
+}
+
+// ---------- timetable period times (whole-school, admin-managed) ----------
+// Period start/end times are a single whole-school setting (not per class).
+// Stored under app_settings section "academic", key "periods" as a JSON
+// string: [{ period, start: "HH:MM", end: "HH:MM" }]. Nine periods by default.
+export const DEFAULT_PERIOD_TIMES = [
+  { period: 1, start: "08:00", end: "08:45" },
+  { period: 2, start: "08:45", end: "09:30" },
+  { period: 3, start: "09:30", end: "10:15" },
+  { period: 4, start: "10:30", end: "11:15" },
+  { period: 5, start: "11:15", end: "12:00" },
+  { period: 6, start: "12:45", end: "13:30" },
+  { period: 7, start: "13:30", end: "14:15" },
+  { period: 8, start: "14:15", end: "15:00" },
+  { period: 9, start: "15:00", end: "15:45" },
+];
+
+const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+// Drop malformed rows, then renumber 1..N so the grid is always gap-free.
+function sanitizePeriodList(list) {
+  if (!Array.isArray(list)) return null;
+  const out = [];
+  list.forEach((row, i) => {
+    const period = Number(row?.period) || i + 1;
+    const start = String(row?.start || "").trim();
+    const end = String(row?.end || "").trim();
+    if (!HHMM_RE.test(start) || !HHMM_RE.test(end)) return;
+    out.push({ period, start, end });
+  });
+  if (!out.length) return null;
+  return out
+    .sort((a, b) => a.period - b.period)
+    .map((r, i) => ({ period: i + 1, start: r.start, end: r.end }));
+}
+
+export async function readPeriodTimes() {
+  const settings = await readSettings().catch(() => ({}));
+  const raw = settings?.academic?.periods;
+  if (raw) {
+    try {
+      const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+      const clean = sanitizePeriodList(parsed);
+      if (clean) return clean;
+    } catch {}
+  }
+  return DEFAULT_PERIOD_TIMES;
+}
+
+export async function writePeriodTimes(list) {
+  const clean = sanitizePeriodList(list);
+  if (!clean) throw new Error("Provide at least one period with valid HH:MM start and end times.");
+  await writeSettings({ academic: { periods: JSON.stringify(clean) } });
+  return clean;
+}
+
+// ---------- fee structure + compulsory term-wise seeding ----------
+// The school's fee schedule per class number. Stored under app_settings
+// section "fees", key "structure" as a JSON string:
+//   { perClass: { "<n>": { term1, term2, term3, application, van } } }
+// Amounts are whole rupees. Classes with no entry fall back to a legacy
+// split of the old annual tuition so the school still sees sane numbers.
+const feeNum = (v) => Math.max(0, Math.floor(Number(v) || 0));
+
+export async function getFeeStructure() {
+  const settings = await readSettings().catch(() => ({}));
+  const raw = settings?.fees?.structure;
+  if (!raw) return { perClass: {} };
+  try {
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (parsed && typeof parsed === "object") {
+      return parsed.perClass ? parsed : { perClass: parsed };
+    }
+  } catch {}
+  return { perClass: {} };
+}
+
+export async function setFeeStructure(struct) {
+  const src = (struct && struct.perClass) || struct || {};
+  const perClass = {};
+  for (const k of Object.keys(src)) {
+    const n = Number(k);
+    if (!n || Number.isNaN(n)) continue;
+    const row = src[k] || {};
+    perClass[String(n)] = {
+      term1: feeNum(row.term1), term2: feeNum(row.term2), term3: feeNum(row.term3),
+      application: feeNum(row.application), transport: feeNum(row.transport),
+    };
+  }
+  const next = { perClass };
+  await writeSettings({ fees: { structure: JSON.stringify(next) } });
+  return next;
+}
+
+// Resolve the per-class fee breakdown used when seeding a new student.
+export async function resolveClassFees(cls) {
+  const n = Number(String(cls).split("-")[0]) || 1;
+  const struct = await getFeeStructure();
+  const pc = struct.perClass && struct.perClass[String(n)];
+  if (pc) {
+    return {
+      term1: feeNum(pc.term1), term2: feeNum(pc.term2), term3: feeNum(pc.term3),
+      application: feeNum(pc.application), transport: feeNum(pc.transport),
+    };
+  }
+  // Legacy fallback: split the old annual tuition (14000 + n*1000) in three.
+  const annual = 14000 + n * 1000;
+  const t = Math.round(annual / 3);
+  return { term1: t, term2: t, term3: annual - 2 * t, application: 0, transport: 0 };
+}
+
+// Upsert one pending-fee row by its (composite) id. Throws on a Supabase
+// error so a schema mismatch can never silently drop the row — this is the
+// "recorded correctly" guarantee (see the 2026-06-01 pending-fees migration,
+// which documents how ignored { error } returns lost every imported fee).
+async function upsertPendingFeeRow(row) {
+  const filled = { ...row, studentId: row.studentId || row.id, feeType: row.feeType || DEFAULT_FEE_TYPE };
+  if (supabaseEnabled) {
+    const up = await supabase.from("pending_fees").upsert(toPendingFee(filled), { onConflict: "id" });
+    if (up.error) throw new Error(`pending_fees upsert failed: ${up.error.message}`);
+    return filled;
+  }
+  const db = fileRead();
+  if (!Array.isArray(db.pendingFees)) db.pendingFees = [];
+  const idx = db.pendingFees.findIndex((f) => f.id === filled.id);
+  if (idx === -1) db.pendingFees.unshift(filled);
+  else db.pendingFees[idx] = { ...db.pendingFees[idx], ...filled };
+  fileWrite(db);
+  return filled;
+}
+
+// Which of term1/term2/term3 currently have NO pending row for this student.
+async function termFeesMissingFor(studentId) {
+  const have = new Set();
+  if (supabaseEnabled) {
+    const sel = await supabase.from("pending_fees").select("id, fee_type, student_id");
+    for (const r of sel.data || []) {
+      const sid = r.student_id || String(r.id).split("__")[0];
+      if (sid !== studentId) continue;
+      have.add(r.fee_type || String(r.id).split("__")[1]);
+    }
+  } else {
+    const db = fileRead();
+    for (const f of db.pendingFees || []) {
+      const sid = f.studentId || String(f.id).split("__")[0];
+      if (sid !== studentId) continue;
+      have.add(f.feeType || String(f.id).split("__")[1]);
+    }
+  }
+  return ["term1", "term2", "term3"].filter((t) => !have.has(t));
+}
+
+// Create the full term-wise fee record for a student. term1+term2+term3 are
+// ALWAYS written (even ₹0) so every student carries a complete three-term
+// record; application + van are written only when configured > 0 (van only
+// for students who actually have a transport route). All three terms are
+// created upfront regardless of join month, then verified before returning.
+export async function seedStudentTermFees(student, opts = {}) {
+  if (!student?.id) throw new Error("student required");
+  const struct = await resolveClassFees(student.cls);
+  const due = opts.due || "in 7 days";
+  const hasTransport = student.transport && student.transport !== "—";
+
+  // Legacy single-total override (manual admission "fee amount", or a bulk
+  // import's per-row annual figure): it becomes Term I, with Term II/III at
+  // ₹0 — preserving the quoted total while still recording three term rows.
+  let terms;
+  const ov = opts.overrideTotal;
+  if (ov != null && ov !== "" && Number.isFinite(Number(ov))) {
+    terms = { term1: feeNum(ov), term2: 0, term3: 0 };
+  } else {
+    terms = { term1: struct.term1, term2: struct.term2, term3: struct.term3 };
+  }
+
+  const rows = [];
+  for (const t of ["term1", "term2", "term3"]) {
+    rows.push(await upsertPendingFeeRow({
+      id: `${student.id}__${t}`, studentId: student.id, feeType: t,
+      name: student.name, cls: student.cls, amount: terms[t] || 0, due, overdue: false,
+    }));
+  }
+  if (struct.application > 0) {
+    rows.push(await upsertPendingFeeRow({
+      id: `${student.id}__application`, studentId: student.id, feeType: "application",
+      name: student.name, cls: student.cls, amount: struct.application, due, overdue: false,
+    }));
+  }
+  if (hasTransport && struct.transport > 0) {
+    rows.push(await upsertPendingFeeRow({
+      id: `${student.id}__transport`, studentId: student.id, feeType: "transport",
+      name: student.name, cls: student.cls, amount: struct.transport, due, overdue: false,
+    }));
+  }
+  const missing = await termFeesMissingFor(student.id);
+  if (missing.length) throw new Error(`Term fee recording incomplete for ${student.id}: ${missing.join(", ")}`);
+  return rows;
+}
+
+// Read-only reconciliation: active students with an incomplete term1/2/3
+// pending record. Should be empty once every student is seeded term-wise.
+// NOTE: a fully-PAID term moves to receipts and leaves no pending row, so a
+// student who has paid a term can surface here — treat this as "needs review",
+// not strictly "missing".
+export async function studentsMissingTermFees() {
+  const all = await readAllData().catch(() => ({}));
+  const students = all.addedStudents || all.students || [];
+  const out = [];
+  for (const s of students) {
+    if (!s?.id || s.archivedAt) continue;
+    const missing = await termFeesMissingFor(s.id);
+    if (missing.length) out.push({ id: s.id, name: s.name, cls: s.cls, missing });
+  }
+  return out;
+}
+
+// Conservative backfill: seed term rows ONLY for students who currently have
+// NO term1/2/3 pending row AND no legacy single annual row (id === studentId).
+// This avoids double-counting students still on the old single-fee model —
+// those should be migrated deliberately, not by this safe pass.
+export async function backfillTermFees() {
+  const all = await readAllData().catch(() => ({}));
+  const students = all.addedStudents || all.students || [];
+  const pending = all.pendingFees || [];
+  const legacyIds = new Set(pending.filter((f) => f.id && !String(f.id).includes("__")).map((f) => f.id));
+  const seeded = [];
+  const skipped = [];
+  for (const s of students) {
+    if (!s?.id || s.archivedAt) continue;
+    if (legacyIds.has(s.id)) { skipped.push({ id: s.id, reason: "has legacy single-fee row" }); continue; }
+    const missing = await termFeesMissingFor(s.id);
+    if (!missing.length) { skipped.push({ id: s.id, reason: "already complete" }); continue; }
+    try {
+      await seedStudentTermFees(s);
+      seeded.push(s.id);
+    } catch (e) {
+      skipped.push({ id: s.id, reason: e.message || "seed failed" });
+    }
+  }
+  return { seeded, skipped };
+}
+
+// Set a student's fee breakdown directly: Term I/II/III + Application +
+// Transport. Each supplied value REPLACES that component's outstanding pending
+// amount (0 clears the row). Unlike the increase-only annual editor, this is
+// the admin's authoritative per-term fee setup, so any amount >= 0 is allowed.
+// Returns the saved component amounts and their overall total.
+export async function setStudentFeeComponents({ studentId, components, actor = "Staff" }) {
+  if (!studentId) throw new Error("studentId required");
+  const KEYS = ["term1", "term2", "term3", "application", "transport"];
+
+  let student = null;
+  if (supabaseEnabled) {
+    const sSel = await supabase.from("students").select("*").eq("id", studentId).maybeSingle();
+    if (sSel.data) student = fromStudent(sSel.data);
+  }
+  if (!student) {
+    const db = fileRead();
+    student = (db.addedStudents || []).find((s) => s.id === studentId);
+  }
+  if (!student) throw new Error("Student not found");
+
+  // Absorb any legacy single-fee row (id === studentId, the pre-breakdown
+  // model) so it can't double-count alongside the new composite component
+  // rows once the admin sets an explicit breakdown.
+  if (supabaseEnabled) {
+    const del = await supabase.from("pending_fees").delete().eq("id", studentId);
+    if (del.error) throw new Error(`legacy fee clear failed: ${del.error.message}`);
+  } else {
+    const db = fileRead();
+    const before = (db.pendingFees || []).length;
+    db.pendingFees = (db.pendingFees || []).filter((f) => f.id !== studentId);
+    if (db.pendingFees.length !== before) fileWrite(db);
+  }
+
+  const saved = {};
+  for (const k of KEYS) {
+    if (!components || !(k in components)) continue;
+    const amt = Math.max(0, Math.floor(Number(components[k]) || 0));
+    const rowId = `${studentId}__${k}`;
+    if (amt === 0) {
+      if (supabaseEnabled) {
+        const del = await supabase.from("pending_fees").delete().eq("id", rowId);
+        if (del.error) throw new Error(`pending_fees delete failed: ${del.error.message}`);
+      } else {
+        const db = fileRead();
+        db.pendingFees = (db.pendingFees || []).filter((f) => f.id !== rowId);
+        fileWrite(db);
+      }
+    } else {
+      await upsertPendingFeeRow({
+        id: rowId, studentId, feeType: k,
+        name: student.name, cls: student.cls,
+        amount: amt, due: "in 7 days", overdue: false,
+      });
+    }
+    saved[k] = amt;
+  }
+
+  const overall = Object.values(saved).reduce((s, v) => s + v, 0);
+
+  // Roll the student's fee status forward: any outstanding component → pending.
+  if (overall > 0) {
+    if (supabaseEnabled) {
+      try { await supabase.from("students").update({ fee: "pending" }).eq("id", studentId); } catch {}
+    } else {
+      const db = fileRead();
+      const i = (db.addedStudents || []).findIndex((s) => s.id === studentId);
+      if (i !== -1) { db.addedStudents[i].fee = "pending"; fileWrite(db); }
+    }
+  }
+
+  try {
+    await logAudit(
+      actor,
+      "Set fee breakdown",
+      `${studentId} · ${Object.keys(saved).map((k) => `${k} ₹${saved[k].toLocaleString("en-IN")}`).join(" · ")}`
+    );
+  } catch {}
+
+  return { studentId, components: saved, overall };
 }
 
 // ---------- documents ----------
