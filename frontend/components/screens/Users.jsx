@@ -5,6 +5,7 @@ import Icon from "../Icon";
 import { resolveSchool, downloadPdf } from "@/lib/export";
 import { AvatarChip, KPI } from "../ui";
 import CredentialsModal from "../CredentialsModal";
+import { formatClassLabel } from "@/lib/format";
 
 // Short blurbs shown in the Roles side-panel (admin view only). Listed
 // roughly in seniority order so the sidebar reads top-down.
@@ -438,7 +439,7 @@ export default function ScreenUsers({ E, role, session, refresh }) {
                     sub: "Per class-section",
                     items: Object.entries(studentsByCls)
                       .sort((a, b) => a[0].localeCompare(b[0]))
-                      .map(([cls, n]) => ({ label: `Class ${cls}`, value: n, sub: `${n} student${n === 1 ? "" : "s"}` })),
+                      .map(([cls, n]) => ({ label: formatClassLabel(cls), value: n, sub: `${n} student${n === 1 ? "" : "s"}` })),
                   }}
                 />
                 <KPI
@@ -582,7 +583,7 @@ export default function ScreenUsers({ E, role, session, refresh }) {
                           </div>
                         </div>
                       </td>
-                      <td><span className="chip">{s.cls || "—"}</span></td>
+                      <td><span className="chip">{formatClassLabel(s.cls)}</span></td>
                       <td style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{s.parent || "—"}</td>
                       <td>
                         {s.fee === "paid"    ? <span className="chip ok"><span className="dot" />Paid</span> :
@@ -719,7 +720,7 @@ export default function ScreenUsers({ E, role, session, refresh }) {
                           </div>
                         </div>
                       </td>
-                      <td><span className="chip">{p.childCls}</span></td>
+                      <td><span className="chip">{formatClassLabel(p.childCls)}</span></td>
                       <td style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{p.phone}</td>
                       <td style={{ fontSize: 11.5, color: "var(--ink-3)", fontFamily: "var(--font-mono)" }}>{p.email}</td>
                       <td style={{ fontSize: 11.5, color: "var(--ink-3)", fontFamily: "var(--font-mono)" }}>
@@ -1074,7 +1075,7 @@ function BulkParentLoginsModal({ logins, onClose, flash }) {
                       <div style={{ fontWeight: 500 }}>{l.studentName}</div>
                       <div className="mono" style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{l.studentId}</div>
                     </td>
-                    <td style={{ padding: "7px 10px" }}>{l.cls}</td>
+                    <td style={{ padding: "7px 10px" }}>{formatClassLabel(l.cls)}</td>
                     <td style={{ padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 11.5 }}>{l.email}</td>
                     <td style={{ padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 11.5 }}>{l.password}</td>
                   </tr>

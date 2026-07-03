@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import Icon from "../Icon";
 import { KPI } from "../ui";
+import { formatClassLabel } from "@/lib/format";
 
 // Same alias-to-canonical-field map as the Library importer — covers the
 // most common header spellings ("Class", "CLASS_ID", "section_class", …)
@@ -340,7 +341,7 @@ export default function ScreenSyllabus({ E, refresh, role, session }) {
             title: `Classes covered · ${classesCovered}`,
             sub: "Pick one from the strip below to view its plan",
             items: [...new Set(visibleRows.map((r) => r.cls))].sort().slice(0, 16).map((cls) => ({
-              label: cls,
+              label: formatClassLabel(cls),
               value: visibleRows.filter((r) => r.cls === cls).length,
               sub: "topics",
             })),
@@ -405,7 +406,7 @@ export default function ScreenSyllabus({ E, refresh, role, session }) {
                   : `${n} topic${n === 1 ? "" : "s"} planned`}
               >
                 {isOrphan && <Icon name="warning" size={11} />}
-                {cls}
+                {formatClassLabel(cls)}
                 <span style={{
                   fontSize: 10, padding: "1px 6px", borderRadius: 999,
                   background: active ? "rgba(255,255,255,0.25)" : "var(--rule)",
@@ -531,7 +532,7 @@ function SyllabusTable({ cls, rows, canManage, onRemove }) {
     <div className="card">
       <div className="card-head">
         <div>
-          <div className="card-title">Class {cls}</div>
+          <div className="card-title">{formatClassLabel(cls)}</div>
           <div className="card-sub">
             {rows.length} topic{rows.length === 1 ? "" : "s"} planned
             {filtered.length !== rows.length && <> · {filtered.length} shown</>}
@@ -692,7 +693,7 @@ function AddTopicModal({ classOptions, defaultClass, subjectSuggestions, onClose
           <Field label="Class *">
             <select className="select" value={form.cls} onChange={(e) => set("cls", e.target.value)}>
               {classOptions.length === 0 && <option value="">— no classes —</option>}
-              {classOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+              {classOptions.map((c) => <option key={c} value={c}>{formatClassLabel(c)}</option>)}
             </select>
           </Field>
           <Field label="Subject *">

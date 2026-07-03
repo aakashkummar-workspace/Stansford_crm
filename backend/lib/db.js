@@ -165,6 +165,32 @@ async function safeSelect(table, build) {
   }
 }
 
+// Like safeSelect, but pages through EVERY row. Supabase caps a single
+// response at 1000 rows, so any table that can grow past 1000 (pending_fees,
+// recent_fees, students…) must be fetched in 1000-row pages or the register /
+// totals silently truncate. Do NOT use for queries that apply their own
+// .limit() — the .range() here would override it.
+async function safeSelectAll(table, build) {
+  const PAGE = 1000;
+  let all = [];
+  let from = 0;
+  try {
+    for (;;) {
+      const base = supabase.from(table).select("*");
+      const r = await build(base).range(from, from + PAGE - 1);
+      if (r.error) { console.warn(`[db] ${table}: ${r.error.message}`); break; }
+      const rows = r.data || [];
+      all = all.concat(rows);
+      if (rows.length < PAGE) break;
+      from += PAGE;
+    }
+    return all;
+  } catch (e) {
+    console.warn(`[db] ${table}: ${e.message}`);
+    return all;
+  }
+}
+
 // Run an array of async tasks in batches of `batchSize`. The Supabase JS
 // client / PostgREST silently drops some queries when too many run in
 // parallel against a single project (we hit it at ~16 concurrent), so we
@@ -182,9 +208,9 @@ async function runBatched(tasks, batchSize = 4) {
 export async function readAllData() {
   if (supabaseEnabled) {
     const [s, pf, rf, cm, eq, dl, rt, al, ac, cls, st, inv, mv, bc, tp, rl, dn, cp, txa, tt, lib, lns, invCats, ex, mk] = await runBatched([
-      () => safeSelect("students",     (q) => q.order("created_at", { ascending: false })),
-      () => safeSelect("pending_fees", (q) => q.order("created_at", { ascending: false })),
-      () => safeSelect("recent_fees",  (q) => q.order("paid_at",    { ascending: false })),
+      () => safeSelectAll("students",     (q) => q.order("created_at", { ascending: false })),
+      () => safeSelectAll("pending_fees", (q) => q.order("created_at", { ascending: false })),
+      () => safeSelectAll("recent_fees",  (q) => q.order("paid_at",    { ascending: false })),
       () => safeSelect("complaints",   (q) => q.order("created_at", { ascending: false })),
       () => safeSelect("enquiries",    (q) => q.order("created_at", { ascending: false })),
       () => safeSelect("daily_logs",   (q) => q.order("posted_at",  { ascending: false })),
@@ -1897,7 +1923,7 @@ export async function recordTransportAttendance(row) {
   const studentId = String(row?.studentId || "").trim();
   const date = String(row?.date || "").trim() || new Date().toISOString().slice(0, 10);
   const direction = (row?.direction || "morning") === "evening" ? "evening" : "morning";
-  const status = ["boarded", "absent", "skipped"].includes(row?.status) ? row.status : "boarded";
+  const status = ["boarded", "absent", "skipped", "dropped"].includes(row?.status) ? row.status : "boarded";
   if (!studentId) throw new Error("studentId required");
 
   const persistRow = {
@@ -6956,6 +6982,23 @@ export async function notifyRole(roles, { type, title, description = null, redir
     catch (e) { console.warn(`[db] notify failed for ${u.id}: ${e.message}`); }
   }
   return out;
+}
+
+// Push an in-app notification to the parent linked to a given student.
+// Best-effort: no-ops if no parent user is linked to this student yet.
+export async function notifyStudentParent(studentId, { type = "transport", title, description = null, redirectUrl = null } = {}) {
+  if (!studentId || !title) return null;
+  try {
+    const users = await listUsers();
+    const parent = (users || []).find(
+      (u) => u.role === "parent" && (u.linkedId === studentId || u.studentId === studentId)
+    );
+    if (!parent) return null;
+    return await addNotification({ userId: parent.id, type, title, description, redirectUrl });
+  } catch (e) {
+    console.warn(`[db] notifyStudentParent failed: ${e.message}`);
+    return null;
+  }
 }
 
 export async function listNotifications(userId, { unreadOnly = false, limit = 50 } = {}) {

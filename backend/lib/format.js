@@ -18,14 +18,14 @@ export const FEE_TYPES = [
   // per-row Fees amount into — schools that quote a single yearly tuition
   // number (rather than splitting into Term I/II/III) live here.
   { key: "annual",      label: "Annual Fees" },
-  { key: "application", label: "Application Fees" },
+  { key: "application", label: "Admission Fees" },
   { key: "kit",         label: "Kit Fees" },
   { key: "eca",         label: "ECA" },
   { key: "uniform",     label: "Uniform" },
   { key: "term1",       label: "Term I" },
   { key: "term2",       label: "Term II" },
   { key: "term3",       label: "Term III" },
-  { key: "van",         label: "Van" },
+  { key: "transport",   label: "Transport" },
   { key: "stem",        label: "STEM Fees" },
   { key: "annualday",   label: "Annual Day" },
 ];

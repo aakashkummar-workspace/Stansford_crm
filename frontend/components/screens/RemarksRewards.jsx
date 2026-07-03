@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Icon from "../Icon";
 import { KPI } from "../ui";
 import { resolveSchool, downloadPdf } from "@/lib/export";
+import { formatClassLabel } from "@/lib/format";
 
 const CATEGORIES = [
   "Academic", "Discipline", "Sports", "Arts", "Leadership",
@@ -592,7 +593,7 @@ function NewEntryModal({ role, students, staff, users = [], onClose, onSubmit })
           <Field label={form.targetType === "student" ? "Student" : "Staff member"}>
             <select className="select" value={form.targetId} onChange={(e) => set("targetId", e.target.value)} required>
               {form.targetType === "student"
-                ? students.map((s) => <option key={s.id} value={s.id}>{s.name} — {s.cls}</option>)
+                ? students.map((s) => <option key={s.id} value={s.id}>{s.name} — {formatClassLabel(s.cls)}</option>)
                 : staffOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           </Field>

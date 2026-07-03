@@ -440,9 +440,24 @@ export default function AppShell({ initialData, session }) {
         ? (data.ADDED_STUDENTS || []).filter((s) => myClasses.has(s.cls))
         : (data.ADDED_STUDENTS || []);
       const scopedStudentIds = new Set(scopedStudents.map((s) => s.id));
+      // Bus teachers need the FULL roster for the routes they attend — those
+      // students come from many classes, not just the teacher's own. Scope a
+      // separate transport roster by the routes where this teacher is the
+      // named attendant, WITHOUT widening the class-scoped student list the
+      // rest of the classroom app relies on.
+      const meName = (session?.name || "").trim().toLowerCase();
+      const myRouteCodes = new Set(
+        (data.ROUTES || [])
+          .filter((r) => { const att = (r.attendant || "").trim().toLowerCase(); return att && att !== "—" && att === meName; })
+          .map((r) => r.code)
+      );
+      const transportStudents = myRouteCodes.size
+        ? (data.ADDED_STUDENTS || []).filter((s) => myRouteCodes.has(s.transport) || myRouteCodes.has(s.transportEvening))
+        : [];
       return {
         ...data,
         ADDED_STUDENTS: scopedStudents,
+        TRANSPORT_STUDENTS: transportStudents,
         DAILY_LOGS: hasScope
           ? (data.DAILY_LOGS || []).filter((l) => myClasses.has(l.cls) || scopedStudentIds.has(l.studentId))
           : (data.DAILY_LOGS || []),

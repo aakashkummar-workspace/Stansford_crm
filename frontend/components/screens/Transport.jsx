@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { formatClassLabel } from "@/lib/format";
 import Icon from "../Icon";
 import { KPI, AvatarChip, StatusChip } from "../ui";
 import { resolveSchool, downloadPdf } from "@/lib/export";
@@ -89,13 +90,25 @@ export default function ScreenTransport({ E, refresh, role, session }) {
   const studentRouteCode = (stu) => routeDir === "evening" ? stu.transportEvening : stu.transport;
   const studentPickupStop = (stu) => routeDir === "evening" ? stu.pickupStopEvening : stu.pickupStop;
 
+  // Transport roster: the general student list is class-scoped for teachers,
+  // but a bus teacher needs every student on their route (many classes). The
+  // server/AppShell supplies E.TRANSPORT_STUDENTS with the route roster for
+  // teachers; union it with ADDED_STUDENTS (deduped) so admins/principals
+  // (who already have the full list) and teachers both work.
+  const transportRoster = useMemo(() => {
+    const byId = new Map();
+    for (const s of (E.ADDED_STUDENTS || [])) byId.set(s.id, s);
+    for (const s of (E.TRANSPORT_STUDENTS || [])) if (!byId.has(s.id)) byId.set(s.id, s);
+    return [...byId.values()];
+  }, [E.ADDED_STUDENTS, E.TRANSPORT_STUDENTS]);
+
   const studentsByStop = useMemo(() => {
     if (!route) return {};
     const stops = route.stops || [];
     const firstStopName = stops[0]?.name;
     const out = {};
     for (const s of stops) out[s.name] = [];
-    for (const stu of (E.ADDED_STUDENTS || [])) {
+    for (const stu of transportRoster) {
       if (studentRouteCode(stu) !== route.code) continue;
       const stop = studentPickupStop(stu);
       const matchStop = stops.find((s) => s.name === stop)?.name || firstStopName;
@@ -103,7 +116,7 @@ export default function ScreenTransport({ E, refresh, role, session }) {
     }
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [route, E.ADDED_STUDENTS, routeDir]);
+  }, [route, transportRoster, routeDir]);
 
   // Per-student attendance, persisted to /api/transport/attendance and
   // surfaced via E.TRANSPORT_ATTENDANCE on every refresh. We keep an
@@ -112,6 +125,15 @@ export default function ScreenTransport({ E, refresh, role, session }) {
   // (date|direction|route|studentId).
   const todayKey = new Date().toISOString().slice(0, 10);
   const [direction, setDirection] = useState("morning"); // 'morning' | 'evening'
+  // Keep the marking direction in sync with the selected route: a dedicated
+  // morning/evening route always marks that trip (so evening attendance is
+  // recorded as evening, and the morning-absent auto-mark kicks in). "Both"
+  // routes leave the toggle under the user's control.
+  useEffect(() => {
+    if (route && (route.direction === "morning" || route.direction === "evening")) {
+      setDirection(route.direction);
+    }
+  }, [route?.code, route?.direction]);
   const [pendingMarks, setPendingMarks] = useState({});  // optimistic overlay
   const markKey = (routeCode, studentId, date, dir) => `${routeCode}|${studentId}|${date}|${dir}`;
 
@@ -130,12 +152,25 @@ export default function ScreenTransport({ E, refresh, role, session }) {
     return pendingMarks[k] ?? persistedMarks[k] ?? null;
   };
 
+  // Today's MORNING boarding status per student (route-independent — keyed by
+  // studentId). Used in the evening view to flag / auto-absent anyone who
+  // didn't board this morning: they weren't at school, so they can't be on
+  // the evening bus.
+  const morningStatusByStudent = useMemo(() => {
+    const out = {};
+    for (const r of (E.TRANSPORT_ATTENDANCE || [])) {
+      if ((r.direction || "morning") === "morning" && r.date === todayKey) out[r.studentId] = r.status;
+    }
+    return out;
+  }, [E.TRANSPORT_ATTENDANCE, todayKey]);
+
   const markStudent = async (stop, student, action) => {
     if (!route) return;
-    const status = action === "board" ? "boarded" : "absent";
+    const status = action === "board" ? "boarded" : action === "drop" ? "dropped" : "absent";
     const k = markKey(route.code, student.id, todayKey, direction);
     // Optimistic flip first.
     setPendingMarks((m) => ({ ...m, [k]: status }));
+    let ok = false;
     try {
       const r = await fetch("/api/transport/attendance", {
         method: "POST",
@@ -148,10 +183,17 @@ export default function ScreenTransport({ E, refresh, role, session }) {
       });
       const json = await r.json().catch(() => ({}));
       if (!r.ok || !json.ok) throw new Error(json.error || "Could not save");
+      ok = true;
     } catch (e) {
       // Roll back the optimistic flip if the server rejected the write.
       setPendingMarks((m) => { const n = { ...m }; delete n[k]; return n; });
       showToast(e.message, "err");
+    }
+    // A drop is a delivery event (parent gets an in-app alert), not a boarding
+    // count — so we skip the aggregate stop counter for it.
+    if (action === "drop") {
+      if (ok) showToast(`${student.name} dropped · parent notified`, "ok");
+      return;
     }
     // Also bump the aggregate stop counter (existing flow).
     await mark(stop.name, action);
@@ -801,9 +843,16 @@ export default function ScreenTransport({ E, refresh, role, session }) {
                         {(studentsByStop[s.name] || []).length > 0 ? (
                           <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 5 }}>
                             {(studentsByStop[s.name] || []).map((stu) => {
-                              const m = studentMark(stu);
-                              const isBoarded = m === "boarded";
-                              const isAbsent  = m === "absent";
+                              const explicit = studentMark(stu);
+                              const amStatus = morningStatusByStudent[stu.id]; // "boarded" | "absent" | undefined
+                              const isEvening = direction === "evening";
+                              // Evening: a student absent this morning wasn't at school, so
+                              // they aren't on the evening bus — no drop. Present/unmarked are
+                              // droppable; the drop pushes an in-app alert to the parent.
+                              const amAbsent = amStatus === "absent";
+                              const isDropped = explicit === "dropped";
+                              const isBoarded = explicit === "boarded";
+                              const isAbsent  = explicit === "absent";
                               return (
                                 <div key={stu.id} style={{
                                   display: "flex", alignItems: "center", gap: 8,
@@ -819,18 +868,52 @@ export default function ScreenTransport({ E, refresh, role, session }) {
                                   }}>{(stu.name || "?").split(/\s+/).map((p) => p[0]).slice(0, 2).join("").toUpperCase()}</span>
                                   <div style={{ flex: 1, minWidth: 0 }}>
                                     <div style={{ fontSize: 12.5, fontWeight: 500 }}>{stu.name}</div>
-                                    <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{stu.cls} · {stu.id}</div>
+                                    <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{formatClassLabel(stu.cls)} · {stu.id}</div>
                                   </div>
-                                  {isBoarded && <span className="chip ok" style={{ fontSize: 9.5 }}><Icon name="check" size={9} stroke={2.5} />Boarded</span>}
-                                  {isAbsent  && <span className="chip bad" style={{ fontSize: 9.5 }}><Icon name="x" size={9} stroke={2.5} />Absent</span>}
-                                  {cur && !isBoarded && !isAbsent && (
+                                  {isEvening ? (
+                                    amAbsent ? (
+                                      // Morning absent → not on the evening bus. Only the badge.
+                                      <span className="chip bad" style={{ fontSize: 9.5 }} title="Absent in the morning — not on the evening bus">
+                                        <Icon name="x" size={9} stroke={2.5} />AM absent
+                                      </span>
+                                    ) : (
+                                      // Morning present / unmarked → droppable.
+                                      <>
+                                        <span
+                                          className="chip"
+                                          title="Morning boarding status"
+                                          style={{
+                                            fontSize: 9,
+                                            color: amStatus === "boarded" ? "var(--ok)" : "var(--ink-4)",
+                                            borderColor: amStatus === "boarded" ? "var(--ok)" : "var(--rule)",
+                                          }}
+                                        >
+                                          {amStatus === "boarded" ? "AM present" : "AM —"}
+                                        </span>
+                                        {isDropped ? (
+                                          <span className="chip ok" style={{ fontSize: 9.5 }}><Icon name="check" size={9} stroke={2.5} />Dropped</span>
+                                        ) : cur ? (
+                                          <button className="btn sm accent" style={{ height: 24, padding: "0 10px", fontSize: 11 }} onClick={() => markStudent(s, stu, "drop")} title="Mark dropped off — the parent gets an in-app alert">
+                                            <Icon name="check" size={10} stroke={2.5} />Dropped
+                                          </button>
+                                        ) : null}
+                                      </>
+                                    )
+                                  ) : (
+                                    // Morning view — Present / Absent boarding.
                                     <>
-                                      <button className="btn sm ghost" style={{ height: 24, padding: "0 8px", fontSize: 11 }} onClick={() => markStudent(s, stu, "board")}>
-                                        <Icon name="check" size={10} stroke={2.5} />Present
-                                      </button>
-                                      <button className="btn sm ghost" style={{ height: 24, padding: "0 8px", fontSize: 11 }} onClick={() => markStudent(s, stu, "absent")}>
-                                        <Icon name="x" size={10} stroke={2.5} />Absent
-                                      </button>
+                                      {isBoarded && <span className="chip ok" style={{ fontSize: 9.5 }}><Icon name="check" size={9} stroke={2.5} />Present</span>}
+                                      {isAbsent && <span className="chip bad" style={{ fontSize: 9.5 }}><Icon name="x" size={9} stroke={2.5} />Absent</span>}
+                                      {cur && !isBoarded && !isAbsent && (
+                                        <>
+                                          <button className="btn sm ghost" style={{ height: 24, padding: "0 8px", fontSize: 11 }} onClick={() => markStudent(s, stu, "board")}>
+                                            <Icon name="check" size={10} stroke={2.5} />Present
+                                          </button>
+                                          <button className="btn sm ghost" style={{ height: 24, padding: "0 8px", fontSize: 11 }} onClick={() => markStudent(s, stu, "absent")}>
+                                            <Icon name="x" size={10} stroke={2.5} />Absent
+                                          </button>
+                                        </>
+                                      )}
                                     </>
                                   )}
                                   {canEdit && (
@@ -906,7 +989,7 @@ export default function ScreenTransport({ E, refresh, role, session }) {
                         <div style={{ fontSize: 12.5, fontWeight: 500 }}>{a.studentName}</div>
                         <div style={{ fontSize: 10.5, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>{a.studentId}</div>
                       </td>
-                      <td><span className="chip">{a.cls}</span></td>
+                      <td><span className="chip">{formatClassLabel(a.cls)}</span></td>
                       <td style={{ fontSize: 12, color: "var(--ink-3)" }}>
                         <span className="chip" style={{ marginRight: 6 }}>{a.route}</span>
                         {a.stop}
@@ -1978,7 +2061,7 @@ function AddStudentToStopModal({ route, stop, students, onClose, onPick }) {
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 13, fontWeight: 500, color: "var(--ink)" }}>{s.name}</div>
                     <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>
-                      {s.cls} · {s.id}
+                      {formatClassLabel(s.cls)} · {s.id}
                       {noTransportThisDir && !onlyOtherDirSet && ` · no ${dirLabel} bus yet`}
                       {onlyOtherDirSet && ` · ${dir === "evening" ? "morning" : "evening"} bus: ${otherDir}`}
                       {onSameDirOtherRoute && ` · ${dirLabel}: currently on ${here}`}
@@ -2077,7 +2160,7 @@ function RouteRosterModal({ route, studentsByStop, onClose, onAdd, onRemove }) {
                       }}>{initials(stu.name)}</span>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: 12.5, fontWeight: 500 }}>{stu.name}</div>
-                        <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{stu.cls} · {stu.id}</div>
+                        <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{formatClassLabel(stu.cls)} · {stu.id}</div>
                       </div>
                       <button
                         className="icon-btn"
@@ -2172,7 +2255,7 @@ function OffStopBoardingModal({ route, stop, students, onClose, onPick }) {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 500, color: "var(--ink)" }}>{s.name}</div>
                   <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>
-                    {s.cls} · {s.id} · assigned to <b>{s.pickupStop || "—"}</b>
+                    {formatClassLabel(s.cls)} · {s.id} · assigned to <b>{s.pickupStop || "—"}</b>
                   </div>
                 </div>
                 <span className="chip warn" style={{ fontSize: 10 }}>Off-stop</span>
@@ -2206,7 +2289,7 @@ function AbsenteeModal({ absentees, onClose, onDownload }) {
                     <div style={{ fontSize: 12.5, fontWeight: 500 }}>{a.studentName}</div>
                     <div style={{ fontSize: 10.5, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>{a.studentId}</div>
                   </td>
-                  <td><span className="chip">{a.cls}</span></td>
+                  <td><span className="chip">{formatClassLabel(a.cls)}</span></td>
                   <td style={{ fontSize: 12, color: "var(--ink-3)" }}>
                     <span className="chip" style={{ marginRight: 6 }}>{a.route}</span>
                     {a.stop}
@@ -2725,7 +2808,7 @@ function TransportHistoryView({ rows, students, routes, isParent, school, actor 
                 onChange={(e) => setStudentId(e.target.value)}
                 style={{ height: 28 }}>
                 <option value="All">All students</option>
-                {transportStudents.map((s) => <option key={s.id} value={s.id}>{s.name} · {s.cls}</option>)}
+                {transportStudents.map((s) => <option key={s.id} value={s.id}>{s.name} · {formatClassLabel(s.cls)}</option>)}
               </select>
             )}
             <div className="segmented">
@@ -2769,7 +2852,7 @@ function TransportHistoryView({ rows, students, routes, isParent, school, actor 
                       <AvatarChip initials={(p.name || "?").split(/\s+/).map((x) => x[0]).slice(0, 2).join("").toUpperCase()} />
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: 12.5, fontWeight: 500 }}>{p.name}</div>
-                        <div style={{ fontSize: 10.5, color: "var(--ink-3)" }}>{p.cls} · {p.studentId}</div>
+                        <div style={{ fontSize: 10.5, color: "var(--ink-3)" }}>{formatClassLabel(p.cls)} · {p.studentId}</div>
                       </div>
                       <span className={`chip ${tone === "ok" ? "ok" : tone === "warn" ? "warn" : tone === "bad" ? "bad" : ""}`} style={{ fontSize: 10 }}>
                         {p.total === 0 ? "no records" : `${p.boarded}/${p.total} boarded`}

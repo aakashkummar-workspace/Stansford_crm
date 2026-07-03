@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import Icon from "../Icon";
 import { KPI } from "../ui";
+import { formatClassLabel } from "@/lib/format";
 
 // Standard 14-day loan period — matches what most school libraries use.
 const DEFAULT_DUE_DAYS = 14;
@@ -1435,7 +1436,7 @@ function BorrowModal({ book, students, staff, activeByBook, onClose, onSubmit })
                   <span style={{ flex: 1, minWidth: 0 }}>
                     <span style={{ display: "block", fontSize: 12.5, fontWeight: 500, color: active ? "var(--accent-2)" : "var(--ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</span>
                     <span style={{ display: "block", fontSize: 10.5, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>
-                      {p.id}{p.cls ? ` · Class ${p.cls}` : p.role ? ` · ${p.role}` : ""}
+                      {p.id}{p.cls ? ` · ${formatClassLabel(p.cls)}` : p.role ? ` · ${p.role}` : ""}
                     </span>
                   </span>
                   {active && <Icon name="check" size={13} />}

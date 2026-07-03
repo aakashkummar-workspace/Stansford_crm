@@ -8,6 +8,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Icon from "../Icon";
+import { formatClassLabel } from "@/lib/format";
 
 const QUESTIONS = [
   { k: "q1Learned",  label: "What's one thing you learned today?", icon: "academic", placeholder: "A new word, a fact, a trick — anything." },
@@ -165,7 +166,7 @@ export default function ScreenScaleRitual({ E, role, session, refresh }) {
             <option value="">All classes ({roster.length})</option>
             {classes.map((c) => {
               const n = roster.filter((s) => s.cls === c).length;
-              return <option key={c} value={c}>Class {c} ({n})</option>;
+              return <option key={c} value={c}>{formatClassLabel(c)} ({n})</option>;
             })}
           </select>
           <select
@@ -176,10 +177,10 @@ export default function ScreenScaleRitual({ E, role, session, refresh }) {
             disabled={filteredRoster.length === 0}
           >
             {filteredRoster.length === 0
-              ? <option value="">No students in {classFilter || "scope"}</option>
+              ? <option value="">No students in {classFilter ? formatClassLabel(classFilter) : "scope"}</option>
               : <>
                   <option value="">Pick a student…</option>
-                  {filteredRoster.map((s) => <option key={s.id} value={s.id}>{s.name} — {s.cls}</option>)}
+                  {filteredRoster.map((s) => <option key={s.id} value={s.id}>{s.name} — {formatClassLabel(s.cls)}</option>)}
                 </>
             }
           </select>

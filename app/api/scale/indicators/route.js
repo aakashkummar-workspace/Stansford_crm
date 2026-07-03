@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { SCALE_DOMAINS, SCALE_INDICATORS, SCALE_DEFAULT_DOMAIN_WEIGHTS } from "@/lib/scale";
+import { SCALE_DOMAINS, SCALE_INDICATORS, SCALE_DEFAULT_DOMAIN_WEIGHTS, SCALE_SCALES } from "@/lib/scale";
 import { readSettings } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 
@@ -24,5 +24,5 @@ export async function GET() {
       weights = merged;
     }
   } catch {}
-  return NextResponse.json({ ok: true, domains: SCALE_DOMAINS, indicators: SCALE_INDICATORS, weights });
+  return NextResponse.json({ ok: true, domains: SCALE_DOMAINS, indicators: SCALE_INDICATORS, scales: SCALE_SCALES, weights });
 }

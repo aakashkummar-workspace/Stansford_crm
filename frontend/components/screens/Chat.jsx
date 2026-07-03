@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
+import { formatClassLabel } from "@/lib/format";
 
 export default function ScreenChat({ E, refresh, role, session }) {
   const [threads, setThreads] = useState([]);
@@ -108,8 +109,8 @@ export default function ScreenChat({ E, refresh, role, session }) {
               const last = t.messages?.[t.messages.length - 1];
               const counterpart = role === "parent" ? t.teacherName : t.parentName;
               const sub = role === "parent"
-                ? `Re: ${t.studentName} (${t.cls})`
-                : `${t.studentName} · ${t.cls}`;
+                ? `Re: ${t.studentName} (${formatClassLabel(t.cls)})`
+                : `${t.studentName} · ${formatClassLabel(t.cls)}`;
               const initials = (counterpart || "?").split(/\s+/).map((p) => p[0]).slice(0, 2).join("").toUpperCase();
               // "Unread" = last message is from the other side. Reset
               // when we open the thread (active === t.id).
@@ -186,7 +187,7 @@ export default function ScreenChat({ E, refresh, role, session }) {
                   {role === "parent" ? thread.teacherName : thread.parentName}
                 </div>
                 <div style={{ fontSize: 11, color: "var(--ink-4)" }}>
-                  {role === "parent" ? "Class teacher" : "Parent"} · {thread.studentName} ({thread.cls})
+                  {role === "parent" ? "Class teacher" : "Parent"} · {thread.studentName} ({formatClassLabel(thread.cls)})
                 </div>
               </div>
               <div style={{ flex: 1, overflowY: "auto", padding: 16, display: "flex", flexDirection: "column", gap: 10, background: "var(--bg-2)" }}>
@@ -309,7 +310,7 @@ function NewThreadModal({ students, onClose, onSubmit }) {
             <label style={{ display: "flex", flexDirection: "column", gap: 5 }}>
               <span style={{ fontSize: 11, fontWeight: 500, color: "var(--ink-2)", textTransform: "uppercase", letterSpacing: 0.4 }}>About child</span>
               <select className="select" value={studentId} onChange={(e) => setStudentId(e.target.value)}>
-                {students.map((s) => <option key={s.id} value={s.id}>{s.name} · {s.cls}</option>)}
+                {students.map((s) => <option key={s.id} value={s.id}>{s.name} · {formatClassLabel(s.cls)}</option>)}
               </select>
             </label>
           ) : stu && (
@@ -326,7 +327,7 @@ function NewThreadModal({ students, onClose, onSubmit }) {
               }}>{(stu.name || "?").split(/\s+/).map((p) => p[0]).slice(0, 2).join("").toUpperCase()}</div>
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 12.5, fontWeight: 500 }}>{stu.name}</div>
-                <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>Class {stu.cls} · {stu.id}</div>
+                <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{formatClassLabel(stu.cls)} · {stu.id}</div>
               </div>
             </div>
           )}
@@ -336,7 +337,7 @@ function NewThreadModal({ students, onClose, onSubmit }) {
               padding: 12, background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)",
               borderRadius: 7, fontSize: 12.5, lineHeight: 1.5,
             }}>
-              No class teacher is assigned to <b>{stu?.cls}</b> yet. Please contact the school office —
+              No class teacher is assigned to <b>{formatClassLabel(stu?.cls)}</b> yet. Please contact the school office —
               once a class teacher is assigned, you'll be able to message them here.
             </div>
           ) : assignedTeachers.length === 1 && selectedTeacher ? (
@@ -363,7 +364,7 @@ function NewThreadModal({ students, onClose, onSubmit }) {
                 ))}
               </select>
               <span style={{ fontSize: 10.5, color: "var(--ink-4)" }}>
-                {assignedTeachers.length} class teachers assigned to {stu?.cls}. Pick one.
+                {assignedTeachers.length} class teachers assigned to {formatClassLabel(stu?.cls)}. Pick one.
               </span>
             </label>
           )}

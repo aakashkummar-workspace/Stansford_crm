@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI } from "../ui";
+import { formatClassLabel } from "@/lib/format";
 
 const STATUS_LABEL = { requested: "Requested", approved: "Approved", issued: "Issued", rejected: "Rejected" };
 const STATUS_TONE  = { requested: "", approved: "warn", issued: "ok", rejected: "bad" };
@@ -144,7 +145,7 @@ export default function ScreenTc({ E, refresh, role }) {
           const byStatus = (s) => requests.filter((r) => r.status === s);
           const itemFor = (r) => ({
             label: r.studentName || r.studentId,
-            value: r.cls || "—",
+            value: formatClassLabel(r.cls),
             sub: r.requestedAt ? `Requested ${String(r.requestedAt).slice(0, 10)}` : "",
             tone: r.status === "issued" ? "ok" : r.status === "rejected" ? "bad" : "warn",
           });
@@ -210,7 +211,7 @@ export default function ScreenTc({ E, refresh, role }) {
                     <div style={{ fontSize: 12.5, fontWeight: 500 }}>{tc.studentName}</div>
                     <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{tc.studentId}</div>
                   </td>
-                  <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{tc.cls}</td>
+                  <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{formatClassLabel(tc.cls)}</td>
                   <td style={{ fontSize: 11.5, color: "var(--ink-3)", maxWidth: 240 }}>{tc.reason || "—"}</td>
                   <td><span className={`chip ${STATUS_TONE[tc.status]}`}><span className="dot" />{STATUS_LABEL[tc.status]}</span></td>
                   <td style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-3)" }}>{tc.serialNo || "—"}</td>
@@ -283,7 +284,7 @@ function AddTcModal({ students, onClose, onSubmit }) {
           <select className="select" value={form.studentId} onChange={(e) => set("studentId", e.target.value)}>
             <option value="">— pick a student —</option>
             {students.map((s) => (
-              <option key={s.id} value={s.id}>{s.name} · {s.cls} · {s.id}</option>
+              <option key={s.id} value={s.id}>{s.name} · {formatClassLabel(s.cls)} · {s.id}</option>
             ))}
           </select>
         </Field>
@@ -501,7 +502,7 @@ function PrintTcModal({ tc, onClose }) {
   }
 
   return (
-    <ModalShell title={`Transfer Certificate · ${tc.serialNo}`} sub={`${tc.studentName} (${tc.cls})`} onClose={onClose} width={500}>
+    <ModalShell title={`Transfer Certificate · ${tc.serialNo}`} sub={`${tc.studentName} (${formatClassLabel(tc.cls)})`} onClose={onClose} width={500}>
       <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <div style={{ background: "var(--bg-2)", padding: 14, borderRadius: 10, fontSize: 12, lineHeight: 1.6 }}>
           Issued <b>{new Date(tc.issuedAt).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}</b> by <b>{tc.issuedBy}</b><br/>

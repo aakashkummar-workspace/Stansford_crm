@@ -8,6 +8,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Icon from "../Icon";
 import { KPI } from "../ui";
+import { formatClassLabel } from "@/lib/format";
 
 const PRE_CHECKLIST = [
   { k: "lessonPlan",    label: "Lesson plan prepared and submitted on time", hint: "Plan must be in the register by 8:00 AM on the day" },
@@ -55,16 +56,22 @@ export default function ScreenScale({ E, role, session, refresh }) {
   const today = new Date().toISOString().slice(0, 10);
 
   // SCALE catalogue (loaded once on mount). 4 domains × 4 indicators.
-  const [catalogue, setCatalogue] = useState({ domains: [], indicators: [], weights: {} });
+  // `scales` maps each scale type (num10 / yesno / gbe / num4) to its picker
+  // options, so each indicator renders the right control.
+  const [catalogue, setCatalogue] = useState({ domains: [], indicators: [], scales: {}, weights: {} });
   useEffect(() => {
     (async () => {
       try {
         const r = await fetch("/api/scale/indicators", { cache: "no-store" });
         const j = await r.json().catch(() => ({}));
-        if (j?.ok) setCatalogue({ domains: j.domains || [], indicators: j.indicators || [], weights: j.weights || {} });
+        if (j?.ok) setCatalogue({ domains: j.domains || [], indicators: j.indicators || [], scales: j.scales || {}, weights: j.weights || {} });
       } catch {}
     })();
   }, []);
+  // Resolve an indicator's picker options (falls back to 1-4 while loading).
+  const optionsFor = (ind) =>
+    (catalogue.scales?.[ind?.scaleType]?.options) || [1, 2, 3, 4].map((v) => ({ v, label: String(v) }));
+  const scaleHintFor = (ind) => catalogue.scales?.[ind?.scaleType]?.hint || "1–4";
 
   // Default class for a teacher = first assigned. Otherwise empty;
   // admin/principal must pick.
@@ -120,9 +127,10 @@ export default function ScreenScale({ E, role, session, refresh }) {
     setStudentScores((prev) => {
       const next = { ...prev };
       const row = { ...(next[studentId] || {}) };
-      // Clicking an already-active score removes it (mark unrated).
-      if (row[indicatorKey] === score) delete row[indicatorKey];
-      else                              row[indicatorKey] = score;
+      // Clicking an already-active score (or clearing via the dropdown's "—")
+      // removes it (mark unrated).
+      if (score == null || row[indicatorKey] === score) delete row[indicatorKey];
+      else                                              row[indicatorKey] = score;
       if (Object.keys(row).length === 0) delete next[studentId];
       else                                next[studentId] = row;
       return next;
@@ -217,7 +225,7 @@ export default function ScreenScale({ E, role, session, refresh }) {
       </div>
 
       <div className="grid g-4" style={{ marginBottom: 14 }}>
-        <KPI label="Today's roster" value={roster.length} sub={identity.cls || "no class picked"} puck="cream" puckIcon="students" />
+        <KPI label="Today's roster" value={roster.length} sub={identity.cls ? formatClassLabel(identity.cls) : "no class picked"} puck="cream" puckIcon="students" />
         <KPI label="Students scored" value={studentsScored} sub="this session" puck="mint" puckIcon="check" />
         <KPI label="Indicator entries" value={flatEntries.length} sub="will be saved" puck="peach" puckIcon="academic" />
         <KPI label="Recent sessions" value={(E.SCALE_SESSIONS || []).length} sub="all time" puck="sky" puckIcon="clock" />
@@ -236,7 +244,7 @@ export default function ScreenScale({ E, role, session, refresh }) {
             <select className="select" value={identity.cls} onChange={(e) => setIdentity((id) => ({ ...id, cls: e.target.value }))}>
               <option value="">Pick class…</option>
               {Array.from(new Set([...(myClasses || []), ...(E.ADDED_STUDENTS || []).map((s) => s.cls)])).filter(Boolean).map((c) =>
-                <option key={c} value={c}>{c}</option>)}
+                <option key={c} value={c}>{formatClassLabel(c)}</option>)}
             </select>
           </Field>
           <Field label="Subject">
@@ -330,7 +338,7 @@ export default function ScreenScale({ E, role, session, refresh }) {
         {!identity.cls ? (
           <div className="empty" style={{ padding: 30 }}>Pick a class above to see the roster.</div>
         ) : roster.length === 0 ? (
-          <div className="empty" style={{ padding: 30 }}>No students in {identity.cls} yet.</div>
+          <div className="empty" style={{ padding: 30 }}>No students in {formatClassLabel(identity.cls)} yet.</div>
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table className="table" style={{ minWidth: 720 }}>
@@ -342,7 +350,9 @@ export default function ScreenScale({ E, role, session, refresh }) {
                     .map((ind) => (
                       <th key={ind.key} style={{ minWidth: 130, textAlign: "center" }}>
                         <div style={{ fontSize: 11.5 }}>{ind.label}</div>
-                        <div style={{ fontSize: 10, color: "var(--ink-4)", fontWeight: 500, marginTop: 2 }}>weight {ind.indicatorWeight}%</div>
+                        <div style={{ fontSize: 10, color: "var(--ink-4)", fontWeight: 500, marginTop: 2 }}>
+                          {scaleHintFor(ind)} · weight {ind.indicatorWeight}%
+                        </div>
                       </th>
                     ))}
                 </tr>
@@ -360,7 +370,7 @@ export default function ScreenScale({ E, role, session, refresh }) {
                         const v = studentScores[s.id]?.[ind.key];
                         return (
                           <td key={ind.key} style={{ textAlign: "center" }}>
-                            <ScorePicker value={v} onChange={(n) => setScore(s.id, ind.key, n)} />
+                            <ScorePicker value={v} options={optionsFor(ind)} onChange={(n) => setScore(s.id, ind.key, n)} />
                           </td>
                         );
                       })}
@@ -454,7 +464,7 @@ export default function ScreenScale({ E, role, session, refresh }) {
             {recentSessions.map((s) => (
               <div key={s.id} className="lrow">
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700 }}>{s.cls || "—"} · {s.subject || "(no subject)"}</div>
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>{s.cls ? formatClassLabel(s.cls) : "—"} · {s.subject || "(no subject)"}</div>
                   <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 2 }}>
                     {s.sessionDate} · {s.sessionType} · {s.studentsPresent} students
                   </div>
@@ -504,23 +514,46 @@ function RatingBlock({ title, sub, items, values, onChange }) {
   );
 }
 
-function ScorePicker({ value, onChange, size = "sm" }) {
-  // 4-button row. Active button is filled accent; the rest are ghost.
-  // Clicking an active button toggles back to "no score" (used by the
-  // per-student grid where the score is initially absent).
-  const dim = size === "md" ? { w: 32, h: 32, font: 13 } : { w: 26, h: 26, font: 12 };
+function ScorePicker({ value, onChange, size = "sm", options }) {
+  // Options come from the indicator's scale type ({ v, label }). Falls back
+  // to a 1-4 row (used by the during/post session self-ratings which don't
+  // pass options). Clicking an active button toggles back to "no score".
+  const opts = (options && options.length) ? options : [1, 2, 3, 4].map((v) => ({ v, label: String(v) }));
+  const dim = size === "md" ? { h: 32, font: 13 } : { h: 26, font: 12 };
+
+  // Many options (e.g. 1–10) → compact dropdown so the grid cell stays narrow.
+  if (opts.length > 6) {
+    return (
+      <select
+        className="select"
+        value={value ?? ""}
+        onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value))}
+        style={{ height: dim.h, fontSize: dim.font, padding: "0 6px", minWidth: 58 }}
+      >
+        <option value="">—</option>
+        {opts.map((o) => <option key={o.v} value={o.v}>{o.label}</option>)}
+      </select>
+    );
+  }
+
+  // Few options → pill buttons. Numeric labels stay square; word labels
+  // (No/Yes, Bad/Good/Excellent) get auto width.
+  const numeric = opts.every((o) => /^\d+$/.test(String(o.label)));
   return (
-    <div style={{ display: "inline-flex", gap: 4 }}>
-      {[1, 2, 3, 4].map((n) => {
-        const active = value === n;
+    <div style={{ display: "inline-flex", gap: 4, flexWrap: "wrap", justifyContent: "center" }}>
+      {opts.map((o) => {
+        const active = value === o.v;
         return (
           <button
-            key={n}
+            key={o.v}
             type="button"
-            onClick={() => onChange(n)}
+            onClick={() => onChange(o.v)}
+            title={o.label}
             style={{
-              width: dim.w, height: dim.h,
-              padding: 0, border: "1px solid",
+              height: dim.h,
+              minWidth: numeric ? dim.h : undefined,
+              padding: numeric ? 0 : "0 9px",
+              border: "1px solid",
               borderColor: active ? "var(--accent)" : "var(--rule)",
               borderRadius: 999,
               background: active ? "var(--accent)" : "var(--card)",
@@ -529,7 +562,7 @@ function ScorePicker({ value, onChange, size = "sm" }) {
               cursor: "pointer",
               transition: "background .12s, border-color .12s",
             }}
-          >{n}</button>
+          >{o.label}</button>
         );
       })}
     </div>

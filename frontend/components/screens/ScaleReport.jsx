@@ -13,6 +13,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Icon from "../Icon";
 import { resolveSchool, downloadScaleReportPdf } from "@/lib/export";
+import { formatClassLabel } from "@/lib/format";
 
 const TERM_OPTIONS = [
   { k: "all",    label: "All-time" },
@@ -262,7 +263,7 @@ export default function ScreenScaleReport({ E, role, session }) {
               <option value="">All classes ({roster.length})</option>
               {classes.map((c) => {
                 const n = roster.filter((s) => s.cls === c).length;
-                return <option key={c} value={c}>Class {c} ({n})</option>;
+                return <option key={c} value={c}>{formatClassLabel(c)} ({n})</option>;
               })}
             </select>
             <select
@@ -273,10 +274,10 @@ export default function ScreenScaleReport({ E, role, session }) {
               disabled={filteredRoster.length === 0}
             >
               {filteredRoster.length === 0
-                ? <option value="">No students in {classFilter || "scope"}</option>
+                ? <option value="">No students in {classFilter ? formatClassLabel(classFilter) : "scope"}</option>
                 : <>
                     <option value="">Pick a student…</option>
-                    {filteredRoster.map((s) => <option key={s.id} value={s.id}>{s.name} — {s.cls}</option>)}
+                    {filteredRoster.map((s) => <option key={s.id} value={s.id}>{s.name} — {formatClassLabel(s.cls)}</option>)}
                   </>
               }
             </select>
@@ -347,7 +348,7 @@ export default function ScreenScaleReport({ E, role, session }) {
               <div style={{ flex: 1, minWidth: 200 }}>
                 <div style={{ fontSize: 18, fontWeight: 800, color: "var(--ink)" }}>{student?.name || "Student"}</div>
                 <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 2 }}>
-                  Class {student?.cls || "—"} · {term === "all" ? "All-time" : `Term ${term}`} ·
+                  {student?.cls ? formatClassLabel(student.cls) : "—"} · {term === "all" ? "All-time" : `Term ${term}`} ·
                   {" "}composite weights A/E/C/B = {Object.values(profile.weights || {}).join(" / ") || "default"}
                 </div>
               </div>
@@ -597,7 +598,7 @@ function SessionTimeline({ studentId, entries, sessions, dateFrom, dateTo }) {
                 <div key={sess.sessionId} style={{ marginBottom: 10, paddingLeft: 12, borderLeft: "2px solid var(--rule)" }}>
                   <div style={{ fontSize: 12, color: "var(--ink-2)", fontWeight: 700, marginBottom: 6, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
                     {sess.subject && <span>{sess.subject}</span>}
-                    {sess.cls && <span className="chip">{sess.cls}</span>}
+                    {sess.cls && <span className="chip">{formatClassLabel(sess.cls)}</span>}
                     {sess.sessionType && sess.sessionType !== "regular" && <span className="chip warn">{sess.sessionType}</span>}
                     <span style={{ fontFamily: "var(--font-mono)", fontSize: 10.5, color: "var(--ink-4)" }}>{sess.sessionId}</span>
                   </div>

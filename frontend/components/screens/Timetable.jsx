@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Icon from "../Icon";
 import { KPI } from "../ui";
+import { formatClassLabel } from "@/lib/format";
 
 // Standard Indian school week — 6 working days. The number of periods and
 // their start/end times are a single whole-school setting (default 9 periods)
@@ -89,7 +90,7 @@ function labelForKey(key, classes) {
   const [head] = String(key).split("-");
   const n = Number(head);
   const found = (classes || []).find((c) => Number(c.n) === n);
-  return found?.label || `Class ${key}`;
+  return found?.label || formatClassLabel(key);
 }
 
 // --------------------------------------------------------------------------
@@ -205,7 +206,7 @@ export default function ScreenTimetable({ E, refresh, role, session }) {
   }
 
   async function handleClear(entry) {
-    if (!confirm(`Clear ${entry.day} period ${entry.period} (${entry.subject}) from ${entry.cls}?`)) return;
+    if (!confirm(`Clear ${entry.day} period ${entry.period} (${entry.subject}) from ${labelForKey(entry.cls, allClasses)}?`)) return;
     try {
       const r = await fetch("/api/timetable", {
         method: "DELETE",

@@ -6,9 +6,10 @@
 // here as defaults; the composite weights can be overridden per-school
 // via app_settings.scale.weights ({ A, E, C, B }).
 //
-// Score per indicator is 1-4. Term aggregate per indicator = average of
-// all entries for that student × indicator over the date range, scaled
-// to 0-100: ((avg - 1) / 3) * 100.
+// Each indicator is scored on its own scale (see SCALE_SCALES): 1-10,
+// Yes/No, or Bad/Good/Excellent. Raw scores are always 1-based (1..max).
+// Term aggregate per indicator = average of all entries for that student ×
+// indicator over the date range, scaled to 0-100: ((avg - 1) / (max - 1)) * 100.
 //
 // Domain score = Σ (indicator avg × indicator weight).
 // Composite   = Σ (domain score × domain weight).
@@ -20,28 +21,47 @@ export const SCALE_DOMAINS = [
   { key: "B", label: "Behaviour & habits", short: "Behaviour", color: "#c11d1d" },
 ];
 
+// Scale types. Each indicator is scored on one of these. Raw scores are
+// always 1-based (1..max) so the 0-100 normalisation is uniform:
+//   normalised = ((rawAvg - 1) / (max - 1)) * 100
+// `options` drives the picker UI (value stored + button/label shown).
+export const SCALE_SCALES = {
+  num4:  { max: 4,  hint: "1–4",                options: [1, 2, 3, 4].map((v) => ({ v, label: String(v) })) },
+  num10: { max: 10, hint: "1–10",               options: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((v) => ({ v, label: String(v) })) },
+  yesno: { max: 2,  hint: "No / Yes",           options: [{ v: 1, label: "No" }, { v: 2, label: "Yes" }] },
+  gbe:   { max: 3,  hint: "Bad · Good · Excellent", options: [{ v: 1, label: "Bad" }, { v: 2, label: "Good" }, { v: 3, label: "Excellent" }] },
+};
+
 export const SCALE_INDICATORS = [
   // A — Academic output
-  { key: "A.lesson_test",       domain: "A", label: "Lesson test score",     indicatorWeight: 40 },
-  { key: "A.worksheet",         domain: "A", label: "Worksheet completion", indicatorWeight: 20 },
-  { key: "A.oral_response",     domain: "A", label: "Oral response quality", indicatorWeight: 20 },
-  { key: "A.homework_return",   domain: "A", label: "Homework return rate", indicatorWeight: 20 },
+  { key: "A.lesson_test",       domain: "A", label: "Lesson test score",     indicatorWeight: 40, scaleType: "num10" },
+  { key: "A.worksheet",         domain: "A", label: "Worksheet completion", indicatorWeight: 20, scaleType: "yesno" },
+  { key: "A.oral_response",     domain: "A", label: "Oral response quality", indicatorWeight: 20, scaleType: "yesno" },
+  { key: "A.homework_return",   domain: "A", label: "Homework return rate", indicatorWeight: 20, scaleType: "yesno" },
   // E — Expression
-  { key: "E.handwriting",       domain: "E", label: "Handwriting clarity",  indicatorWeight: 25 },
-  { key: "E.reading_fluency",   domain: "E", label: "Reading fluency",      indicatorWeight: 25 },
-  { key: "E.speaking",          domain: "E", label: "Speaking confidence",  indicatorWeight: 25 },
-  { key: "E.presentation",      domain: "E", label: "Presentation structure", indicatorWeight: 25 },
+  { key: "E.handwriting",       domain: "E", label: "Handwriting clarity",  indicatorWeight: 25, scaleType: "num10" },
+  { key: "E.reading_fluency",   domain: "E", label: "Reading fluency",      indicatorWeight: 25, scaleType: "num10" },
+  { key: "E.speaking",          domain: "E", label: "Speaking confidence",  indicatorWeight: 25, scaleType: "num10" },
+  { key: "E.presentation",      domain: "E", label: "Presentation structure", indicatorWeight: 25, scaleType: "num10" },
   // C — Creativity & play
-  { key: "C.initiates",         domain: "C", label: "Initiates activity ideas", indicatorWeight: 30 },
-  { key: "C.participates",      domain: "C", label: "Participates in play",     indicatorWeight: 30 },
-  { key: "C.invents_rules",     domain: "C", label: "Invents rules / roles",    indicatorWeight: 20 },
-  { key: "C.cross_domain",      domain: "C", label: "Cross-domain thinking",    indicatorWeight: 20 },
+  { key: "C.initiates",         domain: "C", label: "Initiates activity ideas", indicatorWeight: 30, scaleType: "gbe" },
+  { key: "C.participates",      domain: "C", label: "Participates in play",     indicatorWeight: 30, scaleType: "gbe" },
+  { key: "C.invents_rules",     domain: "C", label: "Invents rules / roles",    indicatorWeight: 20, scaleType: "gbe" },
+  { key: "C.cross_domain",      domain: "C", label: "Cross-domain thinking",    indicatorWeight: 20, scaleType: "gbe" },
   // B — Behaviour & habits
-  { key: "B.punctuality",       domain: "B", label: "Punctuality / turnout",   indicatorWeight: 30 },
-  { key: "B.discipline",        domain: "B", label: "Discipline in class",     indicatorWeight: 30 },
-  { key: "B.screen_free",       domain: "B", label: "Screen-free engagement",  indicatorWeight: 20 },
-  { key: "B.peer_tone",         domain: "B", label: "Peer interaction tone",   indicatorWeight: 20 },
+  { key: "B.punctuality",       domain: "B", label: "Punctuality / turnout",   indicatorWeight: 30, scaleType: "gbe" },
+  { key: "B.discipline",        domain: "B", label: "Discipline in class",     indicatorWeight: 30, scaleType: "gbe" },
+  { key: "B.screen_free",       domain: "B", label: "Screen-free engagement",  indicatorWeight: 20, scaleType: "gbe" },
+  { key: "B.peer_tone",         domain: "B", label: "Peer interaction tone",   indicatorWeight: 20, scaleType: "gbe" },
 ];
+
+// Max raw value per indicator key (from its scale type), for normalisation.
+const INDICATOR_MAX = Object.fromEntries(
+  SCALE_INDICATORS.map((i) => [i.key, (SCALE_SCALES[i.scaleType] || SCALE_SCALES.num4).max])
+);
+export function indicatorMax(key) {
+  return INDICATOR_MAX[key] || 4;
+}
 
 // Default composite weights — Academic deliberately heavier than the
 // other three so academic outcomes lead, but creativity and behaviour
@@ -83,8 +103,11 @@ export function computeProfile(entries, domainWeights = SCALE_DEFAULT_DOMAIN_WEI
   const perIndicator = {};
   for (const ind of SCALE_INDICATORS) {
     const acc = byInd.get(ind.key);
+    // Normalise the raw average (1..max) to 0-100 using this indicator's
+    // own scale max — 1-10, Yes/No (max 2), Bad/Good/Excellent (max 3), etc.
+    const max = indicatorMax(ind.key);
     perIndicator[ind.key] = acc && acc.n
-      ? Math.round(((acc.sum / acc.n - 1) / 3) * 100)
+      ? Math.round(((acc.sum / acc.n - 1) / Math.max(1, max - 1)) * 100)
       : null;
   }
 

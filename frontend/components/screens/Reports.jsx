@@ -354,7 +354,7 @@ export default function ScreenReports({ E, session }) {
         const total = r.collected + r.pending;
         const pct = total > 0 ? Math.round((r.collected / total) * 100) : 0;
         rows.push([
-          { html: `<b>${escapeHtml(r.cls)}</b>` },
+          { html: `<b>${escapeHtml(formatClassLabel(r.cls))}</b>` },
           r.students,
           fmtRupees(r.collected),
           fmtRupees(r.pending),
@@ -442,7 +442,7 @@ export default function ScreenReports({ E, session }) {
       body  = `<h3>By exam</h3>` + renderTable(
         ["Date", "Class", "Subject", "Exam", "Type", "Students", "Avg %", "Top scorer"],
         examPerf.map((e) => [
-          e.date, e.cls, e.subject, e.name, e.type,
+          e.date, formatClassLabel(e.cls), e.subject, e.name, e.type,
           e.count,
           e.avgPct === null ? "—" : `${e.avgPct}%`,
           e.top ? `${e.top.name} (${e.top.score}/${e.top.max})` : "—",
@@ -767,7 +767,7 @@ export default function ScreenReports({ E, session }) {
                   const pct = students.length > 0 ? Math.round((g.total / students.length) * 100) : 0;
                   return (
                     <tr key={g.grade}>
-                      <td style={{ fontSize: 12.5, fontWeight: 500 }}>Class {g.grade}</td>
+                      <td style={{ fontSize: 12.5, fontWeight: 500 }}>{formatClassLabel(String(g.grade))}</td>
                       <td className="num">{g.total}</td>
                       <td style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{g.sections}</td>
                       <td>

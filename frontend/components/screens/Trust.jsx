@@ -2,7 +2,7 @@
 
 import Icon from "../Icon";
 import { KPI } from "../ui";
-import { money, moneyK } from "@/lib/format";
+import { money, moneyK, formatClassLabel } from "@/lib/format";
 import { openPrintWindow } from "./Reports";
 
 export default function ScreenTrust({ E, setCurrent, role }) {
@@ -244,7 +244,7 @@ export default function ScreenTrust({ E, setCurrent, role }) {
                 sub: "Breakdown by class-section",
                 items: Object.entries(studentsByClass)
                   .sort((a, b) => a[0].localeCompare(b[0]))
-                  .map(([cls, n]) => ({ label: `Class ${cls}`, value: n, sub: `${n} student${n === 1 ? "" : "s"}` })),
+                  .map(([cls, n]) => ({ label: formatClassLabel(String(cls)), value: n, sub: `${n} student${n === 1 ? "" : "s"}` })),
               }}
             />
             <KPI

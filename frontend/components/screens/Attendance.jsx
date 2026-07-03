@@ -385,7 +385,7 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
             <tbody>
               {roster.length === 0 && (
                 <tr><td colSpan={7} className="empty">
-                  No students in Class {cls}-{sec} yet. Add students from the Students screen first.
+                  No students in {formatClassLabel(`${cls}-${sec}`)} yet. Add students from the Students screen first.
                 </td></tr>
               )}
               {roster.map((s, i) => {

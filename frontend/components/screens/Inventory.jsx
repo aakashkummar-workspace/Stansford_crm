@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI } from "../ui";
+import { formatClassLabel } from "@/lib/format";
 
 // Built-in category buckets. Schools can also add their own — those show up
 // alongside these in the filter strip via `extraCatsFromItems` below.
@@ -331,7 +332,7 @@ export default function ScreenInventory({ E, refresh, role }) {
                           const catLbl = FILTERS.find((f) => f.k === filter)?.label;
                           const clsLbl = !classFilter
                             ? null
-                            : classFilter === "all" ? "All-class items only" : `Class ${classFilter}`;
+                            : classFilter === "all" ? "All-class items only" : `${formatClassLabel(String(classFilter))} items only`;
                           const bits = [];
                           if (filter !== "all") bits.push(`“${catLbl}”`);
                           if (clsLbl) bits.push(`“${clsLbl}”`);
@@ -394,7 +395,7 @@ export default function ScreenInventory({ E, refresh, role }) {
               <div style={{ padding: "8px 14px 14px", display: "flex", flexDirection: "column", gap: 6 }}>
                 {classHealth.map(([cls, info]) => (
                   <div key={cls} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, alignItems: "center" }}>
-                    <span style={{ color: "var(--ink-2)" }}>{cls}</span>
+                    <span style={{ color: "var(--ink-2)" }}>{formatClassLabel(String(cls))}</span>
                     <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
                       <span className="mono" style={{ color: "var(--ink-3)" }}>{info.items} item{info.items === 1 ? "" : "s"}</span>
                       {info.out > 0 ? (

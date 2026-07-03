@@ -395,7 +395,7 @@ function AudiencePicker({ value, onChange, classes, students, pending, role }) {
                       style={{ cursor: "pointer" }}
                     >
                       {selected && <Icon name="check" size={10} />}
-                      Class {k} ({count})
+                      {formatClassLabel(k)} ({count})
                     </button>
                   );
                 })}

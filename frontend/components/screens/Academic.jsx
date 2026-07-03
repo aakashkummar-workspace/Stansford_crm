@@ -269,7 +269,7 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
     const logsPosted = (E.DAILY_LOGS || []).filter((l) => l.cls === `${cls}-${sec}`).length;
 
     downloadPdf({
-      title: `Academic Monthly Report · Class ${cls}-${sec}`,
+      title: `Academic Monthly Report · ${formatClassLabel(`${cls}-${sec}`)}`,
       subtitle: `${roster.length} student${roster.length === 1 ? "" : "s"} · ${monthName}`,
       school, actor,
       dateRange: monthName,
@@ -300,7 +300,7 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
       })),
       filename: `${school.name.replace(/\s+/g, "-").toLowerCase()}-academic-class-${cls}-${sec}-${monthName.replace(" ", "-").toLowerCase()}`,
     });
-    flash(`Opened PDF preview · class ${cls}-${sec}`);
+    flash(`Opened PDF preview · ${formatClassLabel(`${cls}-${sec}`)}`);
   };
 
   return (
@@ -373,14 +373,14 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
                     borderColor: active ? "var(--accent)" : "var(--rule)",
                   }}
                 >
-                  Class {key}
+                  {formatClassLabel(key)}
                 </button>
               );
             })}
           </div>
           <span style={{ fontSize: 11.5, color: "var(--ink-3)", marginLeft: "auto" }}>
             {teacherClassList.length === 1
-              ? `Daily logs and announcements you post go to ${cls}-${sec} parents.`
+              ? `Daily logs and announcements you post go to ${formatClassLabel(`${cls}-${sec}`)} parents.`
               : `Pick a class to work on. You can post for each class separately.`}
           </span>
         </div>
@@ -401,7 +401,7 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
                 borderColor: cls === c.n ? "var(--ink)" : "var(--rule)",
               }}
             >
-              Class {c.n}
+              {formatClassLabel(String(c.n))}
             </button>
           ))}
           <span style={{ width: 1, height: 16, background: "var(--rule)", margin: "0 6px" }} />
@@ -692,7 +692,7 @@ function AnnounceClassModal({ cls, recipientCount, teacherName, onClose, onSent 
         body: JSON.stringify({
           campaign: `Class ${cls} announcement · ${teacherName}`,
           audience: `class_${cls}`,
-          audienceLabel: `Class ${cls} parents`,
+          audienceLabel: `${formatClassLabel(String(cls))} parents`,
           channel,
           message: message.trim(),
           sent: recipientCount,
@@ -700,7 +700,7 @@ function AnnounceClassModal({ cls, recipientCount, teacherName, onClose, onSent 
       });
       const json = await r.json().catch(() => ({}));
       if (!r.ok || !json.ok) throw new Error(json.error || "Failed");
-      onSent(`Announced to ${recipientCount} parent${recipientCount === 1 ? "" : "s"} of Class ${cls}`);
+      onSent(`Announced to ${recipientCount} parent${recipientCount === 1 ? "" : "s"} of ${formatClassLabel(String(cls))}`);
     } catch (ex) { setErr(ex.message); setBusy(false); }
   };
 
@@ -712,7 +712,7 @@ function AnnounceClassModal({ cls, recipientCount, teacherName, onClose, onSent 
       <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 520 }}>
         <div className="card-head">
           <div>
-            <div className="card-title">Announce to Class {cls}</div>
+            <div className="card-title">Announce to {formatClassLabel(String(cls))}</div>
             <div className="card-sub">Sent to {recipientCount} parent{recipientCount === 1 ? "" : "s"} via {channel}</div>
           </div>
           <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
@@ -748,7 +748,7 @@ function AnnounceClassModal({ cls, recipientCount, teacherName, onClose, onSent 
           )}
           {recipientCount === 0 && (
             <div style={{ background: "var(--warn-soft)", color: "var(--warn)", padding: "9px 12px", borderRadius: 7, fontSize: 12 }}>
-              No students in Class {cls} yet — announcement won't reach anyone.
+              No students in {formatClassLabel(String(cls))} yet — announcement won't reach anyone.
             </div>
           )}
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
@@ -847,7 +847,7 @@ function LogModal({ student, cls, existing, today, onClose, onSubmit }) {
         <div className="card-head">
           <div>
             <div className="card-title">{existing ? "Edit today's log" : "Log today"}</div>
-            <div className="card-sub">{student?.name || "—"} · {student?.id || ""} · Class {cls} · {today}</div>
+            <div className="card-sub">{student?.name || "—"} · {student?.id || ""} · {formatClassLabel(String(cls))} · {today}</div>
           </div>
           <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
         </div>

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Icon from "../Icon";
 import { KPI } from "../ui";
 import { resolveSchool, downloadPdf } from "@/lib/export";
+import { formatClassLabel } from "@/lib/format";
 
 const ACHIEVEMENT_LEVELS = [
   { k: "participation", label: "Participation",  tone: "info" },
@@ -145,7 +146,7 @@ export default function ScreenStudentActivities({ E, role, session, refresh }) {
       rows: filtered.map((a, i) => ({
         i: i + 1, id: a.id,
         student: nameOf(a) || "—",
-        cls: clsOf(a) || "—",
+        cls: clsOf(a) ? formatClassLabel(clsOf(a)) : "—",
         activity: a.activityName || "—",
         event: a.eventName || "—",
         level: LEVEL_LABEL[a.achievementLevel] || a.achievementLevel || "—",
@@ -207,7 +208,7 @@ export default function ScreenStudentActivities({ E, role, session, refresh }) {
         {!isParent && (
           <select className="select" value={filterStudent} onChange={(e) => setFilterStudent(e.target.value)}>
             <option value="all">All students</option>
-            {(E.ADDED_STUDENTS || []).map((s) => <option key={s.id} value={s.id}>{s.name} — {s.cls}</option>)}
+            {(E.ADDED_STUDENTS || []).map((s) => <option key={s.id} value={s.id}>{s.name} — {formatClassLabel(s.cls)}</option>)}
           </select>
         )}
         <select className="select" value={filterLevel} onChange={(e) => setFilterLevel(e.target.value)}>
@@ -240,7 +241,7 @@ export default function ScreenStudentActivities({ E, role, session, refresh }) {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                     <span style={{ fontSize: 13, fontWeight: 700 }}>{nameOf(a)}</span>
-                    {clsOf(a) && <span className="chip">{clsOf(a)}</span>}
+                    {clsOf(a) && <span className="chip">{formatClassLabel(clsOf(a))}</span>}
                     <span className={`chip ${LEVEL_TONE[a.achievementLevel] || "info"}`}>
                       <span className="dot" />{LEVEL_LABEL[a.achievementLevel] || a.achievementLevel}
                     </span>
@@ -376,7 +377,7 @@ function NewActivityModal({ students, onClose, onSubmit }) {
         <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <Field label="Student *">
             <select className="select" required value={form.studentId} onChange={(e) => set("studentId", e.target.value)}>
-              {students.map((s) => <option key={s.id} value={s.id}>{s.name} — {s.cls}</option>)}
+              {students.map((s) => <option key={s.id} value={s.id}>{s.name} — {formatClassLabel(s.cls)}</option>)}
             </select>
           </Field>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>

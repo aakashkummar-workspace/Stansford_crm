@@ -8,6 +8,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Icon from "../Icon";
 import { KPI } from "../ui";
+import { formatClassLabel } from "@/lib/format";
 
 const ROOT_CAUSE_CATEGORIES = [
   { k: "academic",  label: "Academic / curricular gap" },
@@ -183,7 +184,7 @@ export default function ScreenScaleAdmin({ E, role, session, refresh }) {
               return (
                 <div key={c.cls}>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 4 }}>
-                    <span style={{ fontWeight: 700 }}>Class {c.cls}</span>
+                    <span style={{ fontWeight: 700 }}>{formatClassLabel(c.cls)}</span>
                     <span style={{ fontFamily: "var(--font-mono)", color }}>{c.average} · {c.students} student{c.students === 1 ? "" : "s"}</span>
                   </div>
                   <div style={{ height: 6, background: "var(--bg-2)", borderRadius: 999, overflow: "hidden" }}>
@@ -222,7 +223,7 @@ export default function ScreenScaleAdmin({ E, role, session, refresh }) {
                 }}>{s.composite}</div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 700 }}>{s.name}</div>
-                  <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 2 }}>Class {s.cls} · {s.id}</div>
+                  <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 2 }}>{formatClassLabel(s.cls)} · {s.id}</div>
                 </div>
                 <span className="chip">{activePlan?.id === s.id ? "Open" : "Start plan →"}</span>
               </div>
@@ -262,7 +263,7 @@ function SupportWorkflow({ student, plan, onChange, onSave, busy }) {
         <div>
           <div className="card-title">Support plan · {student.name}</div>
           <div className="card-sub">
-            Composite {student.composite} · class {student.cls}.{" "}
+            Composite {student.composite} · {formatClassLabel(student.cls)}.{" "}
             <strong>Steps must be done in order.</strong> Don't skip to therapy referral without root-cause + advisory documented.
           </div>
         </div>

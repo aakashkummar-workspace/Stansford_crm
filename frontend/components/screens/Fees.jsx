@@ -69,6 +69,7 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
   // ---------- filters / selection ----------
   const [statusFilter, setStatusFilter] = useState("All");
   const [classFilter, setClassFilter] = useState("All");
+  const [feeTypeFilter, setFeeTypeFilter] = useState("All"); // All | term1 | term2 | term3 | transport | application
   const [filterOpen, setFilterOpen] = useState(false);
   const [collectOpen, setCollectOpen] = useState(false);
   const [picked, setPicked] = useState(new Set());
@@ -93,6 +94,8 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
   // Uniform, Term I/II/III, Van, STEM, Annual Day fees as separate items.
   const [addFeeOpen, setAddFeeOpen] = useState(false);
   const [structureOpen, setStructureOpen] = useState(false);
+  const [remindConfirm, setRemindConfirm] = useState(false);
+  const [remindBusy, setRemindBusy] = useState(false);
 
   const handleAddFee = async (payload) => {
     const r = await fetch("/api/fees/add", {
@@ -161,14 +164,26 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchFocus]);
 
+  // Fee-type slice first, so the Paid/Pending/Overdue/All counts below reflect
+  // the chosen fee type (e.g. "Term I → Paid · N, Pending · M").
+  const feeTypeOf = (f) => (f.feeType || f.fee_type || "term1");
+  const typeScoped = useMemo(
+    () => (feeTypeFilter === "All" ? all : all.filter((f) => feeTypeOf(f) === feeTypeFilter)),
+    [all, feeTypeFilter]
+  );
+
+  // Counts are by STUDENT (not fee line-item), so "Pending · 276" reads as
+  // "276 students have a pending fee" rather than counting all 1,238 rows.
+  const studentOf = (f) => f.studentId || f.student_id || String(f.id || "").split("__")[0];
+  const uniqStudents = (arr) => new Set(arr.map(studentOf).filter(Boolean)).size;
   const counts = {
-    All: all.length,
-    Paid: all.filter((f) => f.status === "paid").length,
-    Pending: all.filter((f) => f.status === "pending").length,
-    Overdue: all.filter((f) => f.status === "overdue").length,
+    All: uniqStudents(typeScoped),
+    Paid: uniqStudents(typeScoped.filter((f) => f.status === "paid")),
+    Pending: uniqStudents(typeScoped.filter((f) => f.status === "pending")),
+    Overdue: uniqStudents(typeScoped.filter((f) => f.status === "overdue")),
   };
 
-  const visible = all.filter((f) => {
+  const visible = typeScoped.filter((f) => {
     if (statusFilter === "Paid" && f.status !== "paid") return false;
     if (statusFilter === "Pending" && f.status !== "pending") return false;
     if (statusFilter === "Overdue" && f.status !== "overdue") return false;
@@ -397,7 +412,7 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
         i: i + 1,
         id: f.id,
         name: f.name || "—",
-        cls: f.cls || "—",
+        cls: f.cls ? formatClassLabel(f.cls) : "—",
         feeType: feeTypeLabel(f.feeType) || "—",
         amount: money(f.amount || 0),
         status: (f.status || "—").replace(/^./, (c) => c.toUpperCase()),
@@ -619,28 +634,6 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
             </span>
           ) : (
             <>
-              <button
-                className="btn"
-                onClick={async () => {
-                  if (scopedPending.length === 0) { flash("No pending fees to remind about", "bad"); return; }
-                  if (!confirm(`Send fee reminder to ${scopedPending.length} parent${scopedPending.length === 1 ? "" : "s"}?`)) return;
-                  try {
-                    const r = await fetch("/api/fees/remind", {
-                      method: "POST",
-                      headers: { "content-type": "application/json" },
-                      body: JSON.stringify({}),  // no ids = remind all pending
-                    });
-                    const j = await r.json();
-                    if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
-                    flash(`Reminder sent to ${j.sent.length} parent${j.sent.length === 1 ? "" : "s"}`, "ok");
-                    await refresh?.();
-                  } catch (e) { flash(e.message, "bad"); }
-                }}
-                disabled={scopedPending.length === 0}
-                title={scopedPending.length === 0 ? "No pending fees" : `Reminds all ${scopedPending.length} parents with pending fees`}
-              >
-                <Icon name="megaphone" size={13} />Remind overdue
-              </button>
               <button className="btn" onClick={importStructure}><Icon name="upload" size={13} />Import structure</button>
               <button className="btn" onClick={exportPdf} title="Open a printable, branded PDF report">
                 <Icon name="download" size={13} />Export PDF
@@ -653,6 +646,8 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
                   <Icon name="settings" size={13} />Fee structure
                 </button>
               )}
+              {/* Divider — Collect fee + Remind overdue are set apart on the right. */}
+              <div style={{ width: 1, alignSelf: "stretch", background: "var(--rule)", margin: "2px 4px" }} />
               <div style={{ position: "relative" }}>
                 <button className="btn accent" onClick={headerCollect}>
                   <Icon name="plus" size={13} />Collect fee
@@ -670,6 +665,17 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
                   />
                 )}
               </div>
+              <button
+                className="btn"
+                onClick={() => {
+                  if (scopedPending.length === 0) { flash("No pending fees to remind about", "bad"); return; }
+                  setRemindConfirm(true);
+                }}
+                disabled={scopedPending.length === 0}
+                title={scopedPending.length === 0 ? "No pending fees" : `Reminds all ${scopedPending.length} parents with pending fees`}
+              >
+                <Icon name="megaphone" size={13} />Remind overdue
+              </button>
             </>
           )}
         </div>
@@ -678,7 +684,7 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
       <div className="grid g-12">
         <div className="card col-8">
           <div className="card-head">
-            <div><div className="card-title">Fee register</div><div className="card-sub">Classes 1–8 · April 2026 term</div></div>
+            <div><div className="card-title">Fee register</div><div className="card-sub">{counts.All} student{counts.All === 1 ? "" : "s"} · counts by student</div></div>
             <div className="card-actions">
               <div className="segmented">
                 {["All", "Paid", "Pending", "Overdue"].map((s) => (
@@ -691,6 +697,20 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
                   </button>
                 ))}
               </div>
+              <select
+                className="select"
+                value={feeTypeFilter}
+                onChange={(e) => setFeeTypeFilter(e.target.value)}
+                title="Filter the register by fee type — combine with Paid / Pending / All above"
+                style={{ height: 30, fontSize: 12, padding: "0 8px", borderColor: feeTypeFilter !== "All" ? "var(--accent)" : undefined }}
+              >
+                <option value="All">All fee types</option>
+                <option value="term1">Term I</option>
+                <option value="term2">Term II</option>
+                <option value="term3">Term III</option>
+                <option value="transport">Transport</option>
+                <option value="application">Admission</option>
+              </select>
               <div style={{ position: "relative" }}>
                 <button className={`btn sm ${classFilter !== "All" ? "accent" : ""}`} onClick={() => setFilterOpen((v) => !v)}>
                   <Icon name="filter" size={12} />
@@ -1206,6 +1226,60 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
           onSaved={() => { setStructureOpen(false); flash("Fee structure saved", "ok"); }}
         />
       )}
+
+      {remindConfirm && (
+        <ConfirmModal
+          title="Send fee reminders?"
+          message={`This will send a fee reminder to ${scopedPending.length} parent${scopedPending.length === 1 ? "" : "s"} with a pending balance. Do you want to continue?`}
+          confirmLabel="Yes, send"
+          cancelLabel="No"
+          busy={remindBusy}
+          onCancel={() => { if (!remindBusy) setRemindConfirm(false); }}
+          onConfirm={async () => {
+            setRemindBusy(true);
+            try {
+              const r = await fetch("/api/fees/remind", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({}),  // no ids = remind all pending
+              });
+              const j = await r.json();
+              if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
+              flash(`Reminder sent to ${j.sent.length} parent${j.sent.length === 1 ? "" : "s"}`, "ok");
+              await refresh?.();
+            } catch (e) { flash(e.message, "bad"); }
+            finally { setRemindBusy(false); setRemindConfirm(false); }
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Small reusable Yes/No confirmation modal (styled, matches the app).
+function ConfirmModal({ title, message, confirmLabel = "Yes", cancelLabel = "No", tone = "accent", busy = false, onConfirm, onCancel }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape" && !busy) onCancel(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onCancel, busy]);
+  return (
+    <div onClick={() => { if (!busy) onCancel(); }} style={{ position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)", display: "grid", placeItems: "center", zIndex: 300, padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 400 }}>
+        <div className="card-head">
+          <div><div className="card-title">{title}</div></div>
+          <button type="button" className="icon-btn" onClick={onCancel} disabled={busy}><Icon name="x" size={14} /></button>
+        </div>
+        <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ fontSize: 13, color: "var(--ink-2)", lineHeight: 1.5 }}>{message}</div>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <button type="button" className="btn ghost" onClick={onCancel} disabled={busy}>{cancelLabel}</button>
+            <button type="button" className={`btn ${tone}`} onClick={onConfirm} disabled={busy}>
+              <Icon name="check" size={13} />{busy ? "Sending…" : confirmLabel}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

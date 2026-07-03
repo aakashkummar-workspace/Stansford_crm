@@ -511,7 +511,7 @@ function AddClassModal({ existing, onClose, onSubmit }) {
     if (!form.n) return null;
     const n = Number(form.n);
     if (Number.isNaN(n) || n < 1) return "Must be a positive integer";
-    if (existing.includes(n)) return `Class ${n} already exists`;
+    if (existing.includes(n)) return `${formatClassLabel(String(n))} already exists`;
     return null;
   })();
   const valid = form.n && !numError;

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { recordTransportAttendance, logAudit } from "@/lib/db";
+import { recordTransportAttendance, logAudit, notifyStudentParent } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 
 // POST /api/transport/attendance
@@ -23,8 +23,8 @@ export async function POST(req) {
   if (!body?.studentId) {
     return NextResponse.json({ ok: false, error: "studentId required" }, { status: 400 });
   }
-  if (!body?.status || !["boarded", "absent", "skipped"].includes(body.status)) {
-    return NextResponse.json({ ok: false, error: "status must be boarded|absent|skipped" }, { status: 400 });
+  if (!body?.status || !["boarded", "absent", "skipped", "dropped"].includes(body.status)) {
+    return NextResponse.json({ ok: false, error: "status must be boarded|absent|skipped|dropped" }, { status: 400 });
   }
 
   let row;
@@ -41,6 +41,18 @@ export async function POST(req) {
       `${row.studentName || row.studentId} · ${row.routeCode || "—"} · ${row.direction} · ${row.date}`
     );
   } catch {}
+
+  // Evening drop → push an in-app notification to the child's parent so they
+  // know the student has been dropped off from the bus.
+  if (row.status === "dropped") {
+    try {
+      await notifyStudentParent(row.studentId, {
+        type: "transport",
+        title: "Your child has been dropped from the bus",
+        description: `${row.studentName || "Your child"} was safely dropped${row.stopName ? ` at ${row.stopName}` : ""}.`,
+      });
+    } catch {}
+  }
 
   return NextResponse.json({ ok: true, attendance: row });
 }

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { resolveSchool, downloadPdf } from "@/lib/export";
+import { formatClassLabel } from "@/lib/format";
 import { KPI, StatusChip } from "../ui";
 
 // Three buckets every parent complaint falls into. Order matters — it's the
@@ -207,7 +208,7 @@ export default function ScreenComplaints({ E, refresh, role, session }) {
           const leaves = complaints.filter((c) => c.type === "leave_request");
           const itemFor = (c, tone) => ({
             label: c.issue?.slice(0, 50) || "—",
-            value: c.cls || "—",
+            value: formatClassLabel(c.cls),
             sub: `${c.student || ""}${c.date ? ` · ${c.date}` : ""}`,
             tone,
           });
@@ -332,7 +333,7 @@ export default function ScreenComplaints({ E, refresh, role, session }) {
                   <td style={{ fontFamily: "var(--font-mono)", fontSize: 11.5, color: "var(--ink-3)" }}>{c.id}</td>
                   {!isParent && (
                     <td>
-                      <div style={{ fontSize: 12.5, fontWeight: 500 }}>{c.student} <span style={{ color: "var(--ink-4)", fontWeight: 400 }}>{c.cls}</span></div>
+                      <div style={{ fontSize: 12.5, fontWeight: 500 }}>{c.student} <span style={{ color: "var(--ink-4)", fontWeight: 400 }}>{formatClassLabel(c.cls)}</span></div>
                       <div style={{ fontSize: 11, color: "var(--ink-3)" }}>{c.parent}</div>
                     </td>
                   )}
@@ -483,7 +484,7 @@ function StaffLogModal({ students, onClose, onSubmit }) {
             ) : (
               <select className="select" value={studentId} onChange={(e) => setStudentId(e.target.value)} autoFocus>
                 {students.map((s) => (
-                  <option key={s.id} value={s.id}>{s.name} · {s.cls} · {s.id}</option>
+                  <option key={s.id} value={s.id}>{s.name} · {formatClassLabel(s.cls)} · {s.id}</option>
                 ))}
               </select>
             )}
@@ -572,7 +573,7 @@ function NewTicketModal({ child, onClose, onSubmit }) {
         <div className="card-head">
           <div>
             <div className="card-title">{type === "leave_request" ? "Submit a leave request" : "Raise a ticket"}</div>
-            <div className="card-sub">{child.name ? `${child.name} · Class ${child.cls}` : "For your child"}</div>
+            <div className="card-sub">{child.name ? `${child.name} · ${formatClassLabel(child.cls)}` : "For your child"}</div>
           </div>
           <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
         </div>

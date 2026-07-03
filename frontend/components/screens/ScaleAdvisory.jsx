@@ -11,6 +11,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Icon from "../Icon";
 import { resolveSchool, downloadPdf } from "@/lib/export";
+import { formatClassLabel } from "@/lib/format";
 
 export default function ScreenScaleAdvisory({ E, role, session }) {
   const isAuthorised = role === "admin" || role === "principal" || role === "academic_director" || role === "teacher";
@@ -143,7 +144,7 @@ export default function ScreenScaleAdvisory({ E, role, session }) {
       subtitle: "TEACHER'S SCRIPT — DO NOT HAND TO PARENT",
       school,
       actor: session?.name || null,
-      dateRange: `Class ${student.cls} · prepared ${new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}`,
+      dateRange: `${formatClassLabel(student.cls)} · prepared ${new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}`,
       summary: [
         { label: "Composite",      value: profile.composite ?? "—" },
         { label: "Strongest area", value: strongestDomain?.key || "—" },
@@ -213,7 +214,7 @@ export default function ScreenScaleAdvisory({ E, role, session }) {
           <option value="">All classes ({roster.length})</option>
           {classes.map((c) => {
             const n = roster.filter((s) => s.cls === c).length;
-            return <option key={c} value={c}>Class {c} ({n})</option>;
+            return <option key={c} value={c}>{formatClassLabel(c)} ({n})</option>;
           })}
         </select>
         <select
@@ -224,10 +225,10 @@ export default function ScreenScaleAdvisory({ E, role, session }) {
           disabled={filteredRoster.length === 0}
         >
           {filteredRoster.length === 0
-            ? <option value="">No students in {classFilter || "scope"}</option>
+            ? <option value="">No students in {classFilter ? formatClassLabel(classFilter) : "scope"}</option>
             : <>
                 <option value="">Pick a student…</option>
-                {filteredRoster.map((s) => <option key={s.id} value={s.id}>{s.name} — {s.cls}</option>)}
+                {filteredRoster.map((s) => <option key={s.id} value={s.id}>{s.name} — {formatClassLabel(s.cls)}</option>)}
               </>
           }
         </select>

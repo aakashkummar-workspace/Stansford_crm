@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI } from "../ui";
+import { formatClassLabel } from "@/lib/format";
 
 const EXAM_TYPES = [
   { k: "unit_test",  label: "Unit test" },
@@ -212,7 +213,7 @@ export default function ScreenExams({ E, refresh, role, session }) {
               {exams.map((e) => (
                 <tr key={e.id}>
                   <td style={{ fontSize: 11.5, color: "var(--ink-3)", whiteSpace: "nowrap" }}>{e.date}</td>
-                  <td><span className="chip">{e.cls}</span></td>
+                  <td><span className="chip">{formatClassLabel(e.cls)}</span></td>
                   <td style={{ fontSize: 12 }}>{e.subject}</td>
                   <td style={{ fontSize: 12.5, fontWeight: 500 }}>{e.name}</td>
                   <td><span className="chip">{(EXAM_TYPES.find((t) => t.k === e.type) || { label: e.type }).label}</span></td>
@@ -454,13 +455,13 @@ function MarksEntryModal({ exam, students, onClose, onChanged, showToast }) {
   return (
     <ModalShell
       title={`Marks · ${exam.subject} · ${exam.name}`}
-      sub={`${exam.cls} · max ${exam.maxMarks} · ${students.length} student${students.length === 1 ? "" : "s"}`}
+      sub={`${formatClassLabel(exam.cls)} · max ${exam.maxMarks} · ${students.length} student${students.length === 1 ? "" : "s"}`}
       onClose={onClose}
       width={680}
     >
       <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {students.length === 0 ? (
-          <div className="empty">No students in {exam.cls}. Admit some on the Students screen first.</div>
+          <div className="empty">No students in {formatClassLabel(exam.cls)}. Admit some on the Students screen first.</div>
         ) : (
           <div style={{ maxHeight: 420, overflowY: "auto", border: "1px solid var(--rule)", borderRadius: 8 }}>
             <table className="table" style={{ width: "100%" }}>
