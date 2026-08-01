@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Icon from "../Icon";
 import { KPI, BarChart, LineBarChart, Ring, AvatarChip } from "../ui";
-import { money, moneyK, formatClassLabel } from "@/lib/format";
+import { money, moneyK, formatClassLabel, feeTypeLabel, getWorkingDays, getHolidayDates, attendanceFromLogs } from "@/lib/format";
 
 // Deferred current-time state. Returns 0 during SSR + the first client
 // render, then flips to a real Date.now() after mount and ticks every
@@ -34,7 +34,7 @@ function useTodayDayName() {
   return day;
 }
 
-export default function ScreenDashboard({ E, role, session, refresh }) {
+export default function ScreenDashboard({ E, role, session, refresh, setCurrent }) {
   const { KPIS, CLASS_STRENGTH, RECENT_FEES, PENDING_FEES, ACTIVITIES, ROUTES, INCOME_SERIES } = E;
   const isParent = role === "parent";
   const child = isParent ? (E.ADDED_STUDENTS || [])[0] : null;
@@ -131,6 +131,7 @@ export default function ScreenDashboard({ E, role, session, refresh }) {
         E={E}
         session={session}
         refresh={refresh}
+        setCurrent={setCurrent}
       />
     );
   }
@@ -633,7 +634,7 @@ export default function ScreenDashboard({ E, role, session, refresh }) {
 // ---------- Parent dashboard ----------
 // Focused on a single child: today's daily log (attendance / classwork /
 // homework / handwriting), bus status, recent announcements, fees summary.
-function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, session, refresh }) {
+function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, session, refresh, setCurrent }) {
   // Auto-refresh the dashboard data every 20 seconds so live bus tracking
   // updates without the parent having to manually reload the page. Only
   // active when the tab is visible (no point polling in the background) —
@@ -673,14 +674,24 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
   const childLoans = (E.LOANS || []).filter((l) =>
     !l.returnedAt && l.borrowerType === "student" && l.borrowerId === child.id
   );
-  // Today's class periods for the child — read straight from the timetable.
-  // Same deferred pattern as ScreenDashboard: useTodayDayName() returns ""
-  // until after hydration, so the filtered period list is empty on the
-  // first render. Re-populates after mount.
+  // Today's class periods + full week for the child. Match class head so
+  // "1" / "1-A" both work against timetable rows.
   const todayDayName = useTodayDayName();
-  const childToday = (E.TIMETABLE || [])
-    .filter((t) => t.cls === child.cls && t.day === todayDayName)
+  const childHead = String(child.cls || "").split("-")[0];
+  const childTimetable = (E.TIMETABLE || []).filter((t) => {
+    const tKey = String(t.cls || "");
+    return tKey === child.cls || tKey.split("-")[0] === childHead;
+  });
+  const childToday = childTimetable
+    .filter((t) => t.day === todayDayName)
     .sort((a, b) => (a.period || 0) - (b.period || 0));
+  const WEEK_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const childWeekByDay = WEEK_DAYS.map((day) => ({
+    day,
+    entries: childTimetable
+      .filter((t) => t.day === day)
+      .sort((a, b) => (a.period || 0) - (b.period || 0)),
+  }));
   // Both legs of the child's commute. Either may be missing (parent drop-off
   // one direction is common). The route objects come pre-filtered by
   // /api/data so this scope only ever sees the child's own buses.
@@ -698,8 +709,8 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
   const eveningCode = child.transportEvening && child.transportEvening !== "—" ? child.transportEvening : null;
   const morningRoute = morningCode ? (E.ROUTES || []).find((r) => r.code === morningCode) : null;
   const eveningRoute = eveningCode ? (E.ROUTES || []).find((r) => r.code === eveningCode) : null;
-  const route = morningRoute || eveningRoute; // legacy alias kept for the KPI strip
-  const myFees    = (E.PENDING_FEES || []).filter((f) => f.id === child.id);
+  // Composite pending rows use studentId (id may be STN-xxx__transport).
+  const myFees    = (E.PENDING_FEES || []).filter((f) => (f.studentId || f.id) === child.id);
   const myPaid    = (E.RECENT_FEES || []).filter((f) => (f.studentId || f.id) === child.id);
   const announcements = (E.BROADCASTS || []).filter((b) =>
     b.audience === "all"
@@ -726,33 +737,84 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
     return out;
   })();
 
-  const presentCount = logs.filter((l) => l.attendance !== "absent").length;
-  const totalLogs = logs.length;
-  const attendancePct = totalLogs ? Math.round((presentCount / totalLogs) * 100) : null;
+  // Attendance % = present ÷ (class working days − holidays).
+  const holidayDates = getHolidayDates(E.SETTINGS);
+  const workingDays = getWorkingDays(E.SETTINGS, child.cls);
+  const attStats = attendanceFromLogs(logs, workingDays, { holidayDates });
+  const presentCount = attStats.presentCount;
+  const totalLogs = attStats.totalLogs;
+  const attendancePct = attStats.pct;
 
-  // Bus current stop label
-  const busInfo = route
-    ? {
-        code: route.code, name: route.name,
-        driver: route.driver,
-        currentStop: (route.stops || []).find((s) => s.status === "current")?.name || (route.stops || [])[0]?.name || "—",
-        eta: route.eta,
-      }
-    : null;
+  // Bus KPI — show morning + evening route codes when both are assigned.
+  const stopLabel = (r) =>
+    r ? ((r.stops || []).find((s) => s.status === "current")?.name || (r.stops || [])[0]?.name || "—") : null;
+  const sameBusBothWays = morningCode && eveningCode && morningCode === eveningCode;
+  const busValue = (() => {
+    if (morningCode && eveningCode && !sameBusBothWays) return `${morningCode} / ${eveningCode}`;
+    if (morningCode || eveningCode) return morningCode || eveningCode;
+    return "—";
+  })();
+  const busSub = (() => {
+    if (!morningCode && !eveningCode) return "no route assigned";
+    if (sameBusBothWays) return `Morning & evening · ${stopLabel(morningRoute) || "—"}`;
+    if (morningCode && eveningCode) return `AM ${morningCode} · PM ${eveningCode}`;
+    if (morningCode) return `Morning · ${stopLabel(morningRoute) || "—"}`;
+    return `Evening · ${stopLabel(eveningRoute) || "—"}`;
+  })();
+  const busDetailsItems = (() => {
+    const items = [];
+    if (morningCode) {
+      items.push({
+        label: "Morning route",
+        value: morningCode,
+        sub: [morningRoute?.name, stopLabel(morningRoute) ? `Stop · ${stopLabel(morningRoute)}` : null, morningRoute?.driver ? `Driver · ${morningRoute.driver}` : null]
+          .filter(Boolean).join(" · ") || "Assigned",
+        tone: "ok",
+      });
+    }
+    if (eveningCode) {
+      items.push({
+        label: "Evening route",
+        value: eveningCode,
+        sub: [
+          sameBusBothWays ? "Same bus as morning" : eveningRoute?.name,
+          stopLabel(eveningRoute) ? `Stop · ${stopLabel(eveningRoute)}` : null,
+          eveningRoute?.driver ? `Driver · ${eveningRoute.driver}` : null,
+        ].filter(Boolean).join(" · ") || "Assigned",
+        tone: "ok",
+      });
+    }
+    if (!items.length) {
+      items.push({ label: "Route", value: "Not assigned", sub: "Ask the school office to assign a bus", tone: "warn" });
+    }
+    return items;
+  })();
 
-  // Class teacher for the child's section. Teachers are users with
-  // role="teacher" and a linkedClasses array of section keys ("5-A").
-  // Parents specifically asked to see who the class teacher is at a
-  // glance on their dashboard, so we surface the name + email under
-  // the page header (and use "Not assigned" if the school hasn't
-  // picked one yet via Classes → Assign class teacher).
-  const classTeacher = (E.USERS || [])
-    .filter((u) => u.role === "teacher")
-    .find((u) => {
-      if (Array.isArray(u.linkedClasses) && u.linkedClasses.includes(child.cls)) return true;
-      if (u.linkedId === child.cls) return true;
-      return false;
-    });
+  // Class teacher for the child's section. Match linkedClasses / linkedId
+  // flexibly: "1-A" ↔ "1-A", or same class head ("1" matches "1-A") since
+  // the school uses a single section per class.
+  const classTeacher = (() => {
+    const childKey = String(child.cls || "");
+    const childHead = childKey.split("-")[0];
+    const matches = (key) => {
+      const k = String(key || "");
+      if (!k) return false;
+      if (k === childKey) return true;
+      const head = k.split("-")[0];
+      return head && childHead && head === childHead;
+    };
+    return (E.USERS || [])
+      .filter((u) => !u.role || u.role === "teacher")
+      .find((u) => {
+        const keys = [
+          ...(Array.isArray(u.linkedClasses) ? u.linkedClasses : []),
+          u.linkedId,
+        ].filter(Boolean);
+        // linkedId may be a CSV of class keys ("1-A,2-A")
+        const expanded = keys.flatMap((k) => String(k).split(",").map((p) => p.trim()).filter(Boolean));
+        return expanded.some(matches);
+      }) || null;
+  })();
 
   return (
     <div className="page">
@@ -818,13 +880,37 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
             <div style={{ fontSize: 13.5, fontWeight: 600, color: classTeacher ? "var(--ink)" : "var(--ink-4)" }}>
               {classTeacher ? classTeacher.name : "Not assigned yet"}
             </div>
-            {classTeacher?.email && (
-              <div style={{ fontSize: 11, color: "var(--ink-3)", fontFamily: "var(--font-mono)" }}>
-                {classTeacher.email}
-              </div>
-            )}
           </div>
         </div>
+
+        <div style={{
+          width: 1, alignSelf: "stretch", background: "var(--rule-2)",
+        }} />
+
+        {(() => {
+          const heightCm = child.heightCm != null && child.heightCm !== "" && Number.isFinite(Number(child.heightCm))
+            ? Number(child.heightCm) : null;
+          const weightKg = child.weightKg != null && child.weightKg !== "" && Number.isFinite(Number(child.weightKg))
+            ? Number(child.weightKg) : null;
+          const hasGrowth = heightCm != null || weightKg != null;
+          return (
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 10.5, color: "var(--ink-4)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>
+                Height · Weight
+              </div>
+              <div style={{ fontSize: 13.5, fontWeight: 600, color: hasGrowth ? "var(--ink)" : "var(--ink-4)" }}>
+                {hasGrowth
+                  ? `${heightCm != null ? `${heightCm} cm` : "—"} · ${weightKg != null ? `${weightKg} kg` : "—"}`
+                  : "Not recorded yet"}
+              </div>
+              {child.measuredAt && hasGrowth && (
+                <div style={{ fontSize: 11, color: "var(--ink-3)" }}>
+                  Measured {String(child.measuredAt).slice(0, 10)}
+                </div>
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       {/* KPIs */}
@@ -834,14 +920,50 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
              puck={today?.attendance === "absent" ? "rose" : "mint"}
              puckIcon={today?.attendance === "absent" ? "x" : "check"} />
         <KPI label="Attendance · this term" value={attendancePct !== null ? `${attendancePct}%` : "—"}
-             sub={totalLogs ? `${presentCount}/${totalLogs} days` : "no logs yet"}
+             sub={attStats.denom
+               ? `${presentCount}/${attStats.denom}${workingDays ? " working days" : " days logged"}`
+               : "no logs yet"}
              puck="cream" puckIcon="trending" />
-        <KPI label="Bus" value={busInfo ? busInfo.code : "—"}
-             sub={busInfo ? busInfo.currentStop : "no route assigned"}
-             puck="sky" puckIcon="bus" />
-        <KPI label="Fees pending" value={myFees.length ? `₹${myFees.reduce((a, f) => a + (f.amount || 0), 0).toLocaleString("en-IN")}` : "₹0"}
-             sub={myFees.length ? `${myFees.length} pending` : "all clear"}
-             puck="peach" puckIcon="fees" />
+        <KPI
+          label="Bus"
+          value={busValue}
+          sub={morningCode || eveningCode ? `${busSub} · tap for details` : busSub}
+          puck="sky"
+          puckIcon="bus"
+          details={{
+            title: "Bus routes",
+            sub: `${child.name} · morning & evening`,
+            items: busDetailsItems,
+          }}
+        />
+        <KPI
+          label="Fees pending"
+          value={myFees.length ? `₹${myFees.reduce((a, f) => a + (f.amount || 0), 0).toLocaleString("en-IN")}` : "₹0"}
+          sub={myFees.length ? `${myFees.length} pending · tap for details` : "all clear"}
+          puck="peach"
+          puckIcon="fees"
+          details={{
+            title: "Fees pending",
+            sub: myFees.length
+              ? `${child.name} · ${myFees.length} unpaid item${myFees.length === 1 ? "" : "s"} · ₹${myFees.reduce((a, f) => a + (f.amount || 0), 0).toLocaleString("en-IN")} total`
+              : `${child.name} · no pending fees`,
+            items: myFees.length
+              ? [
+                  ...myFees.map((f) => ({
+                    label: feeTypeLabel(f.feeType || f.fee_type),
+                    value: `₹${(f.amount || 0).toLocaleString("en-IN")}`,
+                    sub: f.due ? `Due ${f.due}${f.overdue ? " · overdue" : ""}` : (f.overdue ? "Overdue" : "Pending"),
+                    tone: f.overdue ? "bad" : "warn",
+                  })),
+                  {
+                    label: "Total pending",
+                    value: `₹${myFees.reduce((a, f) => a + (f.amount || 0), 0).toLocaleString("en-IN")}`,
+                    tone: "warn",
+                  },
+                ]
+              : [{ label: "Status", value: "All clear", sub: "No unpaid fees right now", tone: "ok" }],
+          }}
+        />
       </div>
 
       <div className="grid g-12">
@@ -867,23 +989,90 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
               <div className="empty" style={{ padding: 24 }}>Once the class teacher submits today's log, you'll see attendance, classwork, homework, handwriting and any teacher notes here.</div>
             ) : (() => {
               const absent = today.attendance === "absent";
-              const rows = [
-                { l: "Attendance", v: absent ? "Absent" : "Present", c: absent ? <span className="chip bad">Absent</span> : <span className="chip ok">Present</span> },
-                ...(absent && today.leaveReason ? [{ l: "Reason", v: today.leaveReason, c: null }] : []),
-                { l: "Classwork", v: today.classwork || "—", c: today.classworkStatus === "completed" ? <span className="chip ok">Done</span> : today.classworkStatus === "not_completed" ? <span className="chip bad">Not done</span> : null },
-                { l: "Homework",  v: today.homework  || "—", c: today.homeworkStatus  === "completed" ? <span className="chip ok">Done</span> : today.homeworkStatus  === "pending"       ? <span className="chip warn">Pending</span> : null },
-                { l: "Handwriting", v: today.handwritingNote || "—", c: today.handwritingGrade ? <span className="chip">{today.handwritingGrade}</span> : null },
-                { l: "Topics covered", v: today.topics || "—", c: null },
-                { l: "Behaviour", v: today.behaviour || "—", c: null },
-                { l: "Extra-curricular", v: today.extra || "—", c: null },
+              const logged = Array.isArray(today.subjectLogs) ? today.subjectLogs.filter((s) => s?.subject) : [];
+              const byName = new Map(logged.map((s) => [String(s.subject).toLowerCase(), s]));
+              const childHead = String(child.cls || "").split("-")[0];
+              const classRow = (E.CLASSES || []).find((x) => Number(x.n) === Number(childHead));
+              const classSubjects = (Array.isArray(classRow?.subjects) && classRow.subjects.length
+                ? classRow.subjects
+                : (E.SUBJECTS || []).map((s) => (typeof s === "string" ? s : s?.name))
+              ).map((s) => String(s || "").trim()).filter(Boolean);
+              const subjectNames = [];
+              const seen = new Set();
+              for (const name of classSubjects) {
+                const key = name.toLowerCase();
+                if (seen.has(key)) continue;
+                seen.add(key);
+                subjectNames.push(name);
+              }
+              for (const s of logged) {
+                const name = String(s.subject).trim();
+                const key = name.toLowerCase();
+                if (!name || seen.has(key)) continue;
+                seen.add(key);
+                subjectNames.push(name);
+              }
+              const statusChip = (kind, status) => {
+                if (kind === "cw") {
+                  if (status === "completed") return <span className="chip ok" style={{ minWidth: 52, justifyContent: "center" }}>CW ✓</span>;
+                  if (status === "not_completed") return <span className="chip bad" style={{ minWidth: 52, justifyContent: "center" }}>CW −</span>;
+                  return <span className="chip" style={{ minWidth: 52, justifyContent: "center", opacity: 0.7 }}>CW</span>;
+                }
+                if (status === "completed") return <span className="chip ok" style={{ minWidth: 52, justifyContent: "center" }}>HW ✓</span>;
+                if (status === "pending") return <span className="chip warn" style={{ minWidth: 52, justifyContent: "center" }}>HW −</span>;
+                return <span className="chip" style={{ minWidth: 52, justifyContent: "center", opacity: 0.7 }}>HW</span>;
+              };
+              const metaRows = [
+                ...(absent && today.leaveReason ? [{ l: "Reason", v: today.leaveReason }] : []),
+                ...(!absent && !subjectNames.length ? [
+                  { l: "Classwork", v: today.classwork || "—", c: today.classworkStatus === "completed" ? <span className="chip ok">Done</span> : today.classworkStatus === "not_completed" ? <span className="chip bad">Not done</span> : null },
+                  { l: "Homework", v: today.homework || "—", c: today.homeworkStatus === "completed" ? <span className="chip ok">Done</span> : today.homeworkStatus === "pending" ? <span className="chip warn">Pending</span> : null },
+                ] : []),
+                ...(!absent ? [
+                  { l: "Handwriting", v: today.handwritingNote || "—", c: today.handwritingGrade ? <span className="chip">{today.handwritingGrade}</span> : null },
+                  { l: "Topics covered", v: today.topics || "—" },
+                  { l: "Behaviour", v: today.behaviour || "—" },
+                  { l: "Extra-curricular", v: today.extra || "—" },
+                ] : []),
               ];
-              return rows.map((r, i, arr) => (
-                <div key={i} style={{ display: "grid", gridTemplateColumns: "140px 1fr auto", gap: 12, alignItems: "flex-start", paddingBottom: 10, borderBottom: i < arr.length - 1 ? "1px solid var(--rule-2)" : "none" }}>
-                  <div style={{ fontSize: 11.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.05em", paddingTop: 1 }}>{r.l}</div>
-                  <div style={{ fontSize: 13 }}>{r.v}</div>
-                  <div>{r.c}</div>
-                </div>
-              ));
+              return (
+                <>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, paddingBottom: 10, borderBottom: "1px solid var(--rule-2)" }}>
+                    <div style={{ fontSize: 11.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Attendance</div>
+                    {absent ? <span className="chip bad">Absent</span> : <span className="chip ok">Present</span>}
+                  </div>
+                  {!absent && subjectNames.length > 0 && (
+                    <div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 56px 56px", gap: 8, paddingBottom: 6, borderBottom: "1px solid var(--rule-2)" }}>
+                        <div style={{ fontSize: 10.5, color: "var(--ink-4)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Subject</div>
+                        <div style={{ fontSize: 10.5, color: "var(--ink-4)", textAlign: "center", textTransform: "uppercase", letterSpacing: "0.05em" }}>CW</div>
+                        <div style={{ fontSize: 10.5, color: "var(--ink-4)", textAlign: "center", textTransform: "uppercase", letterSpacing: "0.05em" }}>HW</div>
+                      </div>
+                      {subjectNames.map((name) => {
+                        const s = byName.get(name.toLowerCase()) || {};
+                        const note = [s.classwork, s.homework].filter(Boolean).join(" · ");
+                        return (
+                          <div key={name} style={{ display: "grid", gridTemplateColumns: "1fr 56px 56px", gap: 8, alignItems: "center", padding: "8px 0", borderBottom: "1px solid var(--rule-2)" }}>
+                            <div style={{ minWidth: 0 }}>
+                              <div style={{ fontSize: 13, fontWeight: 560 }}>{name}</div>
+                              {note ? <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 2 }}>{note}</div> : null}
+                            </div>
+                            <div style={{ display: "flex", justifyContent: "center" }}>{statusChip("cw", s.classworkStatus)}</div>
+                            <div style={{ display: "flex", justifyContent: "center" }}>{statusChip("hw", s.homeworkStatus)}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {metaRows.map((r, i) => (
+                    <div key={r.l} style={{ display: "grid", gridTemplateColumns: "120px 1fr auto", gap: 12, alignItems: "flex-start", paddingBottom: 10, borderBottom: i < metaRows.length - 1 ? "1px solid var(--rule-2)" : "none" }}>
+                      <div style={{ fontSize: 11.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.05em", paddingTop: 1 }}>{r.l}</div>
+                      <div style={{ fontSize: 13 }}>{r.v}</div>
+                      <div>{r.c || null}</div>
+                    </div>
+                  ))}
+                </>
+              );
             })()}
           </div>
         </div>
@@ -966,17 +1155,91 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
             )}
           </div>
 
-          {/* Today's class schedule — straight from the timetable. Only
-              rendered when there's a published timetable for the child's
-              class (no point showing an empty grid otherwise). */}
-          {childToday.length > 0 && (
+          {/* Today's class schedule */}
+          {childToday.length > 0 ? (
             <TodayScheduleCard
               title={`Today · ${formatClassLabel(child.cls)}`}
               sub={`${childToday.length} period${childToday.length === 1 ? "" : "s"} · ${todayDayName}`}
               entries={childToday}
               mode="parent"
             />
+          ) : (
+            <div className="card">
+              <div className="card-head">
+                <div>
+                  <div className="card-title">Today · {formatClassLabel(child.cls)}</div>
+                  <div className="card-sub">
+                    {todayDayName
+                      ? (childTimetable.length
+                        ? `No periods scheduled for ${todayDayName}`
+                        : "Timetable not published for this class yet")
+                      : "Loading schedule…"}
+                  </div>
+                </div>
+              </div>
+            </div>
           )}
+
+          {/* Weekly timetable snapshot */}
+          <div className="card">
+            <div className="card-head">
+              <div>
+                <div className="card-title">Weekly timetable</div>
+                <div className="card-sub">{formatClassLabel(child.cls)} · Mon–Sat</div>
+              </div>
+              {typeof setCurrent === "function" && (
+                <button type="button" className="btn sm" onClick={() => setCurrent("timetable")}>
+                  Full grid
+                </button>
+              )}
+            </div>
+            <div style={{ padding: "4px 14px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
+              {childTimetable.length === 0 ? (
+                <div className="empty" style={{ padding: 16 }}>
+                  No timetable published for {formatClassLabel(child.cls)} yet. Ask the school office.
+                </div>
+              ) : (
+                childWeekByDay.map(({ day, entries }) => (
+                  <div key={day} style={{
+                    display: "grid",
+                    gridTemplateColumns: "44px 1fr",
+                    gap: 10,
+                    alignItems: "start",
+                    padding: "8px 0",
+                    borderBottom: "1px solid var(--rule-2)",
+                  }}>
+                    <div style={{
+                      fontSize: 12, fontWeight: 700,
+                      color: day === todayDayName ? "var(--accent-2)" : "var(--ink-3)",
+                      paddingTop: 2,
+                    }}>
+                      {day}
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {entries.length === 0 ? (
+                        <span style={{ fontSize: 11.5, color: "var(--ink-4)" }}>—</span>
+                      ) : (
+                        entries.map((e) => (
+                          <span
+                            key={e.id || `${day}-${e.period}`}
+                            title={[e.teacherName, e.room ? `Room ${e.room}` : null].filter(Boolean).join(" · ")}
+                            style={{
+                              fontSize: 11, padding: "4px 8px", borderRadius: 6,
+                              background: day === todayDayName ? "var(--accent-soft)" : "var(--bg-2)",
+                              border: "1px solid var(--rule-2)",
+                              color: "var(--ink)",
+                            }}
+                          >
+                            <b style={{ fontWeight: 600 }}>P{e.period}</b> {e.subject || "—"}
+                          </span>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
 
           {/* Library loans for this child — only rendered when active */}
           {childLoans.length > 0 && (
@@ -1005,7 +1268,7 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
               {myFees.map((f) => (
                 <tr key={`p-${f.id}-${f.due}`}>
                   <td><span className={`chip ${f.overdue ? "bad" : "warn"}`}><span className="dot" />{f.overdue ? "Overdue" : "Pending"}</span></td>
-                  <td style={{ fontSize: 13 }}>Tuition · {formatClassLabel(f.cls)}</td>
+                  <td style={{ fontSize: 13 }}>{feeTypeLabel(f.feeType || f.fee_type)} · {formatClassLabel(f.cls || child.cls)}</td>
                   <td className="num" style={{ fontWeight: 500 }}>₹{(f.amount || 0).toLocaleString("en-IN")}</td>
                   <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{f.due}</td>
                 </tr>
@@ -1013,7 +1276,10 @@ function ParentDashboard({ child, greet, firstName, dateLabel, todayIso, E, sess
               {myPaid.slice(0, 5).map((f, i) => (
                 <tr key={`r-${f.id}-${i}`}>
                   <td><span className="chip ok"><span className="dot" />Paid</span></td>
-                  <td style={{ fontSize: 13 }}>Tuition · {formatClassLabel(f.cls)} <span style={{ color: "var(--ink-4)", fontSize: 11 }}>({f.method})</span></td>
+                  <td style={{ fontSize: 13 }}>
+                    {feeTypeLabel(f.feeType || f.fee_type)} · {formatClassLabel(f.cls || child.cls)}
+                    {f.method ? <span style={{ color: "var(--ink-4)", fontSize: 11 }}> ({f.method})</span> : null}
+                  </td>
                   <td className="num" style={{ fontWeight: 500 }}>₹{(f.amount || 0).toLocaleString("en-IN")}</td>
                   <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{f.time}</td>
                 </tr>

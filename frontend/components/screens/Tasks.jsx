@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI } from "../ui";
 
@@ -10,13 +10,12 @@ const PRIORITIES = [
   { k: "high",    label: "High",    tone: "warn" },
   { k: "urgent",  label: "Urgent",  tone: "bad" },
 ];
-const STATUS_LABEL = { pending: "Pending", in_progress: "In progress", done: "Done" };
-const STATUS_TONE  = { pending: "", in_progress: "warn", done: "ok" };
 const ROLE_LABEL = {
   admin: "Admin",
   academic_director: "Academic Director",
   principal: "Principal",
   teacher: "Teacher",
+  trust_accountant: "Trust Accountant",
 };
 
 function Toast({ msg, tone, onClose }) {
@@ -67,30 +66,43 @@ function Field({ label, children, hint }) {
   );
 }
 
+function ResponseChip({ response }) {
+  if (response === "yes") return <span className="chip ok"><span className="dot" />Yes</span>;
+  if (response === "no") return <span className="chip bad"><span className="dot" />No</span>;
+  return <span className="chip"><span className="dot" />Awaiting</span>;
+}
+
 export default function ScreenTasks({ E, refresh, role, session }) {
   const isAdmin = role === "admin";
   const [tasks, setTasks] = useState([]);
   const [users, setUsers] = useState([]);
-  const [filter, setFilter] = useState("all"); // all | pending | in_progress | done
+  const [filter, setFilter] = useState("all"); // all | awaiting | yes | no
   const [showAdd, setShowAdd] = useState(false);
   const [toast, setToast] = useState(null);
   const [busyId, setBusyId] = useState(null);
+  // Local drafts for assignee Yes/No + remarks before Save.
+  const [drafts, setDrafts] = useState({}); // { [taskId]: { response, remarks } }
 
   const showToast = (msg, tone) => {
     setToast({ msg, tone });
     setTimeout(() => setToast(null), 3000);
   };
 
-  // Tasks come straight from /api/tasks (admin sees all; everyone else only
-  // their own — server enforces). Re-pulled on every successful mutation.
   async function loadTasks() {
     try {
       const r = await fetch("/api/tasks", { cache: "no-store" });
       const json = await r.json();
-      if (json.ok) setTasks(json.tasks || []);
+      if (json.ok) {
+        const list = json.tasks || [];
+        setTasks(list);
+        const next = {};
+        for (const t of list) {
+          next[t.id] = { response: t.response || null, remarks: t.remarks || "" };
+        }
+        setDrafts(next);
+      }
     } catch (e) { showToast("Couldn't load tasks", "err"); }
   }
-  // Admin needs the list of assignable users (every role except parent).
   async function loadUsers() {
     if (!isAdmin) return;
     try {
@@ -101,16 +113,50 @@ export default function ScreenTasks({ E, refresh, role, session }) {
   }
   useEffect(() => { loadTasks(); loadUsers(); }, []); // eslint-disable-line
 
-  const filtered = useMemo(() => {
-    if (filter === "all") return tasks;
-    return tasks.filter((t) => t.status === filter);
-  }, [tasks, filter]);
+  // Super Admin keeps an open Tasks tab — re-pull when the window is focused
+  // so teacher Yes/No + remarks show up without a full page reload.
+  useEffect(() => {
+    const reload = () => { loadTasks(); };
+    const onVis = () => { if (document.visibilityState === "visible") reload(); };
+    window.addEventListener("focus", reload);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("focus", reload);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, []); // eslint-disable-line
+
+  // Numbered list for the assignee: group admin view by person so each
+  // teacher sees 1., 2., 3. of their own work in the same table shape.
+  const rows = useMemo(() => {
+    let list = [...tasks];
+    if (filter === "awaiting") list = list.filter((t) => !t.response);
+    else if (filter === "yes") list = list.filter((t) => t.response === "yes");
+    else if (filter === "no") list = list.filter((t) => t.response === "no");
+
+    if (!isAdmin) {
+      return list.map((t, i) => ({ task: t, n: i + 1, groupKey: "me" }));
+    }
+
+    // Admin: sort by assignee name, then due date; number within each person.
+    list.sort((a, b) => {
+      const an = (a.assignedToName || "").localeCompare(b.assignedToName || "");
+      if (an !== 0) return an;
+      return String(a.dueDate || "").localeCompare(String(b.dueDate || ""));
+    });
+    const counters = {};
+    return list.map((t) => {
+      const key = t.assignedTo || t.assignedToName || "—";
+      counters[key] = (counters[key] || 0) + 1;
+      return { task: t, n: counters[key], groupKey: key };
+    });
+  }, [tasks, filter, isAdmin]);
 
   const counts = useMemo(() => ({
     total: tasks.length,
-    pending: tasks.filter((t) => t.status === "pending").length,
-    in_progress: tasks.filter((t) => t.status === "in_progress").length,
-    done: tasks.filter((t) => t.status === "done").length,
+    awaiting: tasks.filter((t) => !t.response).length,
+    yes: tasks.filter((t) => t.response === "yes").length,
+    no: tasks.filter((t) => t.response === "no").length,
   }), [tasks]);
 
   async function handleAdd(payload) {
@@ -122,22 +168,39 @@ export default function ScreenTasks({ E, refresh, role, session }) {
     const json = await r.json().catch(() => ({}));
     if (!r.ok || !json.ok) throw new Error(json.error || "Failed to create task");
     setShowAdd(false);
-    showToast(`Task assigned to ${json.task.assignedToName}`, "ok");
+    showToast(
+      payload.self
+        ? "Self-task added"
+        : `Task assigned to ${json.task.assignedToName}`,
+      "ok",
+    );
     await loadTasks();
     await refresh?.();
   }
 
-  async function handleStatus(task, status) {
+  const myId = session?.sub || session?.id || session?.email;
+  const isSelfCreated = (t) => t.assignedBy === myId || t.assignedBy === session?.email;
+
+  async function handleSaveResponse(task) {
+    const draft = drafts[task.id] || { response: null, remarks: "" };
+    if (!draft.response) {
+      showToast("Choose Yes or No first", "err");
+      return;
+    }
     setBusyId(task.id);
     try {
       const r = await fetch("/api/tasks", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: task.id, status }),
+        body: JSON.stringify({
+          id: task.id,
+          response: draft.response,
+          remarks: draft.remarks || "",
+        }),
       });
       const json = await r.json().catch(() => ({}));
       if (!r.ok || !json.ok) throw new Error(json.error || "Failed");
-      showToast(`Marked as ${STATUS_LABEL[status]}`, "ok");
+      showToast(`Saved · ${draft.response === "yes" ? "Yes" : "No"}`, "ok");
       await loadTasks();
       await refresh?.();
     } catch (e) { showToast(e.message, "err"); }
@@ -162,6 +225,11 @@ export default function ScreenTasks({ E, refresh, role, session }) {
     finally { setBusyId(null); }
   }
 
+  const setDraft = (id, patch) => setDrafts((d) => ({
+    ...d,
+    [id]: { ...(d[id] || { response: null, remarks: "" }), ...patch },
+  }));
+
   return (
     <div className="page">
       <Toast msg={toast?.msg} tone={toast?.tone} onClose={() => setToast(null)} />
@@ -172,83 +240,51 @@ export default function ScreenTasks({ E, refresh, role, session }) {
           <div className="page-title">{isAdmin ? <>Task <span className="amber">allocation</span></> : <>My <span className="amber">tasks</span></>}</div>
           <div className="page-sub">
             {isAdmin
-              ? "Assign work to staff — academic director, principal, teachers"
-              : "Tasks assigned to you by Admin"}
+              ? "Assign work to staff — they answer Yes/No with remarks"
+              : "Answer Yes or No, add remarks, or create a self-task — Admin can see your updates"}
           </div>
         </div>
-        {isAdmin && (
-          <div className="page-actions">
+        <div className="page-actions">
+          {isAdmin && (
+            <button className="btn" onClick={() => loadTasks()} title="Reload teacher Yes/No and remarks">
+              <Icon name="refresh" size={13} />Refresh
+            </button>
+          )}
+          {isAdmin ? (
             <button className="btn accent" onClick={() => setShowAdd(true)} disabled={users.length === 0}>
               <Icon name="plus" size={13} />New task
             </button>
-          </div>
-        )}
+          ) : (
+            <button className="btn accent" onClick={() => setShowAdd(true)}>
+              <Icon name="plus" size={13} />Self task
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="grid g-4" style={{ marginBottom: 14 }}>
-        {(() => {
-          const byStatus = (s) => tasks.filter((t) => t.status === s);
-          const itemFor = (t, tone) => ({
-            label: t.title || "—",
-            value: t.priority || "normal",
-            sub: `${t.assignedToName || "—"}${t.dueDate ? ` · due ${t.dueDate}` : ""}`,
-            tone,
-          });
-          return (
-            <>
-              <KPI
-                label={isAdmin ? "Total tasks" : "All tasks"} value={counts.total} sub="across roles"
-                puck="mint" puckIcon="check"
-                details={{
-                  title: `Tasks · ${counts.total}`,
-                  sub: `${counts.pending} pending · ${counts.in_progress} in progress · ${counts.done} done`,
-                  items: tasks.slice(0, 12).map((t) => itemFor(t, t.status === "done" ? "ok" : t.status === "in_progress" ? "warn" : "")),
-                }}
-              />
-              <KPI
-                label="Pending" value={counts.pending}
-                sub={counts.pending ? "needs to be picked up" : "nothing waiting"}
-                puck="cream" puckIcon="clock"
-                details={{
-                  title: `Pending · ${counts.pending}`,
-                  sub: counts.pending === 0 ? "Nothing waiting" : "Hasn't been started yet",
-                  items: byStatus("pending").map((t) => itemFor(t, "warn")),
-                }}
-              />
-              <KPI
-                label="In progress" value={counts.in_progress} sub="being worked on"
-                puck="peach" puckIcon="refresh"
-                details={{
-                  title: `In progress · ${counts.in_progress}`,
-                  sub: counts.in_progress === 0 ? "Nothing currently in progress" : "Being worked on",
-                  items: byStatus("in_progress").map((t) => itemFor(t, "")),
-                }}
-              />
-              <KPI
-                label="Done" value={counts.done} sub="closed"
-                puck="sky" puckIcon="check"
-                details={{
-                  title: `Done · ${counts.done}`,
-                  sub: counts.done === 0 ? "Nothing completed yet" : "Recently completed",
-                  items: byStatus("done").slice(0, 12).map((t) => itemFor(t, "ok")),
-                }}
-              />
-            </>
-          );
-        })()}
+        <KPI label={isAdmin ? "Total tasks" : "All tasks"} value={counts.total} sub="assigned" puck="mint" puckIcon="check" />
+        <KPI label="Awaiting" value={counts.awaiting} sub="no Yes/No yet" puck="cream" puckIcon="clock" />
+        <KPI label="Yes" value={counts.yes} sub="completed / accepted" puck="sky" puckIcon="check" />
+        <KPI label="No" value={counts.no} sub="not done / declined" puck="rose" puckIcon="x" />
       </div>
 
       <div className="card">
         <div className="card-head">
           <div>
             <div className="card-title">{isAdmin ? "All tasks" : "Tasks for you"}</div>
-            <div className="card-sub">{filtered.length} shown</div>
+            <div className="card-sub">{rows.length} shown · numbered per {isAdmin ? "assignee" : "list"}</div>
           </div>
           <div className="card-actions">
             <div className="segmented">
-              {["all", "pending", "in_progress", "done"].map((k) => (
-                <button key={k} className={filter === k ? "active" : ""} onClick={() => setFilter(k)}>
-                  {k === "all" ? "All" : STATUS_LABEL[k]}
+              {[
+                { k: "all", label: "All" },
+                { k: "awaiting", label: "Awaiting" },
+                { k: "yes", label: "Yes" },
+                { k: "no", label: "No" },
+              ].map((f) => (
+                <button key={f.k} className={filter === f.k ? "active" : ""} onClick={() => setFilter(f.k)}>
+                  {f.label}
                 </button>
               ))}
             </div>
@@ -258,73 +294,135 @@ export default function ScreenTasks({ E, refresh, role, session }) {
           <table className="table">
             <thead>
               <tr>
+                <th style={{ width: 48 }}>#</th>
                 <th>Task</th>
                 {isAdmin && <th>Assigned to</th>}
                 <th>Priority</th>
                 <th>Due</th>
-                <th>Status</th>
+                <th>Yes / No</th>
+                <th>Remarks</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
-              {filtered.length === 0 && (
-                <tr><td colSpan={isAdmin ? 6 : 5} className="empty">
+              {rows.length === 0 && (
+                <tr><td colSpan={isAdmin ? 8 : 7} className="empty">
                   {tasks.length === 0
                     ? (isAdmin ? "No tasks yet. Click \"New task\" to assign work." : "No tasks have been assigned to you yet.")
-                    : `No ${STATUS_LABEL[filter]?.toLowerCase() || "matching"} tasks.`}
+                    : "No matching tasks."}
                 </td></tr>
               )}
-              {filtered.map((t) => {
+              {rows.map(({ task: t, n, groupKey }, idx) => {
                 const pri = PRIORITIES.find((p) => p.k === t.priority) || PRIORITIES[1];
-                const overdue = t.dueDate && t.status !== "done" && new Date(t.dueDate) < new Date(new Date().toISOString().slice(0, 10));
+                const overdue = t.dueDate && t.response !== "yes" && new Date(t.dueDate) < new Date(new Date().toISOString().slice(0, 10));
+                const draft = drafts[t.id] || { response: t.response || null, remarks: t.remarks || "" };
+                const dirty = draft.response !== (t.response || null) || (draft.remarks || "") !== (t.remarks || "");
+                // Group header when admin view switches assignee
+                const prevKey = idx > 0 ? rows[idx - 1].groupKey : null;
+                const showGroup = isAdmin && groupKey !== prevKey;
                 return (
-                  <tr key={t.id}>
-                    <td>
-                      <div style={{ fontSize: 12.5, fontWeight: 500 }}>{t.title}</div>
-                      {t.description && (
-                        <div style={{ fontSize: 11, color: "var(--ink-4)", marginTop: 2, lineHeight: 1.4, maxWidth: 420 }}>{t.description}</div>
-                      )}
-                      <div style={{ fontSize: 10, color: "var(--ink-4)", marginTop: 3, fontFamily: "var(--font-mono)" }}>
-                        {t.id} · by {t.assignedByName}
-                      </div>
-                    </td>
-                    {isAdmin && (
-                      <td>
-                        <div style={{ fontSize: 12, fontWeight: 500 }}>{t.assignedToName}</div>
-                        <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{ROLE_LABEL[t.assignedToRole] || t.assignedToRole}</div>
-                      </td>
+                  <Fragment key={t.id}>
+                    {showGroup && (
+                      <tr>
+                        <td colSpan={8} style={{
+                          background: "var(--bg-2)", fontSize: 11, fontWeight: 600,
+                          color: "var(--ink-2)", letterSpacing: 0.03, padding: "8px 12px",
+                        }}>
+                          {t.assignedToName || "—"}
+                          <span style={{ fontWeight: 400, color: "var(--ink-4)", marginLeft: 8 }}>
+                            {ROLE_LABEL[t.assignedToRole] || t.assignedToRole}
+                          </span>
+                        </td>
+                      </tr>
                     )}
-                    <td><span className={`chip ${pri.tone}`}><span className="dot" />{pri.label}</span></td>
-                    <td style={{ fontSize: 11.5, color: overdue ? "var(--err, #b13c1c)" : "var(--ink-3)", whiteSpace: "nowrap" }}>
-                      {t.dueDate || "—"}{overdue ? " · overdue" : ""}
-                    </td>
-                    <td><span className={`chip ${STATUS_TONE[t.status]}`}><span className="dot" />{STATUS_LABEL[t.status]}</span></td>
-                    <td>
-                      <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
-                        {/* Assignee + admin can flip status */}
-                        {t.status === "pending" && (
-                          <button className="btn sm" onClick={() => handleStatus(t, "in_progress")} disabled={busyId === t.id}>
-                            <Icon name="refresh" size={11} />Start
-                          </button>
+                    <tr>
+                      <td style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 600, color: "var(--ink-2)" }}>
+                        {n}.
+                      </td>
+                      <td>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                          <span style={{ fontSize: 12.5, fontWeight: 500 }}>{t.title}</span>
+                          {isSelfCreated(t) && (
+                            <span className="chip" style={{ fontSize: 9.5 }} title="Created by the assignee">Self</span>
+                          )}
+                        </div>
+                        {t.description && (
+                          <div style={{ fontSize: 11, color: "var(--ink-4)", marginTop: 2, lineHeight: 1.4, maxWidth: 360 }}>{t.description}</div>
                         )}
-                        {t.status === "in_progress" && (
-                          <button className="btn sm accent" onClick={() => handleStatus(t, "done")} disabled={busyId === t.id}>
-                            <Icon name="check" size={11} />Done
-                          </button>
+                        <div style={{ fontSize: 10, color: "var(--ink-4)", marginTop: 3, fontFamily: "var(--font-mono)" }}>
+                          {t.id} · by {t.assignedByName}
+                        </div>
+                      </td>
+                      {isAdmin && (
+                        <td>
+                          <div style={{ fontSize: 12, fontWeight: 500 }}>{t.assignedToName}</div>
+                          <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{ROLE_LABEL[t.assignedToRole] || t.assignedToRole}</div>
+                        </td>
+                      )}
+                      <td><span className={`chip ${pri.tone}`}><span className="dot" />{pri.label}</span></td>
+                      <td style={{ fontSize: 11.5, color: overdue ? "var(--err, #b13c1c)" : "var(--ink-3)", whiteSpace: "nowrap" }}>
+                        {t.dueDate || "—"}{overdue ? " · overdue" : ""}
+                      </td>
+                      <td>
+                        {isAdmin ? (
+                          <ResponseChip response={t.response} />
+                        ) : (
+                          <div className="segmented" style={{ width: "fit-content" }}>
+                            <button
+                              type="button"
+                              className={draft.response === "yes" ? "active" : ""}
+                              onClick={() => setDraft(t.id, { response: "yes" })}
+                              style={draft.response === "yes" ? { background: "var(--ok-soft)", color: "var(--ok)" } : {}}
+                            >
+                              Yes
+                            </button>
+                            <button
+                              type="button"
+                              className={draft.response === "no" ? "active" : ""}
+                              onClick={() => setDraft(t.id, { response: "no" })}
+                              style={draft.response === "no" ? { background: "var(--bad-soft, #fbe1d8)", color: "var(--err, #b13c1c)" } : {}}
+                            >
+                              No
+                            </button>
+                          </div>
                         )}
-                        {t.status === "done" && (
-                          <button className="btn sm ghost" onClick={() => handleStatus(t, "in_progress")} disabled={busyId === t.id} title="Reopen">
-                            <Icon name="refresh" size={11} />Reopen
-                          </button>
+                      </td>
+                      <td style={{ minWidth: 180 }}>
+                        {isAdmin ? (
+                          <div style={{ fontSize: 12, color: t.remarks ? "var(--ink-2)" : "var(--ink-4)", maxWidth: 260, lineHeight: 1.4 }}>
+                            {t.remarks || "—"}
+                          </div>
+                        ) : (
+                          <input
+                            className="input"
+                            style={{ height: 30, fontSize: 12, minWidth: 160 }}
+                            value={draft.remarks}
+                            onChange={(e) => setDraft(t.id, { remarks: e.target.value })}
+                            placeholder="Status remarks…"
+                          />
                         )}
-                        {isAdmin && (
-                          <button className="icon-btn" onClick={() => handleRemove(t)} disabled={busyId === t.id} title="Remove">
-                            <Icon name="x" size={12} />
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
+                      </td>
+                      <td>
+                        <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                          {!isAdmin && (
+                            <button
+                              className="btn sm accent"
+                              onClick={() => handleSaveResponse(t)}
+                              disabled={busyId === t.id || !dirty}
+                              title="Save Yes/No and remarks for Admin"
+                            >
+                              <Icon name="check" size={11} />{busyId === t.id ? "Saving…" : "Save"}
+                            </button>
+                          )}
+                          {(isAdmin || isSelfCreated(t)) && (
+                            <button className="icon-btn" onClick={() => handleRemove(t)} disabled={busyId === t.id} title="Remove">
+                              <Icon name="x" size={12} />
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  </Fragment>
                 );
               })}
             </tbody>
@@ -332,14 +430,20 @@ export default function ScreenTasks({ E, refresh, role, session }) {
         </div>
       </div>
 
-      {showAdd && isAdmin && (
-        <AddTaskModal users={users} onClose={() => setShowAdd(false)} onSubmit={handleAdd} />
+      {showAdd && (
+        <AddTaskModal
+          users={users}
+          selfOnly={!isAdmin}
+          selfName={session?.name || "You"}
+          onClose={() => setShowAdd(false)}
+          onSubmit={handleAdd}
+        />
       )}
     </div>
   );
 }
 
-function AddTaskModal({ users, onClose, onSubmit }) {
+function AddTaskModal({ users, onClose, onSubmit, selfOnly = false, selfName = "You" }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [form, setForm] = useState({
@@ -349,7 +453,6 @@ function AddTaskModal({ users, onClose, onSubmit }) {
   useEffect(() => { titleRef.current?.focus(); }, []);
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
-  // Group users by role for the dropdown.
   const grouped = useMemo(() => {
     const map = new Map();
     for (const u of users) {
@@ -366,11 +469,13 @@ function AddTaskModal({ users, onClose, onSubmit }) {
     setErr(""); setBusy(true);
     try {
       if (!form.title.trim()) throw new Error("Title is required");
-      if (!form.assignedTo) throw new Error("Pick an assignee");
+      if (!selfOnly && !form.assignedTo) throw new Error("Pick an assignee");
       await onSubmit({
         title: form.title.trim(),
         description: form.description.trim() || null,
-        assignedTo: form.assignedTo,
+        ...(selfOnly
+          ? { self: true }
+          : { assignedTo: form.assignedTo }),
         priority: form.priority,
         dueDate: form.dueDate || null,
       });
@@ -378,7 +483,12 @@ function AddTaskModal({ users, onClose, onSubmit }) {
   }
 
   return (
-    <ModalShell title="New task" sub="Assign work to a staff member" onClose={onClose} width={520}>
+    <ModalShell
+      title={selfOnly ? "Self task" : "New task"}
+      sub={selfOnly ? "Add a task for yourself — Admin can see it" : "Assign work to a staff member"}
+      onClose={onClose}
+      width={520}
+    >
       <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <Field label="Title *">
           <input ref={titleRef} className="input" value={form.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. Submit Q2 attendance report" />
@@ -392,18 +502,26 @@ function AddTaskModal({ users, onClose, onSubmit }) {
             placeholder="More context, deliverables, links…"
           />
         </Field>
-        <Field label="Assign to *" hint="Parents are not assignable">
-          <select className="select" value={form.assignedTo} onChange={(e) => set("assignedTo", e.target.value)}>
-            <option value="">— pick a user —</option>
-            {grouped.map(([roleK, list]) => (
-              <optgroup key={roleK} label={ROLE_LABEL[roleK] || roleK}>
-                {list.map((u) => (
-                  <option key={u.id} value={u.id}>{u.name} ({u.email})</option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
-        </Field>
+        {selfOnly ? (
+          <Field label="Assigned to">
+            <div className="input" style={{ display: "flex", alignItems: "center", color: "var(--ink-2)", background: "var(--bg-2)" }}>
+              {selfName} <span style={{ marginLeft: 8, fontSize: 11, color: "var(--ink-4)" }}>(you)</span>
+            </div>
+          </Field>
+        ) : (
+          <Field label="Assign to *" hint="Parents are not assignable">
+            <select className="select" value={form.assignedTo} onChange={(e) => set("assignedTo", e.target.value)}>
+              <option value="">— pick a user —</option>
+              {grouped.map(([roleK, list]) => (
+                <optgroup key={roleK} label={ROLE_LABEL[roleK] || roleK}>
+                  {list.map((u) => (
+                    <option key={u.id} value={u.id}>{u.name} ({u.email})</option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+          </Field>
+        )}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           <Field label="Priority">
             <select className="select" value={form.priority} onChange={(e) => set("priority", e.target.value)}>
@@ -422,7 +540,9 @@ function AddTaskModal({ users, onClose, onSubmit }) {
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
           <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
           <button type="submit" className="btn accent" disabled={busy}>
-            {busy ? "Assigning…" : <><Icon name="check" size={13} />Assign task</>}
+            {busy
+              ? (selfOnly ? "Adding…" : "Assigning…")
+              : <><Icon name="check" size={13} />{selfOnly ? "Add self task" : "Assign task"}</>}
           </button>
         </div>
       </form>

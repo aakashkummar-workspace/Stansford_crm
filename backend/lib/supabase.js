@@ -33,6 +33,9 @@ export const fromStudent = (r) => r && {
   pickupStop: r.pickup_stop ?? r.pickupStop ?? null,
   transportEvening: r.transport_evening ?? r.transportEvening ?? null,
   pickupStopEvening: r.pickup_stop_evening ?? r.pickupStopEvening ?? null,
+  heightCm: r.height_cm != null ? Number(r.height_cm) : (r.heightCm != null ? Number(r.heightCm) : null),
+  weightKg: r.weight_kg != null ? Number(r.weight_kg) : (r.weightKg != null ? Number(r.weightKg) : null),
+  measuredAt: r.measured_at ?? r.measuredAt ?? null,
   joined: r.joined,
   status: r.status ?? "active", archivedAt: r.archived_at ?? null,
 };
@@ -43,6 +46,9 @@ export const toStudent = (r) => ({
   pickup_stop: r.pickupStop ?? null,
   transport_evening: r.transportEvening ?? null,
   pickup_stop_evening: r.pickupStopEvening ?? null,
+  height_cm: r.heightCm != null ? Number(r.heightCm) : null,
+  weight_kg: r.weightKg != null ? Number(r.weightKg) : null,
+  measured_at: r.measuredAt ?? null,
   joined: r.joined,
   status: r.status ?? "active",
 });
@@ -81,6 +87,23 @@ export const fromRecentFee = (r) => r && {
   feeType: r.fee_type ?? r.feeType ?? null,
 };
 
+function parseSubjectLogs(raw) {
+  let list = raw;
+  if (typeof raw === "string") {
+    try { list = JSON.parse(raw); } catch { return []; }
+  }
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((s) => ({
+      subject: String(s?.subject || "").trim(),
+      classwork: s?.classwork != null ? String(s.classwork) : "",
+      classworkStatus: s?.classworkStatus || s?.classwork_status || null,
+      homework: s?.homework != null ? String(s.homework) : "",
+      homeworkStatus: s?.homeworkStatus || s?.homework_status || null,
+    }))
+    .filter((s) => s.subject);
+}
+
 export const fromDailyLog = (r) => r && {
   studentId: r.student_id, studentName: r.student_name, cls: r.cls,
   date: r.date,
@@ -88,6 +111,7 @@ export const fromDailyLog = (r) => r && {
   leaveReason: r.leave_reason ?? "",
   classwork: r.classwork, classworkStatus: r.classwork_status ?? null,
   homework:  r.homework,  homeworkStatus:  r.homework_status  ?? null,
+  subjectLogs: parseSubjectLogs(r.subject_logs ?? r.subjectLogs),
   topics: r.topics,
   handwritingNote: r.handwriting_note, handwritingGrade: r.handwriting_grade,
   behaviour: r.behaviour, extra: r.extra,
@@ -282,7 +306,10 @@ export const fromTask = (r) => r && {
   assignedTo: r.assigned_to, assignedToName: r.assigned_to_name, assignedToRole: r.assigned_to_role,
   assignedBy: r.assigned_by, assignedByName: r.assigned_by_name,
   status: r.status ?? "pending", priority: r.priority ?? "normal",
-  dueDate: r.due_date, createdAt: r.created_at, updatedAt: r.updated_at,
+  dueDate: r.due_date,
+  response: r.response ?? null,
+  remarks: r.remarks ?? null,
+  createdAt: r.created_at, updatedAt: r.updated_at,
 };
 export const toTask = (r) => ({
   id: r.id, title: r.title, description: r.description ?? null,
@@ -291,6 +318,8 @@ export const toTask = (r) => ({
   assigned_by: r.assignedBy ?? null, assigned_by_name: r.assignedByName ?? null,
   status: r.status ?? "pending", priority: r.priority ?? "normal",
   due_date: r.dueDate ?? null,
+  response: r.response ?? null,
+  remarks: r.remarks ?? null,
 });
 
 export const fromMeeting = (r) => r && {

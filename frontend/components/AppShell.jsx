@@ -395,7 +395,9 @@ export default function AppShell({ initialData, session }) {
         ...data,
         ADDED_STUDENTS:    [myChild],
         ARCHIVED_STUDENTS: [],
-        PENDING_FEES:      (data.PENDING_FEES || []).filter((f) => f.id === myChild.id),
+        // Match studentId first — composite fee ids (e.g. STN-1__transport)
+        // keep the owning student on studentId, not on id.
+        PENDING_FEES:      (data.PENDING_FEES || []).filter((f) => (f.studentId || f.id) === myChild.id),
         RECENT_FEES:       (data.RECENT_FEES  || []).filter((f) => (f.studentId || f.id) === myChild.id),
         DAILY_LOGS:        (data.DAILY_LOGS   || []).filter((l) => l.studentId === myChild.id),
         TRANSPORT_ATTENDANCE: (data.TRANSPORT_ATTENDANCE || []).filter((t) => t.studentId === myChild.id),
@@ -410,8 +412,11 @@ export default function AppShell({ initialData, session }) {
         COMPLAINTS:        (data.COMPLAINTS || []).filter((c) => c.studentId === myChild.id || c.student === myChild.name),
         STAFF: [], AUDIT: [], INVENTORY: [], DONORS: [],
         ENQUIRIES: [], AUTOMATIONS: [],
-        SCHOOLS: [], USERS: [], ANOMALIES: [], DONATION_PIPELINE: [],
+        SCHOOLS: [], ANOMALIES: [], DONATION_PIPELINE: [],
         COMPLIANCE: [], AI_BRIEF: [],
+        // Keep USERS — /api/data already scopes parents to teacher rows
+        // only (name/email/linkedClasses). Needed for "Class teacher" on
+        // the parent dashboard strip.
       };
     }
     if (role === "academic_director") {
@@ -426,18 +431,40 @@ export default function AppShell({ initialData, session }) {
       };
     }
     if (role === "teacher") {
-      // Teachers: classroom only. Hide finance/HR/donor data. Scope to the
-      // set of classes they're assigned to (session.linkedClasses can hold
-      // multiple — a teacher may be class teacher of 2-A AND 5-B). If no
-      // assignment exists, fall back to the legacy single linkedId.
-      const myClasses = new Set(
-        Array.isArray(session?.linkedClasses) && session.linkedClasses.length
-          ? session.linkedClasses
-          : (session?.linkedId ? [session.linkedId] : [])
-      );
+      // Teachers: classroom only. Hide finance/HR/donor data.
+      // Classes come from (1) class-teacher linkedClasses and (2) timetable
+      // subject assignments so Maths/English teachers can log class-wise too.
+      const linked = Array.isArray(session?.linkedClasses) && session.linkedClasses.length
+        ? session.linkedClasses
+        : (session?.linkedId && /^\d+-/i.test(String(session.linkedId)) ? [session.linkedId] : []);
+      const meName = (session?.name || "").trim().toLowerCase();
+      const myStaffId = (() => {
+        if (session?.staffId) return session.staffId;
+        const lid = session?.linkedId || "";
+        if (typeof lid === "string" && lid.startsWith("STF-")) return lid;
+        const email = (session?.email || "").toLowerCase();
+        const hit = (data.STAFF || []).find((s) => s.email && s.email.toLowerCase() === email);
+        return hit?.id || null;
+      })();
+      const ttClasses = (data.TIMETABLE || [])
+        .filter((e) => {
+          if (!e?.cls) return false;
+          if (myStaffId && e.teacherId && e.teacherId === myStaffId) return true;
+          const tName = (e.teacherName || "").trim().toLowerCase();
+          return tName && meName && tName === meName;
+        })
+        .map((e) => e.cls);
+      const myClasses = new Set([...linked, ...ttClasses].filter(Boolean));
+      const classHeads = new Set([...myClasses].map((k) => String(k).split("-")[0]));
+      const inMyClasses = (clsKey) => {
+        const k = String(clsKey || "");
+        if (!k) return false;
+        if (myClasses.has(k)) return true;
+        return classHeads.has(k.split("-")[0]);
+      };
       const hasScope = myClasses.size > 0;
       const scopedStudents = hasScope
-        ? (data.ADDED_STUDENTS || []).filter((s) => myClasses.has(s.cls))
+        ? (data.ADDED_STUDENTS || []).filter((s) => inMyClasses(s.cls))
         : (data.ADDED_STUDENTS || []);
       const scopedStudentIds = new Set(scopedStudents.map((s) => s.id));
       // Bus teachers need the FULL roster for the routes they attend — those
@@ -445,7 +472,6 @@ export default function AppShell({ initialData, session }) {
       // separate transport roster by the routes where this teacher is the
       // named attendant, WITHOUT widening the class-scoped student list the
       // rest of the classroom app relies on.
-      const meName = (session?.name || "").trim().toLowerCase();
       const myRouteCodes = new Set(
         (data.ROUTES || [])
           .filter((r) => { const att = (r.attendant || "").trim().toLowerCase(); return att && att !== "—" && att === meName; })
@@ -459,10 +485,10 @@ export default function AppShell({ initialData, session }) {
         ADDED_STUDENTS: scopedStudents,
         TRANSPORT_STUDENTS: transportStudents,
         DAILY_LOGS: hasScope
-          ? (data.DAILY_LOGS || []).filter((l) => myClasses.has(l.cls) || scopedStudentIds.has(l.studentId))
+          ? (data.DAILY_LOGS || []).filter((l) => inMyClasses(l.cls) || scopedStudentIds.has(l.studentId))
           : (data.DAILY_LOGS || []),
         COMPLAINTS: hasScope
-          ? (data.COMPLAINTS || []).filter((c) => myClasses.has(c.cls) || scopedStudentIds.has(c.studentId))
+          ? (data.COMPLAINTS || []).filter((c) => inMyClasses(c.cls) || scopedStudentIds.has(c.studentId))
           : (data.COMPLAINTS || []),
         PENDING_FEES: [], RECENT_FEES: [],
         // Teachers see only their *own* staff record — used by

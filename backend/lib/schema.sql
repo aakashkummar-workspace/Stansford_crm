@@ -24,6 +24,9 @@ create table if not exists students (
 alter table students add column if not exists status text default 'active';
 alter table students add column if not exists archived_at timestamptz;
 alter table students add column if not exists pickup_stop text;
+alter table students add column if not exists height_cm numeric(6,2);
+alter table students add column if not exists weight_kg numeric(6,2);
+alter table students add column if not exists measured_at timestamptz;
 create index if not exists idx_students_status on students (status);
 
 -- ---------- pending fees ----------
@@ -113,12 +116,13 @@ create table if not exists daily_logs (
   date text not null,
   student_name text,
   cls text,
-  attendance text default 'present',     -- 'present' | 'absent'
+  attendance text default 'present',     -- 'present' | 'absent' | 'late' | 'leave' | 'parent_drop'
   leave_reason text,                     -- only filled when attendance='absent'
   classwork text,
   classwork_status text,                 -- 'completed' | 'not_completed' | null
   homework text,
   homework_status text,                  -- 'completed' | 'pending' | null
+  subject_logs jsonb default '[]'::jsonb, -- per-subject CW/HW for the class
   topics text,
   handwriting_note text,
   handwriting_grade text,
@@ -133,6 +137,7 @@ alter table daily_logs add column if not exists attendance text default 'present
 alter table daily_logs add column if not exists leave_reason text;
 alter table daily_logs add column if not exists classwork_status text;
 alter table daily_logs add column if not exists homework_status text;
+alter table daily_logs add column if not exists subject_logs jsonb default '[]'::jsonb;
 
 -- ---------- transport routes (stops as JSONB for flexibility) ----------
 create table if not exists routes (
@@ -164,8 +169,11 @@ create table if not exists classes (
   n int primary key,
   label text,
   sections jsonb default '[]'::jsonb,
+  subjects jsonb default '[]'::jsonb,
   created_at timestamptz default now()
 );
+-- Safe re-run for older installs that already have `classes`.
+alter table classes add column if not exists subjects jsonb default '[]'::jsonb;
 insert into classes (n, label, sections) values
   (1, 'Class 1', '["A","B"]'::jsonb),
   (2, 'Class 2', '["A","B"]'::jsonb),
@@ -339,7 +347,8 @@ create index if not exists idx_users_role on users (role);
 alter table users enable row level security;
 
 -- ---------- tasks ----------
--- Lightweight assignment system. Admin creates tasks; assignee can flip status.
+-- Lightweight assignment system. Admin creates tasks; assignee answers Yes/No
+-- with optional remarks. status stays in sync: yes→done, no/awaiting→pending.
 create table if not exists tasks (
   id text primary key,
   title text not null,
@@ -352,11 +361,15 @@ create table if not exists tasks (
   status text default 'pending',     -- 'pending' | 'in_progress' | 'done'
   priority text default 'normal',    -- 'low' | 'normal' | 'high' | 'urgent'
   due_date text,
+  response text,                     -- null | 'yes' | 'no' (assignee answer)
+  remarks text,                      -- assignee notes on the task status
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
 create index if not exists idx_tasks_assigned_to on tasks (assigned_to);
 create index if not exists idx_tasks_status on tasks (status);
+alter table tasks add column if not exists response text;
+alter table tasks add column if not exists remarks text;
 alter table tasks enable row level security;
 
 -- ---------- meetings + RSVPs ----------
@@ -513,7 +526,7 @@ create table if not exists transport_attendance (
   direction    text not null default 'morning',  -- 'morning' | 'evening'
   route_code   text,
   stop_name    text,
-  status       text not null default 'boarded',  -- 'boarded' | 'absent' | 'skipped'
+  status       text not null default 'boarded',  -- 'boarded' | 'absent' | 'skipped' | 'dropped' | 'parent'
   student_name text,
   cls          text,
   marked_by    text,

@@ -537,7 +537,7 @@ function ScorePicker({ value, onChange, size = "sm", options }) {
   }
 
   // Few options → pill buttons. Numeric labels stay square; word labels
-  // (No/Yes, Bad/Good/Excellent) get auto width.
+  // (No/Yes, Good/Very Good/Excellent) get auto width.
   const numeric = opts.every((o) => /^\d+$/.test(String(o.label)));
   return (
     <div style={{ display: "inline-flex", gap: 4, flexWrap: "wrap", justifyContent: "center" }}>

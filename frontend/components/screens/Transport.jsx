@@ -153,9 +153,9 @@ export default function ScreenTransport({ E, refresh, role, session }) {
   };
 
   // Today's MORNING boarding status per student (route-independent — keyed by
-  // studentId). Used in the evening view to flag / auto-absent anyone who
-  // didn't board this morning: they weren't at school, so they can't be on
-  // the evening bus.
+  // studentId). Evening drop is blocked only for true bus-absent; if the
+  // class teacher later marks "Dropped by parent", status becomes "parent"
+  // and evening drop is allowed again.
   const morningStatusByStudent = useMemo(() => {
     const out = {};
     for (const r of (E.TRANSPORT_ATTENDANCE || [])) {
@@ -844,15 +844,19 @@ export default function ScreenTransport({ E, refresh, role, session }) {
                           <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 5 }}>
                             {(studentsByStop[s.name] || []).map((stu) => {
                               const explicit = studentMark(stu);
-                              const amStatus = morningStatusByStudent[stu.id]; // "boarded" | "absent" | undefined
+                              const amStatus = morningStatusByStudent[stu.id]; // boarded | absent | parent | undefined
                               const isEvening = direction === "evening";
-                              // Evening: a student absent this morning wasn't at school, so
-                              // they aren't on the evening bus — no drop. Present/unmarked are
-                              // droppable; the drop pushes an in-app alert to the parent.
+                              // Evening: only a true morning bus-absent (not came-by-parent)
+                              // is blocked from drop-off — they weren't at school.
                               const amAbsent = amStatus === "absent";
                               const isDropped = explicit === "dropped";
                               const isBoarded = explicit === "boarded";
                               const isAbsent  = explicit === "absent";
+                              const isParentDrop = explicit === "parent";
+                              const amLabel = amStatus === "boarded" ? "AM present"
+                                : amStatus === "parent" ? "AM by parent"
+                                : "AM —";
+                              const amOk = amStatus === "boarded" || amStatus === "parent";
                               return (
                                 <div key={stu.id} style={{
                                   display: "flex", alignItems: "center", gap: 8,
@@ -877,18 +881,18 @@ export default function ScreenTransport({ E, refresh, role, session }) {
                                         <Icon name="x" size={9} stroke={2.5} />AM absent
                                       </span>
                                     ) : (
-                                      // Morning present / unmarked → droppable.
+                                      // Morning present / by-parent / unmarked → droppable.
                                       <>
                                         <span
                                           className="chip"
                                           title="Morning boarding status"
                                           style={{
                                             fontSize: 9,
-                                            color: amStatus === "boarded" ? "var(--ok)" : "var(--ink-4)",
-                                            borderColor: amStatus === "boarded" ? "var(--ok)" : "var(--rule)",
+                                            color: amOk ? "var(--ok)" : "var(--ink-4)",
+                                            borderColor: amOk ? "var(--ok)" : "var(--rule)",
                                           }}
                                         >
-                                          {amStatus === "boarded" ? "AM present" : "AM —"}
+                                          {amLabel}
                                         </span>
                                         {isDropped ? (
                                           <span className="chip ok" style={{ fontSize: 9.5 }}><Icon name="check" size={9} stroke={2.5} />Dropped</span>
@@ -900,11 +904,13 @@ export default function ScreenTransport({ E, refresh, role, session }) {
                                       </>
                                     )
                                   ) : (
-                                    // Morning view — Present / Absent boarding.
+                                    // Morning view — Present / Absent only.
+                                    // "By parent" is set later by the class teacher.
                                     <>
                                       {isBoarded && <span className="chip ok" style={{ fontSize: 9.5 }}><Icon name="check" size={9} stroke={2.5} />Present</span>}
+                                      {isParentDrop && <span className="chip warn" style={{ fontSize: 9.5 }} title="Class teacher marked dropped by parent">By parent</span>}
                                       {isAbsent && <span className="chip bad" style={{ fontSize: 9.5 }}><Icon name="x" size={9} stroke={2.5} />Absent</span>}
-                                      {cur && !isBoarded && !isAbsent && (
+                                      {cur && !isBoarded && !isAbsent && !isParentDrop && (
                                         <>
                                           <button className="btn sm ghost" style={{ height: 24, padding: "0 8px", fontSize: 11 }} onClick={() => markStudent(s, stu, "board")}>
                                             <Icon name="check" size={10} stroke={2.5} />Present
@@ -2694,7 +2700,7 @@ function TransportHistoryView({ rows, students, routes, isParent, school, actor 
           studentId: r.studentId,
           name: r.studentName || (transportStudents.find((s) => s.id === r.studentId)?.name) || r.studentId,
           cls: r.cls || "",
-          boarded: 0, absent: 0, skipped: 0, total: 0,
+          boarded: 0, absent: 0, skipped: 0, parent: 0, total: 0,
           last: r,
         });
       }
@@ -2711,7 +2717,7 @@ function TransportHistoryView({ rows, students, routes, isParent, school, actor 
         if (!map.has(s.id)) {
           map.set(s.id, {
             studentId: s.id, name: s.name, cls: s.cls,
-            boarded: 0, absent: 0, skipped: 0, total: 0, last: null,
+            boarded: 0, absent: 0, skipped: 0, parent: 0, total: 0, last: null,
           });
         }
       }
@@ -2725,7 +2731,7 @@ function TransportHistoryView({ rows, students, routes, isParent, school, actor 
       a.total += 1;
       return a;
     },
-    { boarded: 0, absent: 0, skipped: 0, total: 0 }
+    { boarded: 0, absent: 0, skipped: 0, parent: 0, total: 0 }
   );
 
   const exportPdf = () => {
@@ -2737,9 +2743,10 @@ function TransportHistoryView({ rows, students, routes, isParent, school, actor 
       orientation: "landscape",
       summary: [
         { label: "Records",  value: filtered.length },
-        { label: "Boarded",  value: counts.boarded || 0 },
-        { label: "Absent",   value: counts.absent || 0 },
-        { label: "Skipped",  value: counts.skipped || 0 },
+        { label: "Boarded",  value: totals.boarded || 0 },
+        { label: "Absent",   value: totals.absent || 0 },
+        { label: "By parent", value: totals.parent || 0 },
+        { label: "Skipped",  value: totals.skipped || 0 },
       ],
       columns: [
         { key: "date",        label: "Date",         align: "right",  width: "90px" },
@@ -2762,7 +2769,8 @@ function TransportHistoryView({ rows, students, routes, isParent, school, actor 
           route: r.routeCode || "—", stopName: r.stopName || "—",
           assigned, offStop,
           studentName: r.studentName || "—", studentId: r.studentId,
-          cls: r.cls || "—", status: r.status,
+          cls: r.cls || "—",
+          status: r.status === "parent" ? "By parent" : r.status,
           markedBy: r.markedBy || "—",
         };
       }),
@@ -2779,6 +2787,7 @@ function TransportHistoryView({ rows, students, routes, isParent, school, actor 
             <div className="card-sub">
               {totals.total} record{totals.total === 1 ? "" : "s"} ·
               {" "}{totals.boarded} boarded · {totals.absent} absent
+              {totals.parent ? ` · ${totals.parent} by parent` : ""}
               {totals.skipped ? ` · ${totals.skipped} skipped` : ""}
             </div>
           </div>
@@ -2812,7 +2821,7 @@ function TransportHistoryView({ rows, students, routes, isParent, school, actor 
               </select>
             )}
             <div className="segmented">
-              {["All", "Boarded", "Absent", "Skipped"].map((s) => (
+              {["All", "Boarded", "Absent", "Parent", "Skipped"].map((s) => (
                 <button key={s} className={statusFilter === s ? "active" : ""} onClick={() => setStatusFilter(s)}>
                   {s}
                 </button>
@@ -2861,6 +2870,7 @@ function TransportHistoryView({ rows, students, routes, isParent, school, actor 
                     {p.total > 0 && (
                       <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>
                         {p.absent > 0 && <>· {p.absent} absent </>}
+                        {p.parent > 0 && <>· {p.parent} by parent </>}
                         {p.skipped > 0 && <>· {p.skipped} skipped </>}
                         {p.last && <>· last {p.last.date} {p.last.direction}</>}
                       </div>
@@ -2927,7 +2937,7 @@ function TransportHistoryView({ rows, students, routes, isParent, school, actor 
                   <td>
                     <span className={`chip ${r.status === "boarded" ? "ok" : r.status === "absent" ? "bad" : "warn"}`}>
                       <span className="dot" />
-                      {r.status.charAt(0).toUpperCase() + r.status.slice(1)}
+                      {r.status === "parent" ? "By parent" : (r.status.charAt(0).toUpperCase() + r.status.slice(1))}
                     </span>
                   </td>
                   {!isParent && (

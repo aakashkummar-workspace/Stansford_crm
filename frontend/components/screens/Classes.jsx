@@ -12,10 +12,14 @@ import { formatClassLabel } from "@/backend/lib/format.js";
 // places that parse cls.split("-").
 const ONLY_SECTION = "A";
 
+const FALLBACK_SUBJECTS = ["English", "Tamil", "Science", "Social Science", "Maths", "Hindi", "PT"];
+
 export default function ScreenClasses({ E, refresh, role }) {
   const canAssign = role === "principal" || role === "admin" || role === "academic_director";
   const classes = E.CLASSES || [];
   const addedStudents = E.ADDED_STUDENTS || [];
+  const subjectCatalog = (E.SUBJECTS || []).map((s) => s.name).filter(Boolean);
+  const subjectOptions = subjectCatalog.length ? subjectCatalog : FALLBACK_SUBJECTS;
 
   const [showAdd, setShowAdd] = useState(false);
   const [toast, setToast] = useState(null);
@@ -118,6 +122,7 @@ export default function ScreenClasses({ E, refresh, role }) {
       n: cls.n,
       label: form.label,
       sections: form.sections,
+      subjects: form.subjects,
     });
     if (res.ok) { flash(`Updated ${cls.label}`); await refresh?.(); setEditing(null); }
     else flash(res.error || "Failed to update", "bad");
@@ -257,7 +262,14 @@ export default function ScreenClasses({ E, refresh, role }) {
       )}
 
       {showAdd && <AddClassModal existing={classes.map((c) => c.n)} onClose={() => setShowAdd(false)} onSubmit={handleAdd} />}
-      {editing && <EditClassModal cls={editing} onClose={() => setEditing(null)} onSubmit={(form) => handleEdit(editing, form)} />}
+      {editing && (
+        <EditClassModal
+          cls={editing}
+          subjectOptions={subjectOptions}
+          onClose={() => setEditing(null)}
+          onSubmit={(form) => handleEdit(editing, form)}
+        />
+      )}
       {confirmAsk && (
         <ConfirmDialog
           title={confirmAsk.title}
@@ -315,6 +327,25 @@ function ClassCard({ cls, studentCount, teachers, teacherFor, canAssign, onAssig
           onAssign={(teacherId) => onAssignTeacher(sectionKey, teacherId)}
           onUnassign={() => teacher && onUnassignTeacher(teacher.id, sectionKey)}
         />
+        <div>
+          <div style={{
+            fontSize: 10.5, color: "var(--ink-4)", textTransform: "uppercase",
+            letterSpacing: "0.06em", fontWeight: 500, marginBottom: 6,
+          }}>
+            Subjects
+          </div>
+          {Array.isArray(cls.subjects) && cls.subjects.length > 0 ? (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+              {cls.subjects.map((s) => (
+                <span key={s} className="chip" style={{ fontSize: 10.5 }}>{s}</span>
+              ))}
+            </div>
+          ) : (
+            <div style={{ fontSize: 11.5, color: "var(--ink-4)" }}>
+              {onEditClass ? "No subjects yet — click edit to add" : "No subjects assigned"}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -570,16 +601,41 @@ function AddClassModal({ existing, onClose, onSubmit }) {
 }
 
 // ---------- edit-class modal ----------
-function EditClassModal({ cls, onClose, onSubmit }) {
+function EditClassModal({ cls, subjectOptions = [], onClose, onSubmit }) {
   const [form, setForm] = useState({
     label: cls.label || formatClassLabel(String(cls.n)),
+    subjects: Array.isArray(cls.subjects) ? [...cls.subjects] : [],
   });
+  const [customSubject, setCustomSubject] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  const toggleSubject = (name) => {
+    setForm((f) => {
+      const has = f.subjects.some((s) => s.toLowerCase() === name.toLowerCase());
+      return {
+        ...f,
+        subjects: has
+          ? f.subjects.filter((s) => s.toLowerCase() !== name.toLowerCase())
+          : [...f.subjects, name],
+      };
+    });
+  };
+
+  const addCustom = () => {
+    const name = customSubject.trim();
+    if (!name) return;
+    setForm((f) => {
+      if (f.subjects.some((s) => s.toLowerCase() === name.toLowerCase())) return f;
+      return { ...f, subjects: [...f.subjects, name] };
+    });
+    setCustomSubject("");
+  };
+
   const submit = async (e) => {
     e.preventDefault();
     setBusy(true);
@@ -590,25 +646,75 @@ function EditClassModal({ cls, onClose, onSubmit }) {
       await onSubmit({
         label: form.label.trim() || formatClassLabel(String(cls.n)),
         sections: existingSections,
+        subjects: form.subjects,
       });
     } finally { setBusy(false); }
   };
+
+  // Options = catalog + any already-selected custom names not in catalog.
+  const allOptions = (() => {
+    const seen = new Set(subjectOptions.map((s) => s.toLowerCase()));
+    const extras = form.subjects.filter((s) => !seen.has(s.toLowerCase()));
+    return [...subjectOptions, ...extras];
+  })();
+
   return (
     <div onClick={onClose} style={{
       position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)",
       display: "grid", placeItems: "center", zIndex: 250, padding: 16,
     }}>
-      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 460 }}>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 520, maxHeight: "calc(100vh - 32px)", overflowY: "auto" }}>
         <div className="card-head">
           <div>
             <div className="card-title">Edit {cls.label}</div>
-            <div className="card-sub">Rename the display label</div>
+            <div className="card-sub">Rename the class and set the subjects taught here</div>
           </div>
           <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
         </div>
         <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <Field label="Label">
             <input className="input" autoFocus value={form.label} onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))} placeholder={formatClassLabel(String(cls.n))} />
+          </Field>
+          <Field label="Subjects">
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 2 }}>
+              {allOptions.map((name) => {
+                const on = form.subjects.some((s) => s.toLowerCase() === name.toLowerCase());
+                return (
+                  <button
+                    key={name}
+                    type="button"
+                    onClick={() => toggleSubject(name)}
+                    className="chip"
+                    style={{
+                      cursor: "pointer",
+                      border: on ? "1px solid var(--accent)" : "1px solid var(--rule-2)",
+                      background: on ? "var(--accent-soft)" : "var(--bg-2)",
+                      color: on ? "var(--accent-2)" : "var(--ink-2)",
+                      fontWeight: on ? 600 : 500,
+                    }}
+                  >
+                    {name}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <input
+                className="input"
+                value={customSubject}
+                onChange={(e) => setCustomSubject(e.target.value)}
+                placeholder="Add another subject…"
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addCustom(); } }}
+              />
+              <button type="button" className="btn" onClick={addCustom} disabled={!customSubject.trim()}>
+                <Icon name="plus" size={13} />Add
+              </button>
+            </div>
+            <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 6 }}>
+              {form.subjects.length
+                ? `${form.subjects.length} subject${form.subjects.length === 1 ? "" : "s"} selected`
+                : "No subjects selected"}
+            </div>
           </Field>
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
             <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { markAttendanceBulk, logAudit } from "@/lib/db";
+import { markAttendanceBulk, logAudit, recordTransportAttendance } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 
 export async function POST(req) {
@@ -17,7 +17,27 @@ export async function POST(req) {
       postedBy: actor,
       marks: body.marks,
     });
-    const counts = { present: 0, late: 0, absent: 0, leave: 0 };
+
+    // Teacher marked "Dropped by parent" → flip morning transport to
+    // "parent" so evening drop-off is allowed. Only this status writes
+    // transport from class attendance (plain class-absent must not
+    // overwrite a student who already boarded the bus).
+    for (const m of body.marks) {
+      if (m?.attendance !== "parent_drop" || !m?.studentId) continue;
+      try {
+        await recordTransportAttendance({
+          studentId: m.studentId,
+          date: body.date,
+          direction: "morning",
+          status: "parent",
+          studentName: m.studentName || null,
+          cls: m.cls || body.cls || null,
+          markedBy: actor,
+        });
+      } catch {}
+    }
+
+    const counts = { present: 0, late: 0, absent: 0, leave: 0, parent_drop: 0 };
     for (const l of logs) counts[l.attendance] = (counts[l.attendance] || 0) + 1;
     // mode: "initial" | "edit" | "correction"
     //   - edit       = teacher fixing their own marks the same day
@@ -31,15 +51,18 @@ export async function POST(req) {
     const reasonTail = body.correctionReason
       ? ` · reason: ${String(body.correctionReason).trim().slice(0, 200)}`
       : "";
+    const parentTail = counts.parent_drop
+      ? ` · ${counts.parent_drop} dropped by parent`
+      : "";
     try {
       await logAudit(
         actor,
         verb,
-        `${body.cls || ""} · ${body.date} · ${counts.present} present · ${counts.late} late · ${counts.absent} absent · ${counts.leave} on leave${reasonTail}`
+        `${body.cls || ""} · ${body.date} · ${counts.present} present · ${counts.late} late · ${counts.absent} absent · ${counts.leave} on leave${parentTail}${reasonTail}`
       );
     } catch {}
     // Backwards-compat keys (`present`, `absent`) preserved alongside the
-    // new `late` / `leave` totals so older callers don't break.
+    // new `late` / `leave` / `parent_drop` totals so older callers don't break.
     return NextResponse.json({
       ok: true,
       count: logs.length,
@@ -47,6 +70,7 @@ export async function POST(req) {
       late: counts.late,
       absent: counts.absent,
       leave: counts.leave,
+      parent_drop: counts.parent_drop,
       logs,
     });
   } catch (e) {

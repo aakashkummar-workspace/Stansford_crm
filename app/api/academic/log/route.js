@@ -34,6 +34,7 @@ export async function POST(req) {
       classworkStatus: body.classworkStatus || null,
       homework: (body.homework || "").trim(),
       homeworkStatus: body.homeworkStatus || null,
+      subjectLogs: Array.isArray(body.subjectLogs) ? body.subjectLogs : undefined,
       topics: (body.topics || "").trim(),
       handwritingNote: (body.handwritingNote || "").trim(),
       handwritingGrade: (body.handwritingGrade || "").trim(),

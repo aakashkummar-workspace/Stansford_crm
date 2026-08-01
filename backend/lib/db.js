@@ -237,31 +237,47 @@ export async function readAllData() {
     ]);
     const stopMap = pickupStopsSafe();
     const eveningStopMap = pickupStopsEveningSafe();
+    const growthMap = studentGrowthOverlaysSafe();
     const allStudents = s.map((row) => {
       const out = fromStudent(row);
       // Overlay any pickup-stop assignments we have in the file side-stores.
       if (out && !out.pickupStop && stopMap[out.id]) out.pickupStop = stopMap[out.id];
       if (out && !out.pickupStopEvening && eveningStopMap[out.id]) out.pickupStopEvening = eveningStopMap[out.id];
+      // Height/weight overlay when Supabase columns are not migrated yet.
+      if (out && growthMap[out.id]) {
+        const g = growthMap[out.id];
+        if (out.heightCm == null && g.heightCm != null) out.heightCm = g.heightCm;
+        if (out.weightKg == null && g.weightKg != null) out.weightKg = g.weightKg;
+        if (!out.measuredAt && g.measuredAt) out.measuredAt = g.measuredAt;
+      }
       return out;
     });
-    const liveClasses = cls.map((c) => ({
+    const mapClassRow = (c) => ({
       n: c.n, label: c.label || `Class ${c.n}`,
       sections: Array.isArray(c.sections) ? c.sections : [],
+      subjects: Array.isArray(c.subjects) ? c.subjects : [],
       students: 0,
-    }));
+    });
+    const liveClasses = cls.map(mapClassRow);
     // Union of: live Supabase classes + file fallback + STATIC defaults.
     // Deduped by class number, with later sources only filling gaps. This
     // way a class auto-created on first admission shows up alongside the
-    // built-in 1-8 list instead of replacing it.
-    const fileClasses = (fileDbSafe().classes || []).map((c) => ({
-      n: c.n, label: c.label || `Class ${c.n}`,
-      sections: Array.isArray(c.sections) ? c.sections : [],
-      students: 0,
-    }));
+    // built-in 1-8 list instead of replacing it. Subjects merge from any
+    // source that has them (file overlay when Supabase column is missing).
+    const fileClasses = (fileDbSafe().classes || []).map(mapClassRow);
     const classMap = new Map();
     for (const list of [liveClasses, fileClasses, STATIC_EMPTIES.classes]) {
       for (const c of list) {
-        if (!classMap.has(c.n)) classMap.set(c.n, c);
+        const row = mapClassRow(c);
+        const key = Number(row.n);
+        if (!Number.isFinite(key)) continue;
+        row.n = key;
+        const prev = classMap.get(key);
+        if (!prev) {
+          classMap.set(key, row);
+        } else if ((!prev.subjects || !prev.subjects.length) && row.subjects.length) {
+          classMap.set(key, { ...prev, subjects: row.subjects });
+        }
       }
     }
     const mergedClasses = Array.from(classMap.values()).sort((a, b) => Number(a.n) - Number(b.n));
@@ -475,7 +491,16 @@ export async function readAllData() {
     };
   }
   const db = fileRead();
-  const all = db.addedStudents || [];
+  const growthMap = studentGrowthOverlaysSafe();
+  const all = (db.addedStudents || []).map((s) => {
+    if (!s || !growthMap[s.id]) return s;
+    const g = growthMap[s.id];
+    const out = { ...s };
+    if (out.heightCm == null && g.heightCm != null) out.heightCm = g.heightCm;
+    if (out.weightKg == null && g.weightKg != null) out.weightKg = g.weightKg;
+    if (!out.measuredAt && g.measuredAt) out.measuredAt = g.measuredAt;
+    return out;
+  });
   return {
     ...STATIC_EMPTIES,
     ...db,
@@ -495,34 +520,111 @@ export async function readAllData() {
 }
 
 // ---------- classes ----------
+function normalizeClassSubjects(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const s of raw) {
+    const name = String(s || "").trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+  }
+  return out;
+}
+
 export async function addClass(row) {
   const n = Number(row.n);
   const label = String(row.label || `Class ${n}`).trim();
   const sections = Array.isArray(row.sections) ? row.sections : [];
+  const subjects = normalizeClassSubjects(row.subjects);
   if (!n || Number.isNaN(n) || n < 1) throw new Error("Class number must be a positive integer");
   if (supabaseEnabled) {
-    const ins = await supabase.from("classes").insert({ n, label, sections }).select().maybeSingle();
-    if (!ins.error) return { n, label, sections };
+    const payload = { n, label, sections, subjects };
+    let ins = await supabase.from("classes").insert(payload).select().maybeSingle();
+    // Older DBs may not have subjects column yet — retry without it.
+    if (ins.error && /subjects/i.test(ins.error.message)) {
+      ins = await supabase.from("classes").insert({ n, label, sections }).select().maybeSingle();
+    }
+    if (!ins.error) {
+      // Mirror to file so subjects survive before the migration is applied.
+      try {
+        const db = fileRead();
+        if (!Array.isArray(db.classes)) db.classes = [];
+        const idx = db.classes.findIndex((c) => Number(c.n) === n);
+        const fileRow = { n, label, sections, subjects };
+        if (idx === -1) db.classes.push(fileRow);
+        else db.classes[idx] = { ...db.classes[idx], ...fileRow };
+        db.classes.sort((a, b) => Number(a.n) - Number(b.n));
+        fileWrite(db);
+      } catch {}
+      return { n, label, sections, subjects };
+    }
     // PostgREST cache lag / missing classes table → fall back to file.
     if (!/classes/i.test(ins.error.message)) throw new Error(ins.error.message);
   }
   const db = fileRead();
   if (!Array.isArray(db.classes)) db.classes = [];
   if (db.classes.find((c) => Number(c.n) === n)) throw new Error(`Class ${n} already exists`);
-  db.classes.push({ n, label, sections });
+  db.classes.push({ n, label, sections, subjects });
   db.classes.sort((a, b) => Number(a.n) - Number(b.n));
   fileWrite(db);
-  return { n, label, sections };
+  return { n, label, sections, subjects };
 }
 
 export async function updateClass(n, patch) {
   const num = Number(n);
+  const subjects = "subjects" in patch ? normalizeClassSubjects(patch.subjects) : undefined;
   if (supabaseEnabled) {
     const body = {};
     if (typeof patch.label === "string") body.label = patch.label;
     if (Array.isArray(patch.sections)) body.sections = patch.sections;
-    const r = await supabase.from("classes").update(body).eq("n", num).select().maybeSingle();
-    if (!r.error && r.data) return r.data;
+    if (subjects !== undefined) body.subjects = subjects;
+    let r = await supabase.from("classes").update(body).eq("n", num).select().maybeSingle();
+    if (r.error && subjects !== undefined && /subjects/i.test(r.error.message)) {
+      const { subjects: _drop, ...withoutSubjects } = body;
+      r = Object.keys(withoutSubjects).length
+        ? await supabase.from("classes").update(withoutSubjects).eq("n", num).select().maybeSingle()
+        : { error: null, data: { n: num, ...withoutSubjects } };
+    }
+    // Always mirror subjects (and other fields) to file for durability.
+    try {
+      const db = fileRead();
+      if (!Array.isArray(db.classes)) db.classes = [];
+      let idx = db.classes.findIndex((c) => Number(c.n) === num);
+      if (idx === -1) {
+        const seed = (STATIC_EMPTIES.classes || []).find((c) => Number(c.n) === num);
+        if (seed) {
+          db.classes.push({ n: seed.n, label: seed.label, sections: [...(seed.sections || [])], subjects: [] });
+          idx = db.classes.length - 1;
+        }
+      }
+      if (idx !== -1) {
+        const next = { ...db.classes[idx] };
+        if (typeof patch.label === "string") next.label = patch.label;
+        if (Array.isArray(patch.sections)) next.sections = patch.sections;
+        if (subjects !== undefined) next.subjects = subjects;
+        db.classes[idx] = next;
+        fileWrite(db);
+        if (!r.error) {
+          const data = r.data && typeof r.data === "object" ? r.data : {};
+          return {
+            n: num,
+            label: data.label ?? next.label,
+            sections: Array.isArray(data.sections) ? data.sections : next.sections,
+            subjects: Array.isArray(data.subjects) ? data.subjects : (next.subjects || []),
+          };
+        }
+      }
+    } catch {}
+    if (!r.error && r.data) {
+      return {
+        ...r.data,
+        subjects: Array.isArray(r.data.subjects) ? r.data.subjects : (subjects ?? []),
+      };
+    }
     // Cache lag / missing → fall through to file.
   }
   const db = fileRead();
@@ -534,13 +636,15 @@ export async function updateClass(n, patch) {
   if (idx === -1) {
     const seed = (STATIC_EMPTIES.classes || []).find((c) => Number(c.n) === num);
     if (seed) {
-      db.classes.push({ n: seed.n, label: seed.label, sections: [...(seed.sections || [])] });
+      db.classes.push({ n: seed.n, label: seed.label, sections: [...(seed.sections || [])], subjects: [] });
       idx = db.classes.length - 1;
     } else {
       return null;
     }
   }
-  db.classes[idx] = { ...db.classes[idx], ...patch };
+  const nextPatch = { ...patch };
+  if (subjects !== undefined) nextPatch.subjects = subjects;
+  db.classes[idx] = { ...db.classes[idx], ...nextPatch };
   fileWrite(db);
   return db.classes[idx];
 }
@@ -736,6 +840,25 @@ async function ensureClassSection(clsKey) {
 // pickupStop falls back to the file side-store when the Supabase students
 // table doesn't yet have the pickup_stop column (so the per-stop boarding
 // roster works even before the schema migration).
+function studentGrowthOverlaysSafe() {
+  try {
+    const db = fileRead();
+    return (db.studentGrowthOverlays && typeof db.studentGrowthOverlays === "object")
+      ? db.studentGrowthOverlays : {};
+  } catch { return {}; }
+}
+
+function saveStudentGrowthOverlay(id, patch) {
+  if (!id) return;
+  const db = fileRead();
+  if (!db.studentGrowthOverlays || typeof db.studentGrowthOverlays !== "object") db.studentGrowthOverlays = {};
+  db.studentGrowthOverlays[id] = {
+    ...(db.studentGrowthOverlays[id] || {}),
+    ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)),
+  };
+  fileWrite(db);
+}
+
 export async function updateStudent(id, patch) {
   if (!id) return null;
   const fields = {};
@@ -744,6 +867,25 @@ export async function updateStudent(id, patch) {
   if (typeof patch.parent === "string")           fields.parent    = patch.parent;
   if (typeof patch.transport === "string")        fields.transport = patch.transport || "—";
   if (typeof patch.transportEvening === "string") fields.transport_evening = patch.transportEvening || null;
+  // Height / weight — class teachers update anytime. Stored on the student
+  // row (latest snapshot); also mirrored to a file overlay for schema lag.
+  const wantsGrowth = "heightCm" in patch || "weightKg" in patch;
+  if (wantsGrowth) {
+    if ("heightCm" in patch) {
+      const h = patch.heightCm === null || patch.heightCm === "" ? null : Number(patch.heightCm);
+      fields.height_cm = (h != null && Number.isFinite(h) && h > 0) ? h : null;
+    }
+    if ("weightKg" in patch) {
+      const w = patch.weightKg === null || patch.weightKg === "" ? null : Number(patch.weightKg);
+      fields.weight_kg = (w != null && Number.isFinite(w) && w > 0) ? w : null;
+    }
+    fields.measured_at = patch.measuredAt || new Date().toISOString();
+    saveStudentGrowthOverlay(id, {
+      heightCm: fields.height_cm !== undefined ? fields.height_cm : undefined,
+      weightKg: fields.weight_kg !== undefined ? fields.weight_kg : undefined,
+      measuredAt: fields.measured_at,
+    });
+  }
   // Stops are handled separately via the side-stores so they always stick
   // even when the matching columns don't exist on the Supabase table.
   const wantsStop = "pickupStop" in patch;
@@ -752,10 +894,19 @@ export async function updateStudent(id, patch) {
   if (supabaseEnabled) {
     if (Object.keys(fields).length > 0) {
       let upd = await supabase.from("students").update(fields).eq("id", id);
-      // If transport_evening column doesn't exist yet, retry without it.
-      if (upd.error && /transport_evening/.test(upd.error.message)) {
-        const { transport_evening, ...legacy } = fields;
-        upd = await supabase.from("students").update(legacy).eq("id", id);
+      // Drop unknown columns (transport_evening / height_cm / …) and retry.
+      let attempt = fields;
+      let safety = 5;
+      while (upd.error && safety-- > 0) {
+        const m = /Could not find the '([a-z_]+)' column/i.exec(upd.error.message)
+          || (/transport_evening/.test(upd.error.message) ? ["", "transport_evening"] : null);
+        if (!m) break;
+        const next = { ...attempt };
+        delete next[m[1]];
+        if (Object.keys(next).length === Object.keys(attempt).length) break;
+        attempt = next;
+        if (!Object.keys(attempt).length) { upd = { error: null }; break; }
+        upd = await supabase.from("students").update(attempt).eq("id", id);
       }
       if (upd.error) {
         console.warn(`[db] student update fell back: ${upd.error.message}`);
@@ -789,6 +940,12 @@ export async function updateStudent(id, patch) {
       if (wantsStop && !out.pickupStop) out.pickupStop = patch.pickupStop || null;
       if (wantsEveningStop && !out.pickupStopEvening) out.pickupStopEvening = patch.pickupStopEvening || null;
       if (fields.transport_evening && !out.transportEvening) out.transportEvening = fields.transport_evening;
+      if (wantsGrowth) {
+        const g = studentGrowthOverlaysSafe()[id] || {};
+        if (out.heightCm == null && (fields.height_cm != null || g.heightCm != null)) out.heightCm = fields.height_cm ?? g.heightCm;
+        if (out.weightKg == null && (fields.weight_kg != null || g.weightKg != null)) out.weightKg = fields.weight_kg ?? g.weightKg;
+        if (!out.measuredAt) out.measuredAt = fields.measured_at || g.measuredAt || null;
+      }
       // Audit-log the transport change in transport_assignments if either
       // the morning or evening side was touched in this update.
       if ("transport" in patch || wantsStop || "transportEvening" in patch || wantsEveningStop) {
@@ -803,8 +960,15 @@ export async function updateStudent(id, patch) {
   const db = fileRead();
   const idx = (db.addedStudents || []).findIndex((s) => s.id === id);
   if (idx === -1) return null;
-  const merged = { ...db.addedStudents[idx], ...fields };
+  const merged = { ...db.addedStudents[idx] };
+  if (fields.name !== undefined) merged.name = fields.name;
+  if (fields.cls !== undefined) merged.cls = fields.cls;
+  if (fields.parent !== undefined) merged.parent = fields.parent;
+  if (fields.transport !== undefined) merged.transport = fields.transport;
   if (fields.transport_evening !== undefined) merged.transportEvening = fields.transport_evening;
+  if (fields.height_cm !== undefined) merged.heightCm = fields.height_cm;
+  if (fields.weight_kg !== undefined) merged.weightKg = fields.weight_kg;
+  if (fields.measured_at !== undefined) merged.measuredAt = fields.measured_at;
   if (wantsStop) merged.pickupStop = patch.pickupStop || null;
   if (wantsEveningStop) merged.pickupStopEvening = patch.pickupStopEvening || null;
   db.addedStudents[idx] = merged;
@@ -1923,15 +2087,34 @@ export async function recordTransportAttendance(row) {
   const studentId = String(row?.studentId || "").trim();
   const date = String(row?.date || "").trim() || new Date().toISOString().slice(0, 10);
   const direction = (row?.direction || "morning") === "evening" ? "evening" : "morning";
-  const status = ["boarded", "absent", "skipped", "dropped"].includes(row?.status) ? row.status : "boarded";
+  const status = ["boarded", "absent", "skipped", "dropped", "parent"].includes(row?.status) ? row.status : "boarded";
   if (!studentId) throw new Error("studentId required");
+
+  // Merge with any existing row for this trip so a status-only flip
+  // (e.g. class teacher marking Dropped by parent) keeps route/stop.
+  let existing = null;
+  if (supabaseEnabled) {
+    const sel = await supabase
+      .from("transport_attendance")
+      .select("*")
+      .eq("student_id", studentId)
+      .eq("date", date)
+      .eq("direction", direction)
+      .maybeSingle();
+    if (sel.data) existing = fromTransportAttendance(sel.data);
+  } else {
+    const db0 = fileRead();
+    existing = (db0.transportAttendance || []).find(
+      (x) => x.studentId === studentId && x.date === date && (x.direction || "morning") === direction
+    ) || null;
+  }
 
   const persistRow = {
     studentId, date, direction, status,
-    routeCode: row.routeCode || null,
-    stopName: row.stopName || null,
-    studentName: row.studentName || null,
-    cls: row.cls || null,
+    routeCode: row.routeCode != null && row.routeCode !== "" ? row.routeCode : (existing?.routeCode || null),
+    stopName: row.stopName != null && row.stopName !== "" ? row.stopName : (existing?.stopName || null),
+    studentName: row.studentName || existing?.studentName || null,
+    cls: row.cls || existing?.cls || null,
     markedBy: row.markedBy || null,
     markedAt: new Date().toISOString(),
   };
@@ -2597,9 +2780,67 @@ const MASTER_TIMETABLE_R1_R6 = [
 ];
 
 // ---------- daily logs ----------
+function normalizeSubjectLogs(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const s of raw) {
+    const subject = String(s?.subject || "").trim();
+    if (!subject) continue;
+    const key = subject.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const cwStatus = s?.classworkStatus || s?.classwork_status || null;
+    const hwStatus = s?.homeworkStatus || s?.homework_status || null;
+    out.push({
+      subject,
+      classwork: s?.classwork != null ? String(s.classwork) : "",
+      classworkStatus: cwStatus === "completed" || cwStatus === "not_completed" ? cwStatus : null,
+      homework: s?.homework != null ? String(s.homework) : "",
+      homeworkStatus: hwStatus === "completed" || hwStatus === "pending" ? hwStatus : null,
+    });
+  }
+  return out;
+}
+
+// Roll up per-subject statuses into the legacy whole-day fields so KPIs
+// and older UIs keep working.
+function aggregateFromSubjectLogs(subjectLogs) {
+  const list = Array.isArray(subjectLogs) ? subjectLogs : [];
+  if (!list.length) return {};
+  const cw = list.map((s) => s.classworkStatus).filter(Boolean);
+  const hw = list.map((s) => s.homeworkStatus).filter(Boolean);
+  const classworkStatus = !cw.length
+    ? null
+    : cw.every((s) => s === "completed") ? "completed"
+      : cw.some((s) => s === "not_completed") ? "not_completed"
+        : null;
+  const homeworkStatus = !hw.length
+    ? null
+    : hw.every((s) => s === "completed") ? "completed"
+      : hw.some((s) => s === "pending") ? "pending"
+        : null;
+  const classwork = list
+    .filter((s) => (s.classwork || "").trim())
+    .map((s) => `${s.subject}: ${s.classwork.trim()}`)
+    .join(" · ");
+  const homework = list
+    .filter((s) => (s.homework || "").trim())
+    .map((s) => `${s.subject}: ${s.homework.trim()}`)
+    .join(" · ");
+  return { classworkStatus, homeworkStatus, classwork, homework };
+}
+
 export async function upsertDailyLog(row) {
-  const ATT_BUCKETS = new Set(["present", "late", "absent", "leave"]);
+  const ATT_BUCKETS = new Set(["present", "late", "absent", "leave", "parent_drop"]);
   const att = ATT_BUCKETS.has(row.attendance) ? row.attendance : "present";
+  const hasSubjectLogs = Array.isArray(row.subjectLogs);
+  const subjectLogs = hasSubjectLogs ? normalizeSubjectLogs(row.subjectLogs) : null;
+  const rolled = subjectLogs && subjectLogs.length ? aggregateFromSubjectLogs(subjectLogs) : {};
+  const classwork = subjectLogs ? (rolled.classwork || "") : row.classwork;
+  const classworkStatus = subjectLogs ? (rolled.classworkStatus || null) : (row.classworkStatus || null);
+  const homework = subjectLogs ? (rolled.homework || "") : row.homework;
+  const homeworkStatus = subjectLogs ? (rolled.homeworkStatus || null) : (row.homeworkStatus || null);
   const dbRow = {
     student_id: row.studentId, student_name: row.studentName, cls: row.cls,
     date: row.date,
@@ -2607,15 +2848,16 @@ export async function upsertDailyLog(row) {
     // Reason persists for any non-present bucket (absent/late/leave), not
     // just absences. The leave_reason column is reused for late-reason too.
     leave_reason: att === "present" ? null : (row.leaveReason || ""),
-    classwork: row.classwork,
-    classwork_status: row.classworkStatus || null,
-    homework: row.homework,
-    homework_status: row.homeworkStatus || null,
+    classwork,
+    classwork_status: classworkStatus,
+    homework,
+    homework_status: homeworkStatus,
     topics: row.topics,
     handwriting_note: row.handwritingNote, handwriting_grade: row.handwritingGrade,
     behaviour: row.behaviour, extra: row.extra, posted_by: row.postedBy,
     posted_at: new Date().toISOString(),
   };
+  if (subjectLogs) dbRow.subject_logs = subjectLogs;
   if (supabaseEnabled) {
     let r = await supabase.from("daily_logs")
       .upsert(dbRow, { onConflict: "student_id,date" })
@@ -2643,30 +2885,42 @@ export async function upsertDailyLog(row) {
     const persisted = fromDailyLog(r.data);
     // Mirror dropped fields into a side-store keyed by (studentId, date).
     if (droppedKeys.length > 0) {
-      saveDailyLogOverlay(row.studentId, row.date, {
-        classworkStatus: row.classworkStatus || null,
-        homeworkStatus: row.homeworkStatus || null,
+      const overlayPatch = {
+        classworkStatus,
+        homeworkStatus,
         attendance: row.attendance || null,
         leaveReason: row.leaveReason || null,
-      });
+      };
+      if (droppedKeys.includes("subject_logs") && subjectLogs) overlayPatch.subjectLogs = subjectLogs;
+      saveDailyLogOverlay(row.studentId, row.date, overlayPatch);
     }
     // Merge any prior overlay so the response reflects the true state.
     const overlay = readDailyLogOverlay(row.studentId, row.date);
-    return { fresh: true, log: { ...persisted, ...stripNullish(overlay) } };
+    const mergedSubjects = overlay?.subjectLogs || persisted.subjectLogs || subjectLogs || [];
+    return {
+      fresh: true,
+      log: {
+        ...persisted,
+        ...stripNullish(overlay),
+        subjectLogs: Array.isArray(mergedSubjects) ? mergedSubjects : [],
+      },
+    };
   }
   const db = fileRead();
   if (!Array.isArray(db.dailyLogs)) db.dailyLogs = [];
   const idx = db.dailyLogs.findIndex((l) => l.studentId === row.studentId && l.date === row.date);
   const fresh = idx === -1;
+  const prev = !fresh ? db.dailyLogs[idx] : null;
   const log = {
     studentId: row.studentId, studentName: row.studentName, cls: row.cls,
     date: row.date,
     attendance: att,
-    leaveReason: att === "absent" ? (row.leaveReason || "") : "",
-    classwork: row.classwork,
-    classworkStatus: row.classworkStatus || null,
-    homework: row.homework,
-    homeworkStatus: row.homeworkStatus || null,
+    leaveReason: att === "present" ? "" : (row.leaveReason || ""),
+    classwork,
+    classworkStatus,
+    homework,
+    homeworkStatus,
+    subjectLogs: subjectLogs || prev?.subjectLogs || [],
     topics: row.topics,
     handwritingNote: row.handwritingNote, handwritingGrade: row.handwritingGrade,
     behaviour: row.behaviour, extra: row.extra,
@@ -3965,21 +4219,39 @@ export async function archiveSchool(id) {
 // ---------- app settings (trust-wide config bag) ----------
 // Stored as { section, key, value } rows. Read returns a nested object:
 // { section: { key: value, ... }, ... }
+function settingsFromFile() {
+  const db = fileRead();
+  return db.appSettings && typeof db.appSettings === "object" ? db.appSettings : {};
+}
+
+function mergeSettings(base, overlay) {
+  const out = {};
+  for (const src of [base || {}, overlay || {}]) {
+    for (const section of Object.keys(src)) {
+      if (!src[section] || typeof src[section] !== "object") continue;
+      if (!out[section]) out[section] = {};
+      Object.assign(out[section], src[section]);
+    }
+  }
+  return out;
+}
+
 export async function readSettings() {
+  const fileSettings = settingsFromFile();
   if (supabaseEnabled) {
     const sel = await supabase.from("app_settings").select("section, key, value");
     if (!sel.error) {
-      const out = {};
+      const cloud = {};
       for (const row of sel.data || []) {
-        if (!out[row.section]) out[row.section] = {};
-        out[row.section][row.key] = row.value;
+        if (!cloud[row.section]) cloud[row.section] = {};
+        cloud[row.section][row.key] = row.value;
       }
-      return out;
+      // Cloud wins on conflict; file fills gaps if a save only landed locally.
+      return mergeSettings(fileSettings, cloud);
     }
     if (!isSchemaMissError(sel.error)) console.warn(`[db] app_settings fell back: ${sel.error.message}`);
   }
-  const db = fileRead();
-  return db.appSettings && typeof db.appSettings === "object" ? db.appSettings : {};
+  return fileSettings;
 }
 
 export async function writeSettings(patch) {
@@ -3989,12 +4261,23 @@ export async function writeSettings(patch) {
     const sectionMap = patch[section] || {};
     if (typeof sectionMap !== "object") continue;
     for (const key of Object.keys(sectionMap)) {
-      rows.push({ section, key, value: String(sectionMap[key] ?? ""), updated_at: new Date().toISOString() });
+      const raw = sectionMap[key];
+      // Persist arrays/objects as JSON (e.g. holidays) instead of "[object Object]".
+      const value = raw == null
+        ? ""
+        : typeof raw === "string"
+          ? raw
+          : typeof raw === "object"
+            ? JSON.stringify(raw)
+            : String(raw);
+      rows.push({ section, key, value, updated_at: new Date().toISOString() });
     }
   }
   if (supabaseEnabled && rows.length) {
     const up = await supabase.from("app_settings").upsert(rows, { onConflict: "section,key" });
-    if (up.error && !isSchemaMissError(up.error)) console.warn(`[db] settings upsert failed: ${up.error.message}`);
+    if (up.error && !isSchemaMissError(up.error)) {
+      throw new Error(`Settings could not be saved: ${up.error.message}`);
+    }
   }
   const db = fileRead();
   if (!db.appSettings || typeof db.appSettings !== "object") db.appSettings = {};
@@ -4409,10 +4692,10 @@ export async function removeDocument(id) {
 
 // ---------- tasks ----------
 // Lightweight assignment system. Admin creates tasks, picks a single staff
-// user as the assignee, and the assignee can flip the status. Stored only in
-// the file fallback — no Supabase table needed.
+// user as the assignee; the assignee answers Yes/No with remarks.
 const TASK_STATUSES = ["pending", "in_progress", "done"];
 const TASK_PRIORITIES = ["low", "normal", "high", "urgent"];
+const TASK_RESPONSES = ["yes", "no"];
 
 function fileTasksSafe() {
   try {
@@ -4421,15 +4704,54 @@ function fileTasksSafe() {
   } catch { return []; }
 }
 
+function taskResponseOverlaysSafe() {
+  try {
+    const db = fileRead();
+    return (db.taskResponseOverlays && typeof db.taskResponseOverlays === "object")
+      ? db.taskResponseOverlays : {};
+  } catch { return {}; }
+}
+
+function saveTaskResponseOverlay(id, patch) {
+  if (!id) return;
+  const db = fileRead();
+  if (!db.taskResponseOverlays || typeof db.taskResponseOverlays !== "object") db.taskResponseOverlays = {};
+  db.taskResponseOverlays[id] = {
+    ...(db.taskResponseOverlays[id] || {}),
+    ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)),
+    updatedAt: new Date().toISOString(),
+  };
+  fileWrite(db);
+}
+
+function mergeTaskResponseOverlays(tasks) {
+  const overlays = taskResponseOverlaysSafe();
+  if (!overlays || !Object.keys(overlays).length) return tasks;
+  return tasks.map((t) => {
+    const o = overlays[t.id];
+    if (!o) return t;
+    return {
+      ...t,
+      // Overlay wins when set — covers DBs that lack response/remarks columns.
+      response: o.response !== undefined ? o.response : t.response,
+      remarks: o.remarks !== undefined ? o.remarks : t.remarks,
+      status: o.status || t.status,
+    };
+  });
+}
+
 export async function listTasks(filter = {}) {
   if (supabaseEnabled) {
     let q = supabase.from("tasks").select("*").order("created_at", { ascending: false });
     if (filter.assignedTo) q = q.eq("assigned_to", filter.assignedTo);
     const sel = await q;
-    if (!sel.error) return (sel.data || []).map(fromTask);
+    if (!sel.error) {
+      const rows = mergeTaskResponseOverlays((sel.data || []).map(fromTask));
+      return rows;
+    }
     if (!isSchemaMissError(sel.error)) console.warn(`[db] tasks fell back: ${sel.error.message}`);
   }
-  const all = fileTasksSafe();
+  const all = mergeTaskResponseOverlays(fileTasksSafe());
   if (filter.assignedTo) return all.filter((t) => t.assignedTo === filter.assignedTo);
   return all;
 }
@@ -4452,12 +4774,22 @@ export async function addTask({ title, description, assignedTo, assignedToName, 
     status: "pending",
     priority: TASK_PRIORITIES.includes(priority) ? priority : "normal",
     dueDate: dueDate || null,
+    response: null,
+    remarks: null,
     createdAt: now.toISOString(),
     updatedAt: now.toISOString(),
   };
   if (supabaseEnabled) {
-    const ins = await supabase.from("tasks").insert(toTask(task)).select().single();
-    if (!ins.error) return fromTask(ins.data);
+    let payload = toTask(task);
+    let ins = await supabase.from("tasks").insert(payload).select().single();
+    // Older DBs may lack response/remarks — strip and retry once.
+    if (ins.error && /Could not find the '(response|remarks)' column/i.test(ins.error.message)) {
+      const retry = { ...payload };
+      delete retry.response;
+      delete retry.remarks;
+      ins = await supabase.from("tasks").insert(retry).select().single();
+    }
+    if (!ins.error) return { ...fromTask(ins.data), response: task.response, remarks: task.remarks };
     if (!isSchemaMissError(ins.error)) throw new Error(ins.error.message);
   }
   const db = fileRead();
@@ -4469,6 +4801,20 @@ export async function addTask({ title, description, assignedTo, assignedToName, 
 
 export async function updateTask(id, patch = {}) {
   if (!id) throw new Error("id required");
+  // Yes/No answer drives status so staff-performance "done" counts stay correct.
+  if (patch.response === "yes") patch = { ...patch, status: "done" };
+  else if (patch.response === "no") patch = { ...patch, status: "pending" };
+
+  // Always mirror Yes/No + remarks to a file overlay so Super Admin sees the
+  // update even when the live Supabase schema is missing those columns.
+  const overlayPatch = {};
+  if (patch.response === null || TASK_RESPONSES.includes(patch.response)) {
+    overlayPatch.response = patch.response ?? null;
+  }
+  if (typeof patch.remarks === "string") overlayPatch.remarks = patch.remarks.trim() || null;
+  if (patch.status && TASK_STATUSES.includes(patch.status)) overlayPatch.status = patch.status;
+  if (Object.keys(overlayPatch).length) saveTaskResponseOverlay(id, overlayPatch);
+
   if (supabaseEnabled) {
     const sel = await supabase.from("tasks").select("*").eq("id", id).maybeSingle();
     if (sel.data) {
@@ -4478,8 +4824,21 @@ export async function updateTask(id, patch = {}) {
       if (typeof patch.description === "string") upd.description = patch.description.trim() || null;
       if (TASK_PRIORITIES.includes(patch.priority)) upd.priority = patch.priority;
       if (typeof patch.dueDate === "string") upd.due_date = patch.dueDate || null;
-      const r = await supabase.from("tasks").update(upd).eq("id", id).select().single();
-      if (!r.error) return fromTask(r.data);
+      if (patch.response === null || TASK_RESPONSES.includes(patch.response)) upd.response = patch.response ?? null;
+      if (typeof patch.remarks === "string") upd.remarks = patch.remarks.trim() || null;
+      let r = await supabase.from("tasks").update(upd).eq("id", id).select().single();
+      // Older DBs may not have response/remarks yet — drop and retry; overlay
+      // already holds the answer for listTasks merges.
+      if (r.error && /Could not find the '(response|remarks)' column/i.test(r.error.message)) {
+        const retry = { ...upd };
+        delete retry.response;
+        delete retry.remarks;
+        r = await supabase.from("tasks").update(retry).eq("id", id).select().single();
+      }
+      if (!r.error) {
+        const base = fromTask(r.data);
+        return mergeTaskResponseOverlays([base])[0];
+      }
       if (!isSchemaMissError(r.error)) throw new Error(r.error.message);
     } else if (sel.error && !isSchemaMissError(sel.error)) {
       throw new Error(sel.error.message);
@@ -4488,13 +4847,22 @@ export async function updateTask(id, patch = {}) {
   const db = fileRead();
   if (!Array.isArray(db.tasks)) db.tasks = [];
   const idx = db.tasks.findIndex((t) => t.id === id);
-  if (idx === -1) return null;
+  if (idx === -1) {
+    // Task may live only in Supabase; still return overlay-merged stub if we
+    // at least wrote the answer.
+    if (Object.keys(overlayPatch).length) {
+      return { id, ...overlayPatch, status: overlayPatch.status || "pending" };
+    }
+    return null;
+  }
   const next = { ...db.tasks[idx] };
   if (patch.status && TASK_STATUSES.includes(patch.status)) next.status = patch.status;
   if (typeof patch.title === "string" && patch.title.trim()) next.title = patch.title.trim();
   if (typeof patch.description === "string") next.description = patch.description.trim() || null;
   if (TASK_PRIORITIES.includes(patch.priority)) next.priority = patch.priority;
   if (typeof patch.dueDate === "string") next.dueDate = patch.dueDate || null;
+  if (patch.response === null || TASK_RESPONSES.includes(patch.response)) next.response = patch.response ?? null;
+  if (typeof patch.remarks === "string") next.remarks = patch.remarks.trim() || null;
   next.updatedAt = new Date().toISOString();
   db.tasks[idx] = next;
   fileWrite(db);
@@ -6576,16 +6944,19 @@ export async function markAttendanceBulk({ date, cls, postedBy, marks }) {
   const results = [];
   // Allowed daily-log attendance buckets. "late" and "leave" join the
   // existing present/absent so reports can distinguish a student who
-  // showed up late from a planned leave.
-  const STUDENT_ATTENDANCE = new Set(["present", "late", "absent", "leave"]);
+  // showed up late from a planned leave. "parent_drop" = missed morning
+  // bus but arrived by parent (present at school; unlocks evening bus).
+  const STUDENT_ATTENDANCE = new Set(["present", "late", "absent", "leave", "parent_drop"]);
   for (const m of marks) {
     const studentId = m.studentId;
     if (!studentId) continue;
     const att = STUDENT_ATTENDANCE.has(m.attendance) ? m.attendance : "present";
     // Reason text persists for absent/leave/late — useful for the audit
     // trail and the late-arrivals widget. Stored in `leaveReason` for
-    // backward compat (the column is reused).
-    const leaveReason = att === "present" ? "" : (m.leaveReason || m.lateReason || "");
+    // backward compat (the column is reused). parent_drop keeps a fixed note.
+    const leaveReason = att === "present" ? ""
+      : att === "parent_drop" ? (m.leaveReason || "Dropped by parent")
+      : (m.leaveReason || m.lateReason || "");
 
     let existing = null;
     if (supabaseEnabled) {
@@ -6606,6 +6977,7 @@ export async function markAttendanceBulk({ date, cls, postedBy, marks }) {
       attendance: att, leaveReason,
       classwork: existing.classwork ?? null, classworkStatus: existing.classwork_status ?? existing.classworkStatus ?? null,
       homework:  existing.homework  ?? null, homeworkStatus:  existing.homework_status  ?? existing.homeworkStatus  ?? null,
+      subjectLogs: existing.subject_logs ?? existing.subjectLogs ?? undefined,
       topics: existing.topics ?? null,
       handwritingNote: existing.handwriting_note ?? existing.handwritingNote ?? null,
       handwritingGrade: existing.handwriting_grade ?? existing.handwritingGrade ?? null,

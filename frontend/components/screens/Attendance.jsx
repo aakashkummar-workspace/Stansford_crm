@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI, AvatarChip } from "../ui";
-import { formatClassLabel } from "@/backend/lib/format.js";
+import { formatClassLabel, getWorkingDays, getHolidayDates, attendanceFromLogs } from "@/backend/lib/format.js";
 
 function Toast({ msg, tone, onClose }) {
   if (!msg) return null;
@@ -74,33 +74,63 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
       .map((s, i) => ({ id: s.id, name: s.name, cls: s.cls, parent: s.parent, roll: i + 1 }));
   }, [E.ADDED_STUDENTS, cls, sec]);
 
-  // Pre-populate marks from existing daily logs for today
+  // Morning bus status hints for the class teacher.
+  const morningBusByStudent = useMemo(() => {
+    const out = {};
+    if (!todayIso) return out;
+    for (const r of (E.TRANSPORT_ATTENDANCE || [])) {
+      if (r.date === todayIso && (r.direction || "morning") === "morning") {
+        out[r.studentId] = r.status;
+      }
+    }
+    return out;
+  }, [E.TRANSPORT_ATTENDANCE, todayIso]);
+
+  // Pre-populate marks from existing daily logs for today. Bus-absent
+  // students are seeded as class-absent by the transport API; if that
+  // write hasn't landed yet, still prefill from transport status.
   useEffect(() => {
     if (!todayIso) return;
     const next = {};
-    const ATT_STATES = new Set(["present", "late", "absent", "leave"]);
+    const ATT_STATES = new Set(["present", "late", "absent", "leave", "parent_drop"]);
     for (const stu of roster) {
       const log = (E.DAILY_LOGS || []).find((l) => l.studentId === stu.id && l.date === todayIso);
-      next[stu.id] = log
-        ? {
-            state: ATT_STATES.has(log.attendance) ? log.attendance : "present",
-            reason: log.leaveReason || "",
-            saved: true,
-          }
-        : { state: null, reason: "", saved: false };
+      const bus = morningBusByStudent[stu.id];
+      if (log) {
+        next[stu.id] = {
+          state: ATT_STATES.has(log.attendance) ? log.attendance : "present",
+          reason: log.leaveReason || "",
+          saved: true,
+        };
+      } else if (bus === "absent") {
+        next[stu.id] = { state: "absent", reason: "Missed morning bus", saved: false };
+      } else if (bus === "parent") {
+        next[stu.id] = { state: "parent_drop", reason: "Dropped by parent", saved: false };
+      } else {
+        next[stu.id] = { state: null, reason: "", saved: false };
+      }
     }
     setMarks(next);
     setEditMode(false);
-  }, [todayIso, roster.length, E.DAILY_LOGS, cls, sec]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [todayIso, roster.length, E.DAILY_LOGS, morningBusByStudent, cls, sec]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const setMark = (id, state) => setMarks((m) => ({ ...m, [id]: { ...(m[id] || {}), state, saved: false } }));
+  const setMark = (id, state) => setMarks((m) => ({
+    ...m,
+    [id]: {
+      ...(m[id] || {}),
+      state,
+      reason: state === "parent_drop" ? "Dropped by parent" : (state === "present" ? "" : (m[id]?.reason || "")),
+      saved: false,
+    },
+  }));
   const setReason = (id, reason) => setMarks((m) => ({ ...m, [id]: { ...(m[id] || {}), reason, saved: false } }));
 
   const presentCount = roster.filter((s) => marks[s.id]?.state === "present").length;
   const lateCount    = roster.filter((s) => marks[s.id]?.state === "late").length;
   const absentCount  = roster.filter((s) => marks[s.id]?.state === "absent").length;
   const leaveCount   = roster.filter((s) => marks[s.id]?.state === "leave").length;
-  const unmarkedCount = roster.length - presentCount - lateCount - absentCount - leaveCount;
+  const parentDropCount = roster.filter((s) => marks[s.id]?.state === "parent_drop").length;
+  const unmarkedCount = roster.length - presentCount - lateCount - absentCount - leaveCount - parentDropCount;
   const dirty = roster.some((s) => marks[s.id] && marks[s.id].saved === false && marks[s.id].state);
   // Once attendance is recorded for everyone in the class today, the screen
   // is locked until the system date changes — staff take attendance for each
@@ -149,7 +179,7 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
       const json = await r.json().catch(() => ({}));
       if (!r.ok || !json.ok) throw new Error(json.error || "Failed");
       showToast(
-        `${editMode ? "Updated" : "Saved"} · ${json.present || 0} present · ${json.late || 0} late · ${json.absent || 0} absent · ${json.leave || 0} on leave`,
+        `${editMode ? "Updated" : "Saved"} · ${json.present || 0} present · ${json.late || 0} late · ${json.absent || 0} absent · ${json.leave || 0} on leave${json.parent_drop ? ` · ${json.parent_drop} by parent` : ""}`,
         "ok",
       );
       // Mark all saved=true locally, then drop back into locked view.
@@ -300,7 +330,7 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
 
       <div className="grid g-4" style={{ marginBottom: 14 }}>
         <KPI label="On roll" value={roster.length} sub={`${formatClassLabel(`${cls}-${sec}`)} · ${unmarkedCount} not marked`} puck="mint" puckIcon="students" />
-        <KPI label="Present" value={presentCount} sub={roster.length ? `${Math.round((presentCount / roster.length) * 100)}%` : "—"} puck="cream" puckIcon="check" />
+        <KPI label="Present" value={presentCount + parentDropCount} sub={roster.length ? `${Math.round(((presentCount + parentDropCount) / roster.length) * 100)}%${parentDropCount ? ` · ${parentDropCount} by parent` : ""}` : "—"} puck="cream" puckIcon="check" />
         <KPI label="Late" value={lateCount} sub={lateCount ? "with reasons" : "—"} puck="peach" puckIcon="clock" />
         <KPI label="Absent / leave" value={absentCount + leaveCount} sub={`${absentCount} absent · ${leaveCount} on leave`} puck="rose" puckIcon="x" />
       </div>
@@ -390,20 +420,32 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
               )}
               {roster.map((s, i) => {
                 const m = marks[s.id] || { state: null, reason: "" };
+                const busStatus = morningBusByStudent[s.id];
                 const STATE_PILLS = [
-                  { k: "present", label: "Present", icon: "check", soft: "ok-soft",  fg: "ok" },
-                  { k: "late",    label: "Late",    icon: "clock", soft: "warn-soft", fg: "warn" },
-                  { k: "absent",  label: "Absent",  icon: "x",     soft: "bad-soft",  fg: "bad" },
-                  { k: "leave",   label: "Leave",   icon: "calendar", soft: "accent-soft", fg: "accent" },
+                  { k: "present",     label: "Present",   icon: "check",    soft: "ok-soft",     fg: "ok" },
+                  { k: "late",        label: "Late",      icon: "clock",    soft: "warn-soft",   fg: "warn" },
+                  { k: "absent",      label: "Absent",    icon: "x",        soft: "bad-soft",    fg: "bad" },
+                  { k: "leave",       label: "Leave",     icon: "calendar", soft: "accent-soft", fg: "accent" },
+                  { k: "parent_drop", label: "By parent", icon: "users",    soft: "warn-soft",   fg: "warn" },
                 ];
-                const needsReason = m.state && m.state !== "present";
+                const needsReason = m.state && m.state !== "present" && m.state !== "parent_drop";
                 return (
                   <tr key={s.id}>
                     <td style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-4)" }}>{String(i + 1).padStart(2, "0")}</td>
                     <td>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                         <AvatarChip initials={(s.name || "?").split(" ").map((n) => n[0]).join("")} />
                         <span style={{ fontSize: 12.5, fontWeight: 500 }}>{s.name}</span>
+                        {busStatus === "absent" && m.state !== "parent_drop" && (
+                          <span className="chip bad" style={{ fontSize: 9.5 }} title="Marked absent on morning bus">
+                            Bus absent
+                          </span>
+                        )}
+                        {(busStatus === "parent" || m.state === "parent_drop") && (
+                          <span className="chip warn" style={{ fontSize: 9.5 }} title="Missed morning bus · arrived by parent · evening bus unlocked">
+                            By parent
+                          </span>
+                        )}
                       </div>
                     </td>
                     <td style={{ fontSize: 11, color: "var(--ink-3)", fontFamily: "var(--font-mono)" }}>
@@ -421,6 +463,7 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
                               className={active ? "active" : ""}
                               onClick={() => setMark(s.id, p.k)}
                               disabled={lockedForToday}
+                              title={p.k === "parent_drop" ? "Missed bus but arrived by parent — unlocks evening transport" : undefined}
                               style={active ? { background: `var(--${p.soft})`, color: `var(--${p.fg})` } : {}}
                             >
                               <Icon name={p.icon} size={11} />{p.label}
@@ -443,6 +486,8 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
                                                    "Sick / family event …"
                           }
                         />
+                      ) : m.state === "parent_drop" ? (
+                        <span style={{ fontSize: 11, color: "var(--ink-3)" }}>Dropped by parent</span>
                       ) : (
                         <span style={{ fontSize: 11, color: "var(--ink-4)" }}>—</span>
                       )}
@@ -670,11 +715,14 @@ function ParentAttendanceView({ E }) {
       ? "absent"
       : "present";
 
-  // Term-level stats
-  const presentCount = logs.filter((l) => l.attendance !== "absent").length;
-  const absentCount  = logs.filter((l) => l.attendance === "absent").length;
-  const totalLogs    = logs.length;
-  const pct = totalLogs ? Math.round((presentCount / totalLogs) * 100) : null;
+  // Term-level stats — % uses class working days minus holidays.
+  const holidayDates = getHolidayDates(E.SETTINGS);
+  const workingDays = getWorkingDays(E.SETTINGS, child.cls);
+  const attStats = attendanceFromLogs(logs, workingDays, { holidayDates });
+  const presentCount = attStats.presentCount;
+  const absentCount  = attStats.absentCount;
+  const totalLogs    = attStats.totalLogs;
+  const pct = attStats.pct;
 
   // Build a 30-day grid: most recent day first, weekends muted, days
   // with no log shown as "—".
@@ -730,14 +778,16 @@ function ParentAttendanceView({ E }) {
         <KPI
           label="This term"
           value={pct !== null ? `${pct}%` : "—"}
-          sub={totalLogs ? `${presentCount}/${totalLogs} days present` : "no logs yet"}
+          sub={attStats.denom
+            ? `${presentCount}/${attStats.denom}${workingDays ? " working days" : " days logged"}`
+            : "no logs yet"}
           puck="peach"
           puckIcon="trending"
         />
         <KPI
           label="Days present"
           value={presentCount}
-          sub={`out of ${totalLogs} logged`}
+          sub={workingDays ? `of ${workingDays} working days` : `out of ${totalLogs} logged`}
           puck="mint"
           puckIcon="check"
         />

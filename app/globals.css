@@ -668,6 +668,33 @@ a { color: inherit; text-decoration: none; }
   overflow: hidden;
 }
 .kpi .meta > span { overflow: hidden; text-overflow: ellipsis; }
+
+/* Academic student panel — 2×2 so labels/subtext stay readable in col-5 */
+.student-kpi-grid {
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.student-kpi-grid .kpi {
+  padding: 14px 14px 12px;
+  min-height: 0;
+}
+.student-kpi-grid .kpi-top { margin-bottom: 8px; }
+.student-kpi-grid .kpi-puck { width: 30px; height: 30px; }
+.student-kpi-grid .kpi .lbl {
+  white-space: normal;
+  line-height: 1.25;
+  letter-spacing: 0.06em;
+}
+.student-kpi-grid .kpi .val { font-size: 26px; }
+.student-kpi-grid .kpi .meta {
+  white-space: normal;
+  line-height: 1.3;
+}
+.student-kpi-grid .kpi .meta > span {
+  overflow: visible;
+  text-overflow: unset;
+  white-space: normal;
+}
 .kpi .spark { position: absolute; right: 14px; bottom: 14px; opacity: 0.7; pointer-events: none; }
 
 .delta {

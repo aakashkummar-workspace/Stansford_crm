@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { resolveSchool, downloadPdf } from "@/lib/export";
-import { formatClassLabel } from "@/backend/lib/format.js";
+import { formatClassLabel, getWorkingDays, getHolidayDates, attendanceFromLogs } from "@/backend/lib/format.js";
 import { KPI, AvatarChip } from "../ui";
 
 // Build the last 8 week-start dates relative to today. Computed lazily on
@@ -40,6 +40,7 @@ const EMPTY_LOG = {
   classworkStatus: null,
   homework: "",
   homeworkStatus: null,
+  subjectLogs: [],
   topics: "",
   handwritingNote: "",
   handwritingGrade: "",
@@ -47,30 +48,230 @@ const EMPTY_LOG = {
   extra: "",
 };
 
+// Build per-subject log rows from the class subject list + any saved values.
+// Always keeps class subjects (so parents see every subject, even unlogged)
+// and appends any extra subjects teachers already posted.
+function seedSubjectLogs(classSubjects, existingLogs) {
+  const prev = Array.isArray(existingLogs) ? existingLogs : [];
+  const byName = new Map(
+    prev.filter((s) => s?.subject).map((s) => [String(s.subject).toLowerCase(), s])
+  );
+  const names = [];
+  const seen = new Set();
+  for (const name of Array.isArray(classSubjects) ? classSubjects : []) {
+    const key = String(name || "").trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    names.push(String(name).trim());
+  }
+  for (const s of prev) {
+    const name = String(s?.subject || "").trim();
+    const key = name.toLowerCase();
+    if (!name || seen.has(key)) continue;
+    seen.add(key);
+    names.push(name);
+  }
+  if (!names.length) return [];
+  return names.map((name) => {
+    const hit = byName.get(String(name).toLowerCase()) || {};
+    return {
+      subject: name,
+      classwork: hit.classwork || "",
+      classworkStatus: hit.classworkStatus || null,
+      homework: hit.homework || "",
+      homeworkStatus: hit.homeworkStatus || null,
+    };
+  });
+}
+
+// Merge subject-teacher edits into the full day log without wiping other subjects.
+function mergeSubjectLogs(existingLogs, editedLogs) {
+  const map = new Map();
+  for (const s of (existingLogs || [])) {
+    if (!s?.subject) continue;
+    map.set(String(s.subject).toLowerCase(), {
+      subject: s.subject,
+      classwork: s.classwork || "",
+      classworkStatus: s.classworkStatus || null,
+      homework: s.homework || "",
+      homeworkStatus: s.homeworkStatus || null,
+    });
+  }
+  for (const s of (editedLogs || [])) {
+    if (!s?.subject) continue;
+    map.set(String(s.subject).toLowerCase(), {
+      subject: s.subject,
+      classwork: s.classwork || "",
+      classworkStatus: s.classworkStatus || null,
+      homework: s.homework || "",
+      homeworkStatus: s.homeworkStatus || null,
+    });
+  }
+  return Array.from(map.values());
+}
+
 export default function ScreenAcademic({ E, refresh, role, session }) {
   const school = resolveSchool(E?.SETTINGS);
   const actor  = session?.name || null;
   const classes = E.CLASSES;
 
-  // For teachers, build the list of assigned class-sections (e.g. ["2-A","5-B"]).
-  // The Academic screen lets them switch between their own classes; they
-  // can't see classes they aren't assigned to.
-  const teacherClassList = role === "teacher"
-    ? (Array.isArray(session?.linkedClasses) && session.linkedClasses.length
-        ? session.linkedClasses
-        : (session?.linkedId ? [session.linkedId] : []))
-    : [];
+  // Resolve this teacher's staff id (timetable rows key off teacherId).
+  const myStaffId = useMemo(() => {
+    if (role !== "teacher") return null;
+    if (session?.staffId) return session.staffId;
+    const lid = session?.linkedId || "";
+    if (typeof lid === "string" && lid.startsWith("STF-")) return lid;
+    const email = (session?.email || "").toLowerCase();
+    const hit = (E.STAFF || []).find((s) => s.email && s.email.toLowerCase() === email);
+    return hit?.id || null;
+  }, [role, session, E.STAFF]);
+
+  const meName = (session?.name || "").trim().toLowerCase();
+
+  // Timetable slots taught by this teacher.
+  const myTimetable = useMemo(() => {
+    if (role !== "teacher") return [];
+    return (E.TIMETABLE || []).filter((e) => {
+      if (!e?.cls) return false;
+      if (myStaffId && e.teacherId && e.teacherId === myStaffId) return true;
+      const tName = (e.teacherName || "").trim().toLowerCase();
+      return tName && meName && tName === meName;
+    });
+  }, [role, E.TIMETABLE, myStaffId, meName]);
+
+  // Classes this teacher can log for: class-teacher assignment + timetable classes.
+  const teacherClassList = useMemo(() => {
+    if (role !== "teacher") return [];
+    const linked = Array.isArray(session?.linkedClasses) && session.linkedClasses.length
+      ? session.linkedClasses
+      : (session?.linkedId && /^\d+-/i.test(String(session.linkedId)) ? [session.linkedId] : []);
+    const fromTt = myTimetable.map((e) => e.cls);
+    return Array.from(new Set([...linked, ...fromTt].filter(Boolean)))
+      .sort((a, b) => {
+        const [ah, as] = String(a).split("-");
+        const [bh, bs] = String(b).split("-");
+        return (Number(ah) - Number(bh)) || String(as || "").localeCompare(String(bs || ""));
+      });
+  }, [role, session, myTimetable]);
+
   const firstTeacherKey = teacherClassList[0] || null;
   const firstTeacherSplit = firstTeacherKey
-    ? (() => { const [c, s] = String(firstTeacherKey).split("-"); return { c: Number(c), s }; })()
+    ? (() => { const [c, s] = String(firstTeacherKey).split("-"); return { c: Number(c), s: s || "A" }; })()
     : null;
 
   const [cls, setCls] = useState(firstTeacherSplit?.c || 5);
   const [sec, setSec] = useState(firstTeacherSplit?.s || "A");
   const [selectedStudent, setSelectedStudent] = useState(0);
+  // Teachers log ONE subject at a time (English and EVS are separate logs).
+  const [logSubject, setLogSubject] = useState("");
 
-  // Parent view: pin to the child's class. Teacher: snap to the first
-  // assigned class on mount/role-change (they can switch via the picker).
+  const isClassTeacherOf = (clsKey) => {
+    const linked = Array.isArray(session?.linkedClasses) ? session.linkedClasses : [];
+    if (linked.includes(clsKey)) return true;
+    if (session?.linkedId === clsKey) return true;
+    const head = String(clsKey).split("-")[0];
+    return linked.some((k) => String(k).split("-")[0] === head);
+  };
+
+  // Subjects available on a class (configured on Classes, else timetable,
+  // else the school subject catalog). Parents need the full list even when
+  // only one subject teacher has posted today's log.
+  const subjectsAvailableForClass = (clsKey) => {
+    const [head] = String(clsKey).split("-");
+    const c = (classes || []).find((x) => Number(x.n) === Number(head));
+    const configured = Array.isArray(c?.subjects) ? c.subjects.map((s) => String(s || "").trim()).filter(Boolean) : [];
+    if (configured.length) return configured;
+    const fromTt = Array.from(new Set(
+      (E.TIMETABLE || [])
+        .filter((e) => {
+          const ek = String(e.cls || "");
+          return ek === clsKey || ek.split("-")[0] === head;
+        })
+        .map((e) => (e.subject || "").trim())
+        .filter(Boolean)
+    ));
+    if (fromTt.length) return fromTt;
+    return (E.SUBJECTS || [])
+      .map((s) => (typeof s === "string" ? s : s?.name) || "")
+      .map((s) => String(s).trim())
+      .filter(Boolean);
+  };
+
+  // One picker chip per class+subject this teacher is assigned on the
+  // timetable only — never the full class subject list.
+  const teacherLogScopes = useMemo(() => {
+    if (role !== "teacher") return [];
+    const out = [];
+    const seen = new Set();
+    for (const e of myTimetable) {
+      const clsKey = String(e.cls || "").trim();
+      const subject = String(e.subject || "").trim();
+      if (!clsKey || !subject) continue;
+      const id = `${clsKey}::${subject.toLowerCase()}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const [c, s] = clsKey.split("-");
+      out.push({
+        id,
+        clsKey,
+        c: Number(c),
+        s: s || "A",
+        subject,
+      });
+    }
+    // Class teacher with no timetable rows yet → one general chip so they
+    // can still post attendance / notes for that class.
+    if (!out.length) {
+      for (const key of teacherClassList) {
+        if (!isClassTeacherOf(key)) continue;
+        const [c, s] = String(key).split("-");
+        out.push({
+          id: `${key}::__general__`,
+          clsKey: key,
+          c: Number(c),
+          s: s || "A",
+          subject: null,
+        });
+      }
+    }
+    out.sort((a, b) => (a.c - b.c) || String(a.subject || "").localeCompare(String(b.subject || "")));
+    return out;
+  }, [role, myTimetable, teacherClassList, session]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Full class subject list — used for parent/admin viewing.
+  const allClassSubjects = useMemo(
+    () => subjectsAvailableForClass(`${cls}-${sec}`),
+    [cls, sec, classes, E.TIMETABLE, E.SUBJECTS] // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
+  // Subjects used for THIS logging session (single subject for teachers).
+  const classSubjects = useMemo(() => {
+    if (role === "teacher") {
+      return logSubject ? [logSubject] : [];
+    }
+    // Admin / principal / parent: all subjects on the class.
+    return allClassSubjects;
+  }, [role, logSubject, allClassSubjects]);
+
+  // When timetable/class assignments load, ensure the active scope is valid.
+  useEffect(() => {
+    if (role !== "teacher") return;
+    if (!teacherLogScopes.length) {
+      setLogSubject("");
+      return;
+    }
+    const valid = teacherLogScopes.some(
+      (sc) => sc.c === Number(cls) && sc.s === sec && (sc.subject || "") === (logSubject || "")
+    );
+    if (valid) return;
+    const pick = teacherLogScopes[0];
+    setCls(pick.c);
+    setSec(pick.s);
+    setLogSubject(pick.subject || "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [role, teacherLogScopes]);
+
+  // Parent view: pin to the child's class.
   useEffect(() => {
     if (role === "parent" && E.ADDED_STUDENTS && E.ADDED_STUDENTS[0]) {
       const child = E.ADDED_STUDENTS[0];
@@ -79,11 +280,7 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
       if (!Number.isNaN(n)) setCls(n);
       if (s) setSec(s);
     }
-    if (role === "teacher" && firstTeacherSplit) {
-      setCls(firstTeacherSplit.c);
-      setSec(firstTeacherSplit.s);
-    }
-  }, [role, E.ADDED_STUDENTS, session?.linkedId, session?.linkedClasses?.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [role, E.ADDED_STUDENTS]); // eslint-disable-line react-hooks/exhaustive-deps
   // WEEKS + TODAY_ISO depend on the client clock; populate after mount.
   const [WEEKS, setWeeks] = useState(PLACEHOLDER_WEEKS);
   const [TODAY_ISO, setTodayIso] = useState("");
@@ -97,6 +294,7 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
   const [weekOpen, setWeekOpen] = useState(false);
   const [showLog, setShowLog] = useState(false);
   const [showAnnounce, setShowAnnounce] = useState(false);
+  const [growthFor, setGrowthFor] = useState(null); // student row for Ht/Wt modal
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
   const flash = (msg, tone = "ok") => {
@@ -108,10 +306,15 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
   const week = WEEKS.find((w) => w.iso === weekIso) || WEEKS[0];
 
   // Roster is built from real students in the DB filtered by class and section.
+  // Match class head too so "3" / "3-A" both work.
   const roster = useMemo(() => {
     const want = `${cls}-${sec}`;
+    const head = String(cls);
     return (E.ADDED_STUDENTS || [])
-      .filter((s) => s.cls === want)
+      .filter((s) => {
+        const k = String(s.cls || "");
+        return k === want || k.split("-")[0] === head;
+      })
       .map((s, i) => ({
         id: s.id,
         name: s.name,
@@ -121,6 +324,9 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
         classwork: 0,
         handwriting: "—",
         behavior: "—",
+        heightCm: s.heightCm ?? null,
+        weightKg: s.weightKg ?? null,
+        measuredAt: s.measuredAt ?? null,
       }));
   }, [E.ADDED_STUDENTS, cls, sec]);
 
@@ -186,12 +392,16 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
   const logToShow = savedLog || { ...EMPTY_LOG, postedBy: "", postedAt: null };
   const isUserSaved = Boolean(savedLog);
 
-  // KPI roll-ups computed from the student's daily logs (defined above).
-  const presentCount = studentLogs.filter((l) => l.attendance !== "absent").length;
+  // KPI roll-ups. Attendance % uses Super Admin's per-class working days
+  // minus holidays (present ÷ effective days); falls back to logged days.
+  const holidayDates = getHolidayDates(E.SETTINGS);
+  const workingDays = getWorkingDays(E.SETTINGS, student?.cls || `${cls}-${sec}`);
+  const attStats = attendanceFromLogs(studentLogs, workingDays, { holidayDates });
+  const presentCount = attStats.presentCount;
+  const totalLogs = attStats.totalLogs;
+  const attendancePct = attStats.pct != null ? attStats.pct : (student?.attendance ?? 0);
   const cwDone = studentLogs.filter((l) => l.classworkStatus === "completed").length;
   const hwDone = studentLogs.filter((l) => l.homeworkStatus === "completed").length;
-  const totalLogs = studentLogs.length;
-  const attendancePct = totalLogs ? Math.round((presentCount / totalLogs) * 100) : (student?.attendance ?? 0);
   const homeworkPct   = totalLogs ? Math.round((hwDone / totalLogs) * 100) : 0;
   const classworkPct  = totalLogs ? Math.round((cwDone / totalLogs) * 100) : 0;
   const lastGrade     = studentLogs.find((l) => l.handwritingGrade)?.handwritingGrade || "—";
@@ -202,16 +412,21 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
       flash("No student selected", "bad");
       return;
     }
+    const existing = (E.DAILY_LOGS || []).find((l) => l.studentId === student.id && l.date === TODAY_ISO) || {};
+    const subjectLogs = Array.isArray(form.subjectLogs)
+      ? mergeSubjectLogs(existing.subjectLogs, form.subjectLogs)
+      : existing.subjectLogs;
     const r = await fetch("/api/academic/log", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         ...form,
+        subjectLogs,
         studentId: student.id,
         studentName: student.name,
         cls: `${cls}-${sec}`,
         date: TODAY_ISO,
-        postedBy: "Teacher",
+        postedBy: session?.name || "Teacher",
       }),
     });
     const json = await r.json();
@@ -224,11 +439,47 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
     }
   };
 
+  const canEditGrowth = role === "teacher" || role === "principal" || role === "admin" || role === "academic_director";
+
+  const saveGrowth = async ({ studentId, heightCm, weightKg }) => {
+    const r = await fetch("/api/students", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: studentId, heightCm, weightKg }),
+    });
+    const json = await r.json().catch(() => ({}));
+    if (!r.ok || !json.ok) throw new Error(json.error || "Failed to save");
+    flash(`Height/weight saved for ${json.student?.name || "student"}`);
+    setGrowthFor(null);
+    await refresh?.();
+    return json.student;
+  };
+
   // Quick inline patch — used by the per-row pills (CW / HW / HG). Posts a
   // partial daily log that preserves any other fields the teacher already
-  // saved. Server-side upsert merges by (studentId, date).
+  // saved. When a subject chip is selected, CW/HW toggles apply to that subject only.
   const quickUpdate = async (s, patch) => {
     const existing = (E.DAILY_LOGS || []).find((l) => l.studentId === s.id && l.date === TODAY_ISO) || {};
+    let editedSubjects = seedSubjectLogs(classSubjects, existing.subjectLogs);
+    if (classSubjects.length) {
+      if ("classworkStatus" in patch) {
+        editedSubjects = editedSubjects.map((row) => ({
+          ...row,
+          classworkStatus: patch.classworkStatus,
+          classwork: row.classwork || (patch.classworkStatus === "completed" ? "Done" : row.classwork),
+        }));
+      }
+      if ("homeworkStatus" in patch) {
+        editedSubjects = editedSubjects.map((row) => ({
+          ...row,
+          homeworkStatus: patch.homeworkStatus,
+          homework: row.homework || (patch.homeworkStatus === "completed" ? "Done" : row.homework),
+        }));
+      }
+    }
+    const subjectLogs = classSubjects.length
+      ? mergeSubjectLogs(existing.subjectLogs, editedSubjects)
+      : (existing.subjectLogs || []);
     const r = await fetch("/api/academic/log", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -244,6 +495,7 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
         classworkStatus: existing.classworkStatus || null,
         homework: existing.homework || "",
         homeworkStatus: existing.homeworkStatus || null,
+        subjectLogs,
         topics: existing.topics || "",
         handwritingNote: existing.handwritingNote || "",
         handwritingGrade: existing.handwritingGrade || "",
@@ -251,6 +503,7 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
         extra: existing.extra || "",
         postedBy: session?.name || "Teacher",
         ...patch,
+        ...(classSubjects.length ? { subjectLogs } : {}),
       }),
     });
     const json = await r.json().catch(() => ({}));
@@ -350,39 +603,53 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
         </div>
       </div>
 
-      {/* Teacher class picker — chips for each assigned class. If only one
-          class is assigned this acts like a locked banner. */}
-      {role === "teacher" && teacherClassList.length > 0 && (
+      {/* Teacher picker — one chip per class+subject so each subject is logged separately. */}
+      {role === "teacher" && teacherLogScopes.length > 0 && (
         <div className="card" style={{ marginBottom: 14, padding: "12px 16px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           <Icon name="academic" size={16} />
-          <span style={{ fontSize: 13, fontWeight: 500 }}>
-            Your {teacherClassList.length === 1 ? "class" : "classes"} ·
-          </span>
+          <span style={{ fontSize: 13, fontWeight: 500 }}>Log for ·</span>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            {teacherClassList.map((key) => {
-              const [c, s] = String(key).split("-");
-              const active = `${cls}-${sec}` === key;
+            {teacherLogScopes.map((sc) => {
+              const active = Number(cls) === sc.c && sec === sc.s && (logSubject || "") === (sc.subject || "");
               return (
                 <button
-                  key={key}
-                  onClick={() => { setCls(Number(c)); setSec(s); setSelectedStudent(0); }}
+                  key={sc.id}
+                  onClick={() => {
+                    setCls(sc.c);
+                    setSec(sc.s);
+                    setLogSubject(sc.subject || "");
+                    setSelectedStudent(0);
+                  }}
                   className="btn sm"
                   style={{
                     background: active ? "var(--accent-soft)" : "var(--card)",
                     color: active ? "var(--accent-2)" : "var(--ink-2)",
                     borderColor: active ? "var(--accent)" : "var(--rule)",
+                    display: "inline-flex", flexDirection: "column", alignItems: "flex-start",
+                    height: "auto", padding: "6px 10px", gap: 2,
                   }}
                 >
-                  {formatClassLabel(key)}
+                  <span>{formatClassLabel(sc.clsKey)}</span>
+                  <span style={{ fontSize: 10.5, fontWeight: 600, opacity: 0.9 }}>
+                    {sc.subject || "General log"}
+                  </span>
                 </button>
               );
             })}
           </div>
           <span style={{ fontSize: 11.5, color: "var(--ink-3)", marginLeft: "auto" }}>
-            {teacherClassList.length === 1
-              ? `Daily logs and announcements you post go to ${formatClassLabel(`${cls}-${sec}`)} parents.`
-              : `Pick a class to work on. You can post for each class separately.`}
+            {logSubject
+              ? `Logging ${logSubject} only · pick another chip to log a different subject`
+              : "Pick a subject chip, then use Edit log / CW / HW"}
           </span>
+        </div>
+      )}
+
+      {role === "teacher" && teacherLogScopes.length === 0 && (
+        <div className="card" style={{ marginBottom: 14, padding: 16 }}>
+          <div className="empty">
+            No classes assigned yet. Ask admin to set you as class teacher (Classes) or assign you on the Timetable.
+          </div>
         </div>
       )}
 
@@ -425,8 +692,16 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
         <div className="card col-7">
           <div className="card-head">
             <div>
-              <div className="card-title">{formatClassLabel(`${cls}-${sec}`)} · {roster.length} students</div>
-              <div className="card-sub">Tap the pills to mark today inline · {week.label}</div>
+              <div className="card-title">
+                {formatClassLabel(`${cls}-${sec}`)}
+                {logSubject ? ` · ${logSubject}` : ""}
+                {" · "}{roster.length} students
+              </div>
+              <div className="card-sub">
+                {logSubject
+                  ? `CW / HW pills update ${logSubject} only · ${week.label}`
+                  : `Tap the pills to mark today inline · ${week.label}`}
+              </div>
             </div>
           </div>
           <div style={{ maxHeight: 620, overflowY: "auto" }}>
@@ -437,6 +712,13 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
               const act = i === selectedStudent;
               const log = (E.DAILY_LOGS || []).find((l) => l.studentId === s.id && l.date === TODAY_ISO) || {};
               const isAbsent = log.attendance === "absent";
+              const subjectRow = logSubject
+                ? (Array.isArray(log.subjectLogs) ? log.subjectLogs : []).find(
+                    (r) => String(r.subject || "").toLowerCase() === String(logSubject).toLowerCase()
+                  )
+                : null;
+              const cwStatus = logSubject ? (subjectRow?.classworkStatus || null) : log.classworkStatus;
+              const hwStatus = logSubject ? (subjectRow?.homeworkStatus || null) : log.homeworkStatus;
               return (
                 <div
                   key={s.id}
@@ -448,39 +730,66 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
                   <AvatarChip initials={s.name.split(" ").map((n) => n[0]).join("")} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 13, fontWeight: 500, color: "var(--ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</div>
-                    <div className="s">{s.id} · {s.attendance}% term attendance</div>
+                    <div className="s">
+                      {s.id} · {(() => {
+                        const logs = (E.DAILY_LOGS || []).filter((l) => l.studentId === s.id);
+                        const wd = getWorkingDays(E.SETTINGS, s.cls);
+                        const st = attendanceFromLogs(logs, wd, { holidayDates });
+                        return st.pct != null
+                          ? (wd
+                            ? `${st.pct}% · ${st.presentCount}/${wd} working days`
+                            : `${st.pct}% · ${st.presentCount}/${st.totalLogs} days logged`)
+                          : `${s.attendance ?? 0}% term attendance`;
+                      })()}
+                    </div>
                   </div>
-                  {/* Inline per-task toggles — attendance is set elsewhere.
-                      Parents see the current state but can't change it: the
-                      controls render disabled, with an explanatory tooltip. */}
-                  <div style={{ display: "flex", gap: 4, alignItems: "center", flexShrink: 0 }} onClick={(e) => e.stopPropagation()}
-                    title={role === "parent" ? "Daily log is read-only for parents — only the class teacher can update this." : undefined}>
-                    <PlusMinusPair
+                  {/* Unified quick-action bar — same height/spacing for CW, HW, HG, Ht/Wt. */}
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    title={role === "parent" ? "Daily log is read-only for parents — only the class teacher can update this." : (logSubject ? `${logSubject} only` : undefined)}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "stretch",
+                      flexShrink: 0,
+                      height: 28,
+                      borderRadius: 8,
+                      border: "1px solid var(--rule-2)",
+                      background: "var(--card)",
+                      overflow: "hidden",
+                    }}
+                  >
+                    <StatusToggle
                       label="CW"
-                      title="Classwork"
-                      value={log.classworkStatus}
+                      title={logSubject ? `${logSubject} classwork` : "Classwork"}
+                      value={cwStatus}
                       disabled={isAbsent || role === "parent"}
-                      onMark={(next) => quickUpdate(s, { classworkStatus: next, classwork: log.classwork || "Classwork" })}
+                      onMark={(next) => quickUpdate(s, { classworkStatus: next, classwork: logSubject || "Classwork" })}
                       doneVal="completed"
                       pendingVal="not_completed"
                     />
-                    <PlusMinusPair
+                    <StatusToggle
                       label="HW"
-                      title="Homework"
-                      value={log.homeworkStatus}
+                      title={logSubject ? `${logSubject} homework` : "Homework"}
+                      value={hwStatus}
                       disabled={isAbsent || role === "parent"}
-                      onMark={(next) => quickUpdate(s, { homeworkStatus: next, homework: log.homework || "Homework" })}
+                      onMark={(next) => quickUpdate(s, { homeworkStatus: next, homework: logSubject || "Homework" })}
                       doneVal="completed"
                       pendingVal="pending"
                     />
-                    <span style={{ width: 1, height: 16, background: "var(--rule)" }} />
                     <GradePill
-                      label="HG"
-                      title="Click to pick a handwriting grade"
+                      label="Handwriting"
+                      title="Handwriting grade"
                       value={log.handwritingGrade}
                       disabled={isAbsent || role === "parent"}
                       onPick={(g) => quickUpdate(s, { handwritingGrade: g, handwritingNote: log.handwritingNote || "" })}
                     />
+                    {canEditGrowth && (
+                      <GrowthChip
+                        heightCm={s.heightCm}
+                        weightKg={s.weightKg}
+                        onClick={() => setGrowthFor(s)}
+                      />
+                    )}
                   </div>
                 </div>
               );
@@ -513,9 +822,11 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
                 </div>
               </div>
               <div style={{ display: "flex", gap: 6 }}>
-                <button className="btn sm" onClick={() => flash(`TC requested for ${student.name}`)}>
-                  <Icon name="book" size={12} />TC
-                </button>
+                {canEditGrowth && (
+                  <button className="btn sm" onClick={() => setGrowthFor(student)} title="Update height and weight anytime">
+                    <Icon name="pencil" size={12} />Ht / Wt
+                  </button>
+                )}
                 {role !== "parent" && (
                   <button className="btn sm accent" onClick={() => setShowLog(true)}>
                     <Icon name="pencil" size={12} />{isUserSaved ? "Edit log" : "Today's log"}
@@ -525,11 +836,86 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
             </div>
           </div>
 
-          <div className="grid g-4">
-            <KPI label="Attendance" value={totalLogs ? `${attendancePct}%` : "—"} sub={totalLogs ? `${presentCount}/${totalLogs} days present` : "no logs yet"} puck="mint" puckIcon="check" />
-            <KPI label="Homework" value={totalLogs ? `${homeworkPct}%` : "—"} sub={totalLogs ? `${hwDone}/${totalLogs} completed` : "no logs yet"} puck="peach" puckIcon="book" />
-            <KPI label="Classwork" value={totalLogs ? `${classworkPct}%` : "—"} sub={totalLogs ? `${cwDone}/${totalLogs} completed` : "no logs yet"} puck="cream" puckIcon="pencil" />
-            <KPI label="Handwriting" value={lastGrade} sub="last graded" puck="sky" puckIcon="pencil" />
+          <div className="grid student-kpi-grid">
+            <KPI
+              label="Attendance"
+              value={attStats.pct != null ? `${attStats.pct}%` : "—"}
+              sub={attStats.denom
+                ? (workingDays
+                  ? `${presentCount} of ${workingDays} days`
+                  : `${presentCount}/${attStats.denom} logged`)
+                : "No logs yet"}
+              puck="mint"
+              puckIcon="check"
+              details={{
+                title: "Attendance",
+                sub: student.name,
+                items: [
+                  { label: "Present days", value: String(presentCount), tone: "ok" },
+                  { label: "Absent days", value: String(attStats.absentCount || 0), tone: attStats.absentCount ? "bad" : undefined },
+                  { label: "Days logged", value: String(totalLogs) },
+                  { label: workingDays ? "Working days (year)" : "Denominator", value: String(attStats.denom || "—") },
+                  { label: "Attendance %", value: attStats.pct != null ? `${attStats.pct}%` : "—" },
+                ],
+              }}
+            />
+            <KPI
+              label="Homework"
+              value={totalLogs ? `${homeworkPct}%` : "—"}
+              sub={totalLogs ? `${hwDone}/${totalLogs} done` : "No logs yet"}
+              puck="peach"
+              puckIcon="book"
+              details={{
+                title: "Homework",
+                sub: `${hwDone} completed of ${totalLogs || 0} logged days`,
+                items: studentLogs.slice().reverse().slice(0, 14).map((l) => ({
+                  label: l.date,
+                  value: l.homeworkStatus === "completed" ? "Done" : l.homeworkStatus === "pending" ? "Pending" : "—",
+                  tone: l.homeworkStatus === "completed" ? "ok" : l.homeworkStatus === "pending" ? "warn" : undefined,
+                })),
+              }}
+            />
+            <KPI
+              label="Classwork"
+              value={totalLogs ? `${classworkPct}%` : "—"}
+              sub={totalLogs ? `${cwDone}/${totalLogs} done` : "No logs yet"}
+              puck="cream"
+              puckIcon="pencil"
+              details={{
+                title: "Classwork",
+                sub: `${cwDone} completed of ${totalLogs || 0} logged days`,
+                items: studentLogs.slice().reverse().slice(0, 14).map((l) => ({
+                  label: l.date,
+                  value: l.classworkStatus === "completed" ? "Done" : l.classworkStatus === "not_completed" ? "Not done" : "—",
+                  tone: l.classworkStatus === "completed" ? "ok" : l.classworkStatus === "not_completed" ? "bad" : undefined,
+                })),
+              }}
+            />
+            <KPI
+              label="Height / Weight"
+              value={student.heightCm != null || student.weightKg != null
+                ? `${student.heightCm != null ? `${student.heightCm} cm` : "—"} · ${student.weightKg != null ? `${student.weightKg} kg` : "—"}`
+                : "—"}
+              sub={student.measuredAt
+                ? `Updated ${new Date(student.measuredAt).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}`
+                : "Not recorded"}
+              puck="sky"
+              puckIcon="students"
+              details={{
+                title: "Height / Weight",
+                sub: student.name,
+                items: [
+                  { label: "Height", value: student.heightCm != null ? `${student.heightCm} cm` : "Not recorded" },
+                  { label: "Weight", value: student.weightKg != null ? `${student.weightKg} kg` : "Not recorded" },
+                  {
+                    label: "Last updated",
+                    value: student.measuredAt
+                      ? new Date(student.measuredAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })
+                      : "—",
+                  },
+                ],
+              }}
+            />
           </div>
 
           <div className="grid g-12">
@@ -555,40 +941,76 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
                 )}
                 {isUserSaved && (() => {
                   const absent = logToShow.attendance === "absent";
-                  const cwStatus = logToShow.classworkStatus;
-                  const hwStatus = logToShow.homeworkStatus;
-                  const rows = [
-                    { l: "Attendance", v: absent ? "Absent" : "Present",
-                      c: absent
-                        ? <span className="chip bad"><Icon name="x" size={10} stroke={2.5} />Absent</span>
-                        : <span className="chip ok"><Icon name="check" size={10} stroke={2.5} />Present</span> },
-                  ];
-                  if (absent) {
-                    rows.push({ l: "Leave reason", v: logToShow.leaveReason || "—", c: null });
-                  } else {
-                    rows.push(
-                      { l: "Classwork", v: logToShow.classwork,
-                        c: cwStatus === "completed" ? <span className="chip ok"><span className="dot" />Completed</span>
-                          : cwStatus === "not_completed" ? <span className="chip bad"><span className="dot" />Not completed</span>
-                          : null },
-                      { l: "Homework", v: logToShow.homework,
-                        c: hwStatus === "completed" ? <span className="chip ok"><span className="dot" />Completed</span>
-                          : hwStatus === "pending" ? <span className="chip warn"><span className="dot" />Pending</span>
-                          : null },
-                      { l: "Topics covered today", v: logToShow.topics, c: null },
-                      { l: "Handwriting", v: logToShow.handwritingNote, c: logToShow.handwritingGrade ? <span className="chip accent"><span className="dot" />{logToShow.handwritingGrade}</span> : null },
-                      { l: "Behaviour", v: logToShow.behaviour, c: null },
-                      { l: "Extra-curricular", v: logToShow.extra, c: null },
+                  const subjectRows = seedSubjectLogs(
+                    role === "teacher" ? classSubjects : allClassSubjects,
+                    logToShow.subjectLogs
+                  );
+                  const statusChip = (kind, status) => {
+                    if (kind === "cw") {
+                      if (status === "completed") return <span className="chip ok" style={{ minWidth: 52, justifyContent: "center" }}>CW ✓</span>;
+                      if (status === "not_completed") return <span className="chip bad" style={{ minWidth: 52, justifyContent: "center" }}>CW −</span>;
+                      return <span className="chip" style={{ minWidth: 52, justifyContent: "center", opacity: 0.7 }}>CW</span>;
+                    }
+                    if (status === "completed") return <span className="chip ok" style={{ minWidth: 52, justifyContent: "center" }}>HW ✓</span>;
+                    if (status === "pending") return <span className="chip warn" style={{ minWidth: 52, justifyContent: "center" }}>HW −</span>;
+                    return <span className="chip" style={{ minWidth: 52, justifyContent: "center", opacity: 0.7 }}>HW</span>;
+                  };
+                  const metaRows = absent
+                    ? [{ l: "Leave reason", v: logToShow.leaveReason || "—" }]
+                    : [
+                        { l: "Topics covered", v: logToShow.topics },
+                        { l: "Handwriting", v: logToShow.handwritingNote, c: logToShow.handwritingGrade ? <span className="chip accent"><span className="dot" />{logToShow.handwritingGrade}</span> : null },
+                        { l: "Behaviour", v: logToShow.behaviour },
+                        { l: "Extra-curricular", v: logToShow.extra },
+                      ];
+                  if (!absent && !subjectRows.length) {
+                    metaRows.unshift(
+                      { l: "Classwork", v: logToShow.classwork, c: logToShow.classworkStatus === "completed" ? <span className="chip ok">Done</span> : logToShow.classworkStatus === "not_completed" ? <span className="chip bad">Not done</span> : null },
+                      { l: "Homework", v: logToShow.homework, c: logToShow.homeworkStatus === "completed" ? <span className="chip ok">Done</span> : logToShow.homeworkStatus === "pending" ? <span className="chip warn">Pending</span> : null },
                     );
                   }
-                  return rows;
-                })().map((r, i, arr) => (
-                  <div key={i} style={{ display: "grid", gridTemplateColumns: "130px 1fr auto", gap: 12, alignItems: "flex-start", paddingBottom: 10, borderBottom: i < arr.length - 1 ? "1px solid var(--rule-2)" : "none" }}>
-                    <div style={{ fontSize: 11.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.05em", paddingTop: 1 }}>{r.l}</div>
-                    <div style={{ fontSize: 13 }}>{r.v || <span style={{ color: "var(--ink-4)" }}>—</span>}</div>
-                    <div>{r.c}</div>
-                  </div>
-                ))}
+                  return (
+                    <>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, paddingBottom: 10, borderBottom: "1px solid var(--rule-2)" }}>
+                        <div style={{ fontSize: 11.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Attendance</div>
+                        {absent
+                          ? <span className="chip bad"><Icon name="x" size={10} stroke={2.5} />Absent</span>
+                          : <span className="chip ok"><Icon name="check" size={10} stroke={2.5} />Present</span>}
+                      </div>
+
+                      {!absent && subjectRows.length > 0 && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr 56px 56px", gap: 8, padding: "0 0 6px", borderBottom: "1px solid var(--rule-2)" }}>
+                            <div style={{ fontSize: 10.5, color: "var(--ink-4)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Subject</div>
+                            <div style={{ fontSize: 10.5, color: "var(--ink-4)", textAlign: "center", textTransform: "uppercase", letterSpacing: "0.05em" }}>CW</div>
+                            <div style={{ fontSize: 10.5, color: "var(--ink-4)", textAlign: "center", textTransform: "uppercase", letterSpacing: "0.05em" }}>HW</div>
+                          </div>
+                          {subjectRows.map((s) => {
+                            const note = [s.classwork, s.homework].filter(Boolean).join(" · ");
+                            return (
+                              <div key={s.subject} style={{ display: "grid", gridTemplateColumns: "1fr 56px 56px", gap: 8, alignItems: "center", padding: "8px 0", borderBottom: "1px solid var(--rule-2)" }}>
+                                <div style={{ minWidth: 0 }}>
+                                  <div style={{ fontSize: 13, fontWeight: 560, letterSpacing: "-0.01em" }}>{s.subject}</div>
+                                  {note ? <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 2 }}>{note}</div> : null}
+                                </div>
+                                <div style={{ display: "flex", justifyContent: "center" }}>{statusChip("cw", s.classworkStatus)}</div>
+                                <div style={{ display: "flex", justifyContent: "center" }}>{statusChip("hw", s.homeworkStatus)}</div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {metaRows.map((r, i) => (
+                        <div key={r.l} style={{ display: "grid", gridTemplateColumns: "120px 1fr auto", gap: 12, alignItems: "flex-start", paddingTop: i === 0 && subjectRows.length ? 4 : 0, paddingBottom: 10, borderBottom: i < metaRows.length - 1 ? "1px solid var(--rule-2)" : "none" }}>
+                          <div style={{ fontSize: 11.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.05em", paddingTop: 1 }}>{r.l}</div>
+                          <div style={{ fontSize: 13 }}>{r.v || <span style={{ color: "var(--ink-4)" }}>—</span>}</div>
+                          <div>{r.c || null}</div>
+                        </div>
+                      ))}
+                    </>
+                  );
+                })()}
               </div>
             </div>
 
@@ -647,6 +1069,7 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
           cls={`${cls}-${sec}`}
           existing={savedLog}
           today={TODAY_ISO}
+          classSubjects={classSubjects}
           onClose={() => setShowLog(false)}
           onSubmit={submitLog}
         />
@@ -659,6 +1082,14 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
           teacherName={session?.name || "Teacher"}
           onClose={() => setShowAnnounce(false)}
           onSent={(msg) => { setShowAnnounce(false); flash(msg); refresh?.(); }}
+        />
+      )}
+
+      {growthFor && canEditGrowth && (
+        <GrowthModal
+          student={growthFor}
+          onClose={() => setGrowthFor(null)}
+          onSubmit={saveGrowth}
         />
       )}
     </div>
@@ -776,6 +1207,92 @@ function Toast({ toast }) {
   );
 }
 
+function GrowthModal({ student, onClose, onSubmit }) {
+  const [heightCm, setHeightCm] = useState(student?.heightCm != null ? String(student.heightCm) : "");
+  const [weightKg, setWeightKg] = useState(student?.weightKg != null ? String(student.weightKg) : "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  async function submit(e) {
+    e.preventDefault();
+    if (busy) return;
+    setErr(""); setBusy(true);
+    try {
+      if (!heightCm.trim() && !weightKg.trim()) throw new Error("Enter height and/or weight");
+      await onSubmit({
+        studentId: student.id,
+        heightCm: heightCm.trim() === "" ? null : heightCm.trim(),
+        weightKg: weightKg.trim() === "" ? null : weightKg.trim(),
+      });
+    } catch (ex) {
+      setErr(ex.message || "Failed");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)",
+      display: "grid", placeItems: "center", zIndex: 250, padding: 16,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 420 }}>
+        <div className="card-head">
+          <div>
+            <div className="card-title">Height &amp; weight</div>
+            <div className="card-sub">{student?.name} · {student?.id} · update anytime</div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
+        <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <label style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+              <span style={{ fontSize: 11, fontWeight: 500, color: "var(--ink-2)", textTransform: "uppercase", letterSpacing: 0.4 }}>Height (cm)</span>
+              <input
+                className="input"
+                inputMode="decimal"
+                value={heightCm}
+                onChange={(e) => setHeightCm(e.target.value.replace(/[^\d.]/g, ""))}
+                placeholder="e.g. 128"
+                autoFocus
+              />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+              <span style={{ fontSize: 11, fontWeight: 500, color: "var(--ink-2)", textTransform: "uppercase", letterSpacing: 0.4 }}>Weight (kg)</span>
+              <input
+                className="input"
+                inputMode="decimal"
+                value={weightKg}
+                onChange={(e) => setWeightKg(e.target.value.replace(/[^\d.]/g, ""))}
+                placeholder="e.g. 26.5"
+              />
+            </label>
+          </div>
+          {student?.measuredAt && (
+            <div style={{ fontSize: 11.5, color: "var(--ink-4)" }}>
+              Last updated {new Date(student.measuredAt).toLocaleString("en-IN", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+            </div>
+          )}
+          {err && (
+            <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "9px 12px", borderRadius: 7, fontSize: 12 }}>{err}</div>
+          )}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+            <button type="submit" className="btn accent" disabled={busy}>
+              {busy ? "Saving…" : <><Icon name="check" size={13} />Save</>}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function WeekMenu({ weeks, value, onPick, onClose }) {
   useEffect(() => {
     const onDoc = (e) => { if (!e.target.closest(".week-menu") && !e.target.closest(".btn")) onClose(); };
@@ -807,7 +1324,8 @@ function WeekMenu({ weeks, value, onPick, onClose }) {
   );
 }
 
-function LogModal({ student, cls, existing, today, onClose, onSubmit }) {
+function LogModal({ student, cls, existing, today, classSubjects = [], onClose, onSubmit }) {
+  const hasSubjects = Array.isArray(classSubjects) && classSubjects.length > 0;
   const [form, setForm] = useState({
     attendance: existing?.attendance || "present",
     leaveReason: existing?.leaveReason || "",
@@ -815,6 +1333,7 @@ function LogModal({ student, cls, existing, today, onClose, onSubmit }) {
     classworkStatus: existing?.classworkStatus || "completed",
     homework: existing?.homework || "",
     homeworkStatus: existing?.homeworkStatus || "completed",
+    subjectLogs: seedSubjectLogs(classSubjects, existing?.subjectLogs),
     topics: existing?.topics || "",
     handwritingNote: existing?.handwritingNote || "",
     handwritingGrade: existing?.handwritingGrade || "A",
@@ -823,6 +1342,12 @@ function LogModal({ student, cls, existing, today, onClose, onSubmit }) {
   });
   const [busy, setBusy] = useState(false);
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const setSubject = (idx, patch) => {
+    setForm((f) => ({
+      ...f,
+      subjectLogs: f.subjectLogs.map((row, i) => (i === idx ? { ...row, ...patch } : row)),
+    }));
+  };
   const isAbsent = form.attendance === "absent";
 
   useEffect(() => {
@@ -843,11 +1368,16 @@ function LogModal({ student, cls, existing, today, onClose, onSubmit }) {
       position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)",
       display: "grid", placeItems: "center", zIndex: 250, padding: 16, overflowY: "auto",
     }}>
-      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 560, maxHeight: "calc(100vh - 32px)", overflowY: "auto" }}>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: hasSubjects ? 640 : 560, maxHeight: "calc(100vh - 32px)", overflowY: "auto" }}>
         <div className="card-head">
           <div>
             <div className="card-title">{existing ? "Edit today's log" : "Log today"}</div>
-            <div className="card-sub">{student?.name || "—"} · {student?.id || ""} · {formatClassLabel(String(cls))} · {today}</div>
+            <div className="card-sub">
+              {student?.name || "—"} · {student?.id || ""} · {formatClassLabel(String(cls))} · {today}
+              {hasSubjects
+                ? (classSubjects.length === 1 ? ` · ${classSubjects[0]} only` : ` · ${classSubjects.length} subjects`)
+                : ""}
+            </div>
           </div>
           <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
         </div>
@@ -873,44 +1403,94 @@ function LogModal({ student, cls, existing, today, onClose, onSubmit }) {
             </Field>
           )}
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 160px", gap: 10 }}>
-            <Field label="Classwork">
-              <input
-                className="input"
-                value={form.classwork}
-                onChange={(e) => set("classwork", e.target.value)}
-                placeholder="e.g. Fractions · Ex 3.2 pp. 54–56"
-                disabled={isAbsent}
-              />
-            </Field>
-            <Field label="Status">
-              <div className="segmented">
-                <button type="button" className={form.classworkStatus === "completed" ? "active" : ""} onClick={() => set("classworkStatus", "completed")} disabled={isAbsent}>Done</button>
-                <button type="button" className={form.classworkStatus === "not_completed" ? "active" : ""} onClick={() => set("classworkStatus", "not_completed")} disabled={isAbsent}>Pending</button>
+          {hasSubjects ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>
+                Subjects · classwork &amp; homework
               </div>
-            </Field>
-          </div>
+              {!isAbsent && classSubjects.length === 0 && (
+                <div className="empty" style={{ padding: 12 }}>No subjects set for this class. Add them under Classes → Edit.</div>
+              )}
+              {form.subjectLogs.map((row, idx) => (
+                <div
+                  key={row.subject}
+                  style={{
+                    border: "1px solid var(--rule-2)", borderRadius: 10, padding: 12,
+                    background: "var(--bg-2)", opacity: isAbsent ? 0.5 : 1,
+                  }}
+                >
+                  <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 8, color: "var(--ink)" }}>{row.subject}</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, marginBottom: 8 }}>
+                    <input
+                      className="input"
+                      value={row.classwork}
+                      onChange={(e) => setSubject(idx, { classwork: e.target.value })}
+                      placeholder="Classwork note"
+                      disabled={isAbsent}
+                    />
+                    <div className="segmented">
+                      <button type="button" className={row.classworkStatus === "completed" ? "active" : ""} onClick={() => setSubject(idx, { classworkStatus: "completed" })} disabled={isAbsent}>CW ✓</button>
+                      <button type="button" className={row.classworkStatus === "not_completed" ? "active" : ""} onClick={() => setSubject(idx, { classworkStatus: "not_completed" })} disabled={isAbsent}>CW −</button>
+                    </div>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8 }}>
+                    <input
+                      className="input"
+                      value={row.homework}
+                      onChange={(e) => setSubject(idx, { homework: e.target.value })}
+                      placeholder="Homework note"
+                      disabled={isAbsent}
+                    />
+                    <div className="segmented">
+                      <button type="button" className={row.homeworkStatus === "completed" ? "active" : ""} onClick={() => setSubject(idx, { homeworkStatus: "completed" })} disabled={isAbsent}>HW ✓</button>
+                      <button type="button" className={row.homeworkStatus === "pending" ? "active" : ""} onClick={() => setSubject(idx, { homeworkStatus: "pending" })} disabled={isAbsent}>HW −</button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 160px", gap: 10 }}>
+                <Field label="Classwork">
+                  <input
+                    className="input"
+                    value={form.classwork}
+                    onChange={(e) => set("classwork", e.target.value)}
+                    placeholder="e.g. Fractions · Ex 3.2 pp. 54–56"
+                    disabled={isAbsent}
+                  />
+                </Field>
+                <Field label="Status">
+                  <div className="segmented">
+                    <button type="button" className={form.classworkStatus === "completed" ? "active" : ""} onClick={() => set("classworkStatus", "completed")} disabled={isAbsent}>Done</button>
+                    <button type="button" className={form.classworkStatus === "not_completed" ? "active" : ""} onClick={() => set("classworkStatus", "not_completed")} disabled={isAbsent}>Pending</button>
+                  </div>
+                </Field>
+              </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 160px", gap: 10 }}>
-            <Field label="Homework">
-              <input
-                className="input"
-                value={form.homework}
-                onChange={(e) => set("homework", e.target.value)}
-                placeholder="What's due tomorrow"
-                disabled={isAbsent}
-              />
-            </Field>
-            <Field label="Status">
-              <div className="segmented">
-                <button type="button" className={form.homeworkStatus === "completed" ? "active" : ""} onClick={() => set("homeworkStatus", "completed")} disabled={isAbsent}>Done</button>
-                <button type="button" className={form.homeworkStatus === "pending" ? "active" : ""} onClick={() => set("homeworkStatus", "pending")} disabled={isAbsent}>Pending</button>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 160px", gap: 10 }}>
+                <Field label="Homework">
+                  <input
+                    className="input"
+                    value={form.homework}
+                    onChange={(e) => set("homework", e.target.value)}
+                    placeholder="What's due tomorrow"
+                    disabled={isAbsent}
+                  />
+                </Field>
+                <Field label="Status">
+                  <div className="segmented">
+                    <button type="button" className={form.homeworkStatus === "completed" ? "active" : ""} onClick={() => set("homeworkStatus", "completed")} disabled={isAbsent}>Done</button>
+                    <button type="button" className={form.homeworkStatus === "pending" ? "active" : ""} onClick={() => set("homeworkStatus", "pending")} disabled={isAbsent}>Pending</button>
+                  </div>
+                </Field>
               </div>
-            </Field>
-          </div>
+            </>
+          )}
 
           <Field label="Topics covered today">
-            <input className="input" value={form.topics} onChange={(e) => set("topics", e.target.value)} placeholder="Brief subject-wise summary" disabled={isAbsent} />
+            <input className="input" value={form.topics} onChange={(e) => set("topics", e.target.value)} placeholder="Brief overall summary" disabled={isAbsent} />
           </Field>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 110px", gap: 10 }}>
             <Field label="Handwriting note">
@@ -941,39 +1521,67 @@ function LogModal({ student, cls, existing, today, onClose, onSubmit }) {
   );
 }
 
-// Two-button pair: [LABEL] [+] [−]. Click + = completed; click − = pending.
-// The currently active button stays filled; the other goes grey.
-function PlusMinusPair({ label, title, value, disabled, onMark, doneVal, pendingVal }) {
-  const isDone    = value === doneVal;
+const QUICK_CELL = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 5,
+  padding: "0 9px",
+  border: 0,
+  borderLeft: "1px solid var(--rule-2)",
+  background: "transparent",
+  fontSize: 11,
+  fontWeight: 600,
+  letterSpacing: "0.02em",
+  color: "var(--ink-2)",
+  height: "100%",
+  whiteSpace: "nowrap",
+};
+
+// Classwork / Homework cell inside the unified quick-action bar.
+function StatusToggle({ label, title, value, disabled, onMark, doneVal, pendingVal }) {
+  const isDone = value === doneVal;
   const isPending = value === pendingVal;
-  const baseBtn = {
-    width: 22, height: 22, borderRadius: 6,
-    border: 0, cursor: disabled ? "not-allowed" : "pointer",
-    fontSize: 13, fontWeight: 700,
+  const tone = isDone ? "ok" : isPending ? "bad" : "idle";
+  const cellBg = tone === "ok" ? "var(--ok-soft, #e6f4ec)"
+    : tone === "bad" ? "var(--err-soft, #fbe1d8)"
+    : "transparent";
+  const labelColor = tone === "ok" ? "var(--ok, #1f7a3a)"
+    : tone === "bad" ? "var(--err, #b13c1c)"
+    : "var(--ink-3)";
+  const btn = (active, activeBg, activeFg) => ({
+    width: 18, height: 18, borderRadius: 5, border: 0,
     display: "grid", placeItems: "center",
-    transition: "background .12s",
-    opacity: disabled ? 0.4 : 1,
-  };
+    fontSize: 11, fontWeight: 700, lineHeight: 1,
+    cursor: disabled ? "not-allowed" : "pointer",
+    opacity: disabled ? 0.45 : 1,
+    background: active ? activeBg : "var(--bg-2)",
+    color: active ? activeFg : "var(--ink-4)",
+  });
   return (
-    <div style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
-      <span style={{ fontSize: 10.5, fontWeight: 600, color: "var(--ink-3)", marginRight: 2 }}>{label}</span>
+    <div
+      style={{ ...QUICK_CELL, borderLeft: "none", background: cellBg }}
+      title={`${title}${isDone ? " · done" : isPending ? " · pending" : ""}`}
+    >
+      <span style={{ color: labelColor, minWidth: 20 }}>{label}</span>
       <button
-        type="button" disabled={disabled}
-        title={`${title} · mark completed`}
+        type="button"
+        disabled={disabled}
+        title={`${title} · done`}
         onClick={() => onMark(isDone ? null : doneVal)}
-        style={{ ...baseBtn, background: isDone ? "var(--ok)" : "var(--bg-2)", color: isDone ? "#fff" : "var(--ink-3)" }}
-      >+</button>
+        style={btn(isDone, "var(--ok, #2f8854)", "#fff")}
+      >✓</button>
       <button
-        type="button" disabled={disabled}
-        title={`${title} · mark pending`}
+        type="button"
+        disabled={disabled}
+        title={`${title} · pending`}
         onClick={() => onMark(isPending ? null : pendingVal)}
-        style={{ ...baseBtn, background: isPending ? "var(--bad)" : "var(--bg-2)", color: isPending ? "#fff" : "var(--ink-3)" }}
+        style={btn(isPending, "var(--err, #b13c1c)", "#fff")}
       >−</button>
     </div>
   );
 }
 
-// Handwriting grade dropdown — opens a tiny inline menu of letter grades.
+// Handwriting grade — same cell height as the rest of the bar.
 function GradePill({ label, title, value, disabled, onPick }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
@@ -985,45 +1593,77 @@ function GradePill({ label, title, value, disabled, onPick }) {
   }, [open]);
   const has = !!value;
   return (
-    <div ref={ref} style={{ position: "relative" }}>
+    <div ref={ref} style={{ position: "relative", display: "inline-flex", height: "100%" }}>
       <button
         type="button"
         title={`${title}${has ? ` — ${value}` : ""}`}
         disabled={disabled}
         onClick={() => setOpen((s) => !s)}
         style={{
-          height: 22, padding: "0 7px", borderRadius: 6,
-          background: has ? "var(--accent)" : "var(--bg-2)",
-          color: has ? "#fff" : "var(--ink-3)",
-          border: 0, cursor: disabled ? "not-allowed" : "pointer",
-          fontSize: 10.5, fontWeight: 600, opacity: disabled ? 0.4 : 1,
-          display: "inline-flex", alignItems: "center", gap: 4,
+          ...QUICK_CELL,
+          cursor: disabled ? "not-allowed" : "pointer",
+          opacity: disabled ? 0.45 : 1,
+          background: has ? "var(--accent-soft)" : "transparent",
+          color: has ? "var(--accent-2)" : "var(--ink-3)",
         }}
-      >{label}<span style={{ fontSize: 10 }}>{value || "—"}</span></button>
+      >
+        <span>{label}</span>
+        <span style={{
+          minWidth: 18, textAlign: "center",
+          fontFamily: "var(--font-mono)", fontSize: 10.5, fontWeight: 600,
+          color: has ? "var(--accent-2)" : "var(--ink-4)",
+        }}>{value || "—"}</span>
+      </button>
       {open && (
         <div style={{
-          position: "absolute", right: 0, top: "calc(100% + 4px)",
+          position: "absolute", right: 0, top: "calc(100% + 6px)",
           background: "var(--card)", border: "1px solid var(--rule)",
-          borderRadius: 8, padding: 4, zIndex: 50,
-          display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 2,
-          boxShadow: "var(--shadow-lg)",
-          minWidth: 120,
+          borderRadius: 9, padding: 6, zIndex: 50,
+          boxShadow: "0 10px 28px -18px rgba(0,0,0,0.35)",
+          display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 3,
         }}>
           {["A+", "A", "A-", "B+", "B", "B-", "C", "D"].map((g) => (
             <button
-              key={g} type="button"
+              key={g}
+              type="button"
               onClick={() => { onPick(g); setOpen(false); }}
               style={{
-                padding: "4px 6px", borderRadius: 5,
-                background: g === value ? "var(--accent-soft)" : "transparent",
-                color: "var(--ink)", border: 0, cursor: "pointer",
-                fontSize: 11, fontWeight: 500,
+                height: 28, minWidth: 36, border: 0, borderRadius: 6, cursor: "pointer",
+                background: value === g ? "var(--accent)" : "var(--bg-2)",
+                color: value === g ? "#fff" : "var(--ink-2)",
+                fontSize: 11.5, fontWeight: 600,
               }}
             >{g}</button>
           ))}
         </div>
       )}
     </div>
+  );
+}
+
+function GrowthChip({ heightCm, weightKg, onClick }) {
+  const has = heightCm != null || weightKg != null;
+  const label = has
+    ? `${heightCm != null ? heightCm : "—"}·${weightKg != null ? weightKg : "—"}`
+    : "Ht/Wt";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={has
+        ? `Height ${heightCm ?? "—"} cm · Weight ${weightKg ?? "—"} kg — click to update`
+        : "Update height & weight"}
+      style={{
+        ...QUICK_CELL,
+        cursor: "pointer",
+        background: has ? "var(--info-soft, #e8eef5)" : "transparent",
+        color: has ? "var(--info, #3d5a73)" : "var(--ink-3)",
+        fontFamily: has ? "var(--font-mono)" : "inherit",
+        fontSize: has ? 10.5 : 11,
+      }}
+    >
+      {label}
+    </button>
   );
 }
 

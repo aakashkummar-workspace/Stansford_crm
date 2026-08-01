@@ -93,6 +93,20 @@ function labelForKey(key, classes) {
   return found?.label || formatClassLabel(key);
 }
 
+// Resolve a student class ("1", "1-A") to the key used on timetable rows.
+function resolveTimetableCls(childCls, entries, classKeys) {
+  const raw = String(childCls || "").trim();
+  if (!raw) return null;
+  const list = Array.isArray(entries) ? entries : [];
+  const keys = Array.isArray(classKeys) ? classKeys : [];
+  if (list.some((e) => e.cls === raw) || keys.includes(raw)) return raw;
+  const head = raw.split("-")[0];
+  const withA = `${head}-A`;
+  if (list.some((e) => e.cls === withA) || keys.includes(withA)) return withA;
+  const hit = list.find((e) => String(e.cls || "").split("-")[0] === head);
+  return hit?.cls || withA || raw;
+}
+
 // --------------------------------------------------------------------------
 // Main screen
 // --------------------------------------------------------------------------
@@ -133,7 +147,10 @@ export default function ScreenTimetable({ E, refresh, role, session }) {
   //   teacher → first class in linkedClasses (used as the "default" tab; the
   //             screen can also show a "teacher's own grid" without a class)
   //   manager → user-pickable from a dropdown
-  const myChildCls = isParent && students[0] ? students[0].cls : null;
+  const myChildCls = useMemo(() => {
+    if (!isParent || !students[0]?.cls) return null;
+    return resolveTimetableCls(students[0].cls, allEntries, classKeys);
+  }, [isParent, students, allEntries, classKeys]);
   const teacherClassSet = useMemo(() => {
     if (!isTeacher) return null;
     const arr = Array.isArray(session?.linkedClasses) && session.linkedClasses.length
@@ -170,15 +187,26 @@ export default function ScreenTimetable({ E, refresh, role, session }) {
       : (classKeys[0] || null);
   const [pickedClass, setPickedClass] = useState(initialClass);
 
+  // Parent child data loads async — keep the grid pinned to the child's class.
+  useEffect(() => {
+    if (isParent && myChildCls) setPickedClass(myChildCls);
+  }, [isParent, myChildCls]);
+
   // Editor modal state — manager only.
   const [editingSlot, setEditingSlot] = useState(null); // { day, period, current? }
   const [toast, setToast] = useState(null);
   const showToast = (msg, tone) => { setToast({ msg, tone }); setTimeout(() => setToast(null), 2800); };
 
   // Index entries by `${cls}-${day}-${period}` so cell lookup is O(1).
+  // Also index by class-head so "1" / "1-A" both resolve for parents.
   const entryByKey = useMemo(() => {
     const m = new Map();
-    for (const e of allEntries) m.set(`${e.cls}-${e.day}-${e.period}`, e);
+    for (const e of allEntries) {
+      m.set(`${e.cls}-${e.day}-${e.period}`, e);
+      const head = String(e.cls || "").split("-")[0];
+      if (head) m.set(`${head}-${e.day}-${e.period}`, e);
+      if (head) m.set(`${head}-A-${e.day}-${e.period}`, e);
+    }
     return m;
   }, [allEntries]);
 

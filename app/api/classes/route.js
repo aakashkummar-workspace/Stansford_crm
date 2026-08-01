@@ -13,7 +13,7 @@ export async function POST(req) {
   }
 }
 
-// PATCH: update a class's label or sections. body = { n, label?, sections? }
+// PATCH: update a class. body = { n, label?, sections?, subjects? }
 export async function PATCH(req) {
   const body = await req.json();
   if (!body.n) return NextResponse.json({ ok: false, error: "n required" }, { status: 400 });

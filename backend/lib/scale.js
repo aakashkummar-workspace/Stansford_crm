@@ -7,7 +7,7 @@
 // via app_settings.scale.weights ({ A, E, C, B }).
 //
 // Each indicator is scored on its own scale (see SCALE_SCALES): 1-10,
-// Yes/No, or Bad/Good/Excellent. Raw scores are always 1-based (1..max).
+// Yes/No, or Good/Very Good/Excellent. Raw scores are always 1-based (1..max).
 // Term aggregate per indicator = average of all entries for that student ×
 // indicator over the date range, scaled to 0-100: ((avg - 1) / (max - 1)) * 100.
 //
@@ -29,7 +29,7 @@ export const SCALE_SCALES = {
   num4:  { max: 4,  hint: "1–4",                options: [1, 2, 3, 4].map((v) => ({ v, label: String(v) })) },
   num10: { max: 10, hint: "1–10",               options: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((v) => ({ v, label: String(v) })) },
   yesno: { max: 2,  hint: "No / Yes",           options: [{ v: 1, label: "No" }, { v: 2, label: "Yes" }] },
-  gbe:   { max: 3,  hint: "Bad · Good · Excellent", options: [{ v: 1, label: "Bad" }, { v: 2, label: "Good" }, { v: 3, label: "Excellent" }] },
+  gbe:   { max: 3,  hint: "Good · Very Good · Excellent", options: [{ v: 1, label: "Good" }, { v: 2, label: "Very Good" }, { v: 3, label: "Excellent" }] },
 };
 
 export const SCALE_INDICATORS = [
@@ -104,7 +104,7 @@ export function computeProfile(entries, domainWeights = SCALE_DEFAULT_DOMAIN_WEI
   for (const ind of SCALE_INDICATORS) {
     const acc = byInd.get(ind.key);
     // Normalise the raw average (1..max) to 0-100 using this indicator's
-    // own scale max — 1-10, Yes/No (max 2), Bad/Good/Excellent (max 3), etc.
+    // own scale max — 1-10, Yes/No (max 2), Good/Very Good/Excellent (max 3), etc.
     const max = indicatorMax(ind.key);
     perIndicator[ind.key] = acc && acc.n
       ? Math.round(((acc.sum / acc.n - 1) / Math.max(1, max - 1)) * 100)

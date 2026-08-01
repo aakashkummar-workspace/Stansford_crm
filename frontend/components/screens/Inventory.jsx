@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import * as XLSX from "xlsx";
 import Icon from "../Icon";
 import { KPI } from "../ui";
 import { formatClassLabel } from "@/lib/format";
@@ -14,6 +15,33 @@ const BUILTIN_CATS = [
 ];
 const BASE_FILTERS = [{ k: "all", label: "All" }];
 const TAIL_FILTERS = [{ k: "out", label: "Out of stock" }];
+
+// Spreadsheet header aliases → canonical inventory fields.
+const COLUMN_ALIASES = {
+  name:      ["name", "item", "itemname", "product", "sku", "description"],
+  category:  ["category", "type", "bucket", "group"],
+  cls:       ["class", "cls", "section", "classname", "classsection"],
+  onHand:    ["onhand", "qty", "quantity", "stock", "onhandqty", "balance", "count"],
+  min:       ["min", "minimum", "reorder", "minstock", "reorderlevel"],
+  unitPrice: ["unitprice", "price", "rate", "cost", "unitcost", "mrp"],
+  supplier:  ["supplier", "vendor", "dealer"],
+};
+
+function normHeader(s) {
+  return String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function inferColumnMap(headers) {
+  const map = {};
+  const norm = headers.map(normHeader);
+  for (const [field, aliases] of Object.entries(COLUMN_ALIASES)) {
+    for (const alias of aliases) {
+      const idx = norm.indexOf(alias);
+      if (idx !== -1) { map[field] = idx; break; }
+    }
+  }
+  return map;
+}
 
 // Pretty-print a category id ("lab_equipment" → "Lab equipment") for chips,
 // the filter strip, and the table.
@@ -79,6 +107,7 @@ export default function ScreenInventory({ E, refresh, role }) {
   // items are available to every class).
   const [classFilter, setClassFilter] = useState("");
   const [showAdd, setShowAdd] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [showMove, setShowMove] = useState(null); // 'in' | 'out' | null
   const [movePreset, setMovePreset] = useState(null); // pre-selected itemId
   const [toast, setToast] = useState(null);
@@ -170,6 +199,26 @@ export default function ScreenInventory({ E, refresh, role }) {
     await refresh?.();
   }
 
+  async function handleImport(rows) {
+    const r = await fetch("/api/inventory/import", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ rows }),
+    });
+    const json = await r.json().catch(() => ({}));
+    if (!r.ok || !json.ok) throw new Error(json.error || "Import failed");
+    const okN = json.imported?.length || 0;
+    const errN = json.errors?.length || 0;
+    showToast(
+      errN
+        ? `Imported ${okN} · ${errN} skipped`
+        : `Imported ${okN} item${okN === 1 ? "" : "s"}`,
+      errN && !okN ? "err" : "ok",
+    );
+    await refresh?.();
+    return json;
+  }
+
   // Persist a new category id (without needing to add an item). Returns the
   // canonical slug the server stored, so the modal can preselect it.
   async function handleSaveCategory(rawCategory) {
@@ -230,6 +279,9 @@ export default function ScreenInventory({ E, refresh, role }) {
         <div className="page-actions">
           {canEdit && (
             <>
+              <button className="btn" onClick={() => setShowImport(true)} title="Bulk-import items from an Excel/CSV file">
+                <Icon name="upload" size={13} />Import Excel
+              </button>
               <button className="btn" onClick={() => { setMovePreset(null); setShowMove("in"); }} disabled={items.length === 0}>
                 <Icon name="upload" size={13} />Stock in
               </button>
@@ -458,6 +510,12 @@ export default function ScreenInventory({ E, refresh, role }) {
           onSaveCategory={handleSaveCategory}
         />
       )}
+      {showImport && canEdit && (
+        <ImportInventoryModal
+          onClose={() => setShowImport(false)}
+          onSubmit={handleImport}
+        />
+      )}
       {showMove && canEdit && (
         <MoveModal
           items={items}
@@ -683,6 +741,270 @@ function MoveModal({ items, type, presetItemId, onClose, onSubmit }) {
           <button type="submit" className="btn accent" disabled={busy || !form.itemId}>
             {busy ? "Saving…" : <><Icon name={type === "in" ? "upload" : "download"} size={13} />{type === "in" ? "Stock in" : "Stock out"}</>}
           </button>
+        </div>
+      </form>
+    </ModalShell>
+  );
+}
+
+function ImportInventoryModal({ onClose, onSubmit }) {
+  const [fileName, setFileName] = useState("");
+  const [headers, setHeaders] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [colMap, setColMap] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [result, setResult] = useState(null);
+  const fileRef = useRef(null);
+
+  const FIELD_LABELS = {
+    name: "Item name",
+    category: "Category",
+    cls: "Class",
+    onHand: "On hand",
+    min: "Min stock",
+    unitPrice: "Unit price",
+    supplier: "Supplier",
+  };
+
+  async function handleFile(e) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setErr(""); setResult(null);
+    setFileName(f.name);
+    try {
+      const buf = await f.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const arr = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "", blankrows: false });
+      if (!arr.length) throw new Error("Spreadsheet is empty");
+      const [head, ...body] = arr;
+      const headerArr = head.map((h) => String(h || "").trim());
+      setHeaders(headerArr);
+      setRows(body);
+      setColMap(inferColumnMap(headerArr));
+    } catch (ex) {
+      setHeaders([]); setRows([]); setColMap({});
+      setErr(ex.message || "Couldn't read the file");
+    }
+  }
+
+  const cell = (r, field, fallback = "") =>
+    colMap[field] != null ? r[colMap[field]] : fallback;
+
+  const previewRows = useMemo(() => {
+    return rows.slice(0, 50).map((r) => ({
+      name: cell(r, "name"),
+      category: cell(r, "category", "asset"),
+      cls: cell(r, "cls", "all"),
+      onHand: Number(cell(r, "onHand", 0)) || 0,
+      min: Number(cell(r, "min", 0)) || 0,
+      unitPrice: Number(cell(r, "unitPrice", 0)) || 0,
+      supplier: cell(r, "supplier"),
+    }));
+  }, [rows, colMap]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const validCount = previewRows.filter((r) => r.name && String(r.name).trim()).length;
+  const missingName = previewRows.length - validCount;
+  const remap = (field, idx) => setColMap((m) => ({ ...m, [field]: idx === "" ? undefined : Number(idx) }));
+
+  async function submit(e) {
+    e.preventDefault();
+    if (busy) return;
+    if (!rows.length) { setErr("Pick a file first"); return; }
+    if (colMap.name == null) { setErr("Map a column to “Item name” — it's required"); return; }
+    setBusy(true); setErr("");
+    try {
+      const payload = rows.map((r) => ({
+        name: cell(r, "name"),
+        category: cell(r, "category", "asset") || "asset",
+        cls: cell(r, "cls", "all") || "all",
+        onHand: Number(cell(r, "onHand", 0)) || 0,
+        min: Number(cell(r, "min", 0)) || 0,
+        unitPrice: Number(cell(r, "unitPrice", 0)) || 0,
+        supplier: cell(r, "supplier") || null,
+      })).filter((r) => r.name && String(r.name).trim());
+      if (!payload.length) throw new Error("No rows had an item name");
+      const j = await onSubmit(payload);
+      setResult(j);
+    } catch (ex) { setErr(ex.message || String(ex)); }
+    finally { setBusy(false); }
+  }
+
+  function downloadSample() {
+    const data = [
+      ["Name", "Category", "Class", "On_Hand", "Min", "Unit_Price", "Supplier"],
+      ["Class 1 Notebook", "stationery", "1-A", 120, 20, 25, "Local Stores"],
+      ["Boys Uniform Shirt", "uniform", "all", 40, 10, 350, "Uniform Hub"],
+      ["Projector HDMI Cable", "computer", "all", 8, 2, 450, "Tech Mart"],
+      ["NCERT Maths Class 5", "book", "5-A", 30, 5, 120, "Book Depot"],
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Inventory");
+    XLSX.writeFile(wb, "inventory-import-template.xlsx");
+  }
+
+  return (
+    <ModalShell title="Import inventory" sub="Upload an Excel or CSV file — preview before importing" onClose={onClose} width={780}>
+      <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".xlsx,.xls,.csv"
+            onChange={handleFile}
+            style={{ display: "none" }}
+          />
+          <button type="button" className="btn" onClick={() => fileRef.current?.click()}>
+            <Icon name="upload" size={13} />Choose file
+          </button>
+          <div style={{ fontSize: 12, color: "var(--ink-3)", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {fileName || "No file selected · accepts .xlsx, .xls, .csv"}
+          </div>
+          <button type="button" className="btn ghost sm" onClick={downloadSample} title="Download a starter template">
+            <Icon name="download" size={11} />Sample template
+          </button>
+        </div>
+
+        {headers.length > 0 && (
+          <div style={{ background: "var(--bg-2)", padding: 10, borderRadius: 8 }}>
+            <div style={{ fontSize: 11, fontWeight: 500, color: "var(--ink-2)", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>
+              Match your columns
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+              {Object.keys(COLUMN_ALIASES).map((field) => (
+                <label key={field} style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 11 }}>
+                  <span style={{ color: "var(--ink-3)" }}>
+                    {FIELD_LABELS[field]}
+                    {field === "name" && <span style={{ color: "var(--err, #b13c1c)" }}> *</span>}
+                  </span>
+                  <select
+                    className="select"
+                    value={colMap[field] == null ? "" : colMap[field]}
+                    onChange={(e) => remap(field, e.target.value)}
+                    style={{ fontSize: 12, padding: "4px 6px", height: 30 }}
+                  >
+                    <option value="">— ignore —</option>
+                    {headers.map((h, i) => (
+                      <option key={i} value={i}>{h || `Column ${i + 1}`}</option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {previewRows.length > 0 && (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+              <div style={{ fontSize: 11, fontWeight: 500, color: "var(--ink-2)", textTransform: "uppercase", letterSpacing: 0.4 }}>
+                Preview · first {previewRows.length} of {rows.length}
+              </div>
+              <div style={{ fontSize: 11, color: missingName ? "var(--warn)" : "var(--ink-3)" }}>
+                {validCount} importable{missingName ? ` · ${missingName} skipped (no name)` : ""}
+              </div>
+            </div>
+            <div style={{ maxHeight: 220, overflow: "auto", border: "1px solid var(--rule)", borderRadius: 7 }}>
+              <table className="table" style={{ fontSize: 11.5 }}>
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Item</th>
+                    <th>Category</th>
+                    <th>Class</th>
+                    <th className="num">On hand</th>
+                    <th className="num">Min</th>
+                    <th className="num">Price</th>
+                    <th>Supplier</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {previewRows.map((r, i) => {
+                    const ok = !!String(r.name || "").trim();
+                    return (
+                      <tr key={i} style={ok ? undefined : { background: "var(--err-soft, #fbe1d8)" }}>
+                        <td style={{ color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>{i + 1}</td>
+                        <td style={{ fontWeight: 500 }}>{String(r.name || "—")}</td>
+                        <td style={{ color: "var(--ink-3)" }}>{String(r.category || "asset")}</td>
+                        <td style={{ color: "var(--ink-3)" }}>{String(r.cls || "all")}</td>
+                        <td className="num">{r.onHand}</td>
+                        <td className="num">{r.min}</td>
+                        <td className="num">{r.unitPrice || "—"}</td>
+                        <td style={{ color: "var(--ink-3)" }}>{String(r.supplier || "—")}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {result && (
+          <div style={{
+            display: "flex", flexDirection: "column", gap: 10,
+            padding: "14px 16px",
+            background: "var(--ok-soft, #e6f4ec)",
+            border: "1px solid var(--ok, #2f8854)",
+            borderRadius: 10,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{
+                width: 28, height: 28, borderRadius: "50%",
+                background: "var(--ok, #2f8854)", color: "#fff",
+                display: "grid", placeItems: "center", flexShrink: 0,
+              }}>
+                <Icon name="check" size={14} />
+              </span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink)" }}>Import successful</div>
+                <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 2 }}>
+                  {(result.imported?.length || 0)} item{(result.imported?.length || 0) === 1 ? "" : "s"} added · the register behind this dialog is already updated.
+                  {result.errors?.length ? ` · ${result.errors.length} row${result.errors.length === 1 ? "" : "s"} skipped — see below.` : ""}
+                </div>
+              </div>
+            </div>
+            {result.errors?.length > 0 && (
+              <div style={{
+                background: "var(--warn-soft, #fff4e2)",
+                border: "1px solid var(--warn, #d4944e)",
+                borderRadius: 7, padding: "8px 10px",
+                fontSize: 11.5, color: "var(--ink-2)", lineHeight: 1.5,
+                maxHeight: 120, overflowY: "auto",
+              }}>
+                {result.errors.slice(0, 8).map((e, i) => (
+                  <div key={i}>Row {e.row}: {e.reason}</div>
+                ))}
+                {result.errors.length > 8 && (
+                  <div style={{ color: "var(--ink-4)", marginTop: 4 }}>…and {result.errors.length - 8} more</div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {err && (
+          <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "9px 12px", borderRadius: 7, fontSize: 12 }}>
+            {err}
+          </div>
+        )}
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          {result ? (
+            <button type="button" className="btn accent" onClick={onClose}>
+              <Icon name="check" size={13} />Done
+            </button>
+          ) : (
+            <>
+              <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+              <button type="submit" className="btn accent" disabled={busy || !rows.length || colMap.name == null}>
+                <Icon name="upload" size={13} />
+                {busy ? "Importing…" : `Import ${validCount} item${validCount === 1 ? "" : "s"}`}
+              </button>
+            </>
+          )}
         </div>
       </form>
     </ModalShell>

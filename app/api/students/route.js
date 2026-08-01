@@ -161,6 +161,35 @@ export async function PATCH(req) {
     }
   }
 
+  // Height / weight — class teachers (and admin/principal) can update anytime.
+  if ("heightCm" in body || "weightKg" in body) {
+    const canMeasure = ["admin", "principal", "academic_director", "teacher"].includes(session?.role);
+    if (!canMeasure) {
+      return NextResponse.json({ ok: false, error: "Not allowed to update height/weight" }, { status: 403 });
+    }
+    if ("heightCm" in body) {
+      if (body.heightCm === null || body.heightCm === "") patch.heightCm = null;
+      else {
+        const h = Number(body.heightCm);
+        if (!Number.isFinite(h) || h < 30 || h > 250) {
+          return NextResponse.json({ ok: false, error: "Height must be between 30 and 250 cm" }, { status: 400 });
+        }
+        patch.heightCm = Math.round(h * 10) / 10;
+      }
+    }
+    if ("weightKg" in body) {
+      if (body.weightKg === null || body.weightKg === "") patch.weightKg = null;
+      else {
+        const w = Number(body.weightKg);
+        if (!Number.isFinite(w) || w < 5 || w > 200) {
+          return NextResponse.json({ ok: false, error: "Weight must be between 5 and 200 kg" }, { status: 400 });
+        }
+        patch.weightKg = Math.round(w * 10) / 10;
+      }
+    }
+    patch.measuredAt = new Date().toISOString();
+  }
+
   if (Object.keys(patch).length === 0) {
     return NextResponse.json({ ok: false, error: "Nothing to update" }, { status: 400 });
   }
@@ -174,9 +203,15 @@ export async function PATCH(req) {
     if ("parent" in patch)     trail.push(`parent=${patch.parent}`);
     if ("transport" in patch)  trail.push(`bus=${patch.transport || "(none)"}`);
     if ("pickupStop" in patch) trail.push(`stop=${patch.pickupStop || "(none)"}`);
-    const action = ("transport" in patch || "pickupStop" in patch) && trail.length <= 2
-      ? "Updated transport assignment"
-      : "Updated student details";
+    if ("heightCm" in patch || "weightKg" in patch) {
+      trail.push(`ht=${updated.heightCm != null ? `${updated.heightCm}cm` : "—"}`);
+      trail.push(`wt=${updated.weightKg != null ? `${updated.weightKg}kg` : "—"}`);
+    }
+    const action = ("heightCm" in patch || "weightKg" in patch)
+      ? "Updated student height/weight"
+      : (("transport" in patch || "pickupStop" in patch) && trail.length <= 2
+        ? "Updated transport assignment"
+        : "Updated student details");
     await logAudit(actor, action, `${updated.id} ${updated.name} · ${trail.join(" · ")}`);
   } catch {}
   return NextResponse.json({ ok: true, student: updated });

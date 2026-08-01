@@ -86,3 +86,69 @@ export function formatClassLabel(cls) {
   if (n >= 13) return name; // pre-school labels already self-contained
   return `Class ${name}`;
 }
+
+// Holidays / sudden leave — stored as academic.holidays JSON:
+// [{ date: "YYYY-MM-DD", reason: "..." }, ...]
+export function parseHolidays(settings) {
+  const raw = settings?.academic?.holidays;
+  if (!raw) return [];
+  let list = raw;
+  if (typeof raw === "string") {
+    try { list = JSON.parse(raw); } catch { return []; }
+  }
+  if (!Array.isArray(list)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const h of list) {
+    const date = String(h?.date || "").slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || seen.has(date)) continue;
+    seen.add(date);
+    out.push({ date, reason: String(h?.reason || "").trim() });
+  }
+  out.sort((a, b) => a.date.localeCompare(b.date));
+  return out;
+}
+
+export function getHolidayDates(settings) {
+  return parseHolidays(settings).map((h) => h.date);
+}
+
+// Base planned working days for a class (before holiday subtraction).
+export function getBaseWorkingDays(settings, cls) {
+  const academic = settings?.academic || {};
+  const head = cls != null && cls !== "" ? String(cls).split("-")[0] : null;
+  const parse = (raw) => {
+    if (raw == null || raw === "") return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+  };
+  // Empty per-class inputs must not override the school default.
+  return (
+    parse(head != null ? academic[`workingDays_${head}`] : null)
+    ?? parse(academic.workingDays)
+    ?? parse(settings?.finance?.workingDays)
+  );
+}
+
+// Super Admin sets base working days per class; holidays/sudden leave
+// dates subtract from that. Attendance % = present ÷ effective working days.
+// If base unset, fall back to present ÷ logged school days.
+export function getWorkingDays(settings, cls) {
+  const base = getBaseWorkingDays(settings, cls);
+  if (base == null) return null;
+  const holidayCount = parseHolidays(settings).length;
+  return Math.max(0, base - holidayCount);
+}
+
+export function attendanceFromLogs(logs, workingDays, opts = {}) {
+  const holidaySet = new Set(opts.holidayDates || []);
+  const list = (Array.isArray(logs) ? logs : []).filter(
+    (l) => l && (!holidaySet.size || !holidaySet.has(l.date))
+  );
+  const presentCount = list.filter((l) => l.attendance !== "absent").length;
+  const absentCount = list.filter((l) => l.attendance === "absent").length;
+  const totalLogs = list.length;
+  const denom = workingDays && workingDays > 0 ? workingDays : totalLogs;
+  const pct = denom > 0 ? Math.min(100, Math.round((presentCount / denom) * 100)) : null;
+  return { presentCount, absentCount, totalLogs, workingDays: workingDays || null, denom, pct };
+}
