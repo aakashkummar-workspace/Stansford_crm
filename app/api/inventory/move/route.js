@@ -19,13 +19,14 @@ export async function POST(req) {
       type: body.type,
       qty: body.qty,
       note: body.note,
+      issuedTo: body.issuedTo,
       who: actor,
     });
     try {
       await logAudit(
         actor,
         body.type === "in" ? "Stock in" : "Stock out",
-        `${result.item.id} ${result.item.name} · ${body.qty}${body.note ? " · " + body.note : ""}`,
+        `${result.item.id} ${result.item.name} · ${body.qty}${body.issuedTo ? " → " + body.issuedTo : ""}${body.note ? " · " + body.note : ""}`,
       );
     } catch {}
     return NextResponse.json({ ok: true, ...result });

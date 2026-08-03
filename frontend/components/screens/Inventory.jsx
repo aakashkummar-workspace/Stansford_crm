@@ -16,19 +16,35 @@ const BUILTIN_CATS = [
 const BASE_FILTERS = [{ k: "all", label: "All" }];
 const TAIL_FILTERS = [{ k: "out", label: "Out of stock" }];
 
-// Spreadsheet header aliases → canonical inventory fields.
+// Spreadsheet header aliases → canonical stock-register fields.
 const COLUMN_ALIASES = {
-  name:      ["name", "item", "itemname", "product", "sku", "description"],
-  category:  ["category", "type", "bucket", "group"],
-  cls:       ["class", "cls", "section", "classname", "classsection"],
-  onHand:    ["onhand", "qty", "quantity", "stock", "onhandqty", "balance", "count"],
-  min:       ["min", "minimum", "reorder", "minstock", "reorderlevel"],
-  unitPrice: ["unitprice", "price", "rate", "cost", "unitcost", "mrp"],
-  supplier:  ["supplier", "vendor", "dealer"],
+  id:              ["stockid", "id", "skuid", "itemid"],
+  name:            ["itemname", "name", "item", "product", "sku"],
+  category:        ["category", "type", "bucket", "group"],
+  description:     ["description", "specification", "desc", "descriptionspecification"],
+  cls:             ["class", "cls", "section", "classname", "classsection"],
+  onHand:          ["balancestock", "balance", "onhand", "onhandqty", "stock"],
+  qtyPurchased:    ["qtypurchased", "purchased", "qtybought", "quantitypurchased"],
+  issued:          ["qtyissuedused", "qtyissued", "issued", "qtyused", "used"],
+  min:             ["reorderlevel", "reorder", "min", "minimum", "minstock"],
+  unitPrice:       ["unitcost", "unitprice", "price", "rate", "mrp", "cost"],
+  totalCost:       ["totalcost", "total", "amount"],
+  supplier:        ["suppliervendor", "supplier", "vendor", "dealer"],
+  storageLocation: ["storagelocation", "location", "storage", "custody"],
 };
 
 function normHeader(s) {
   return String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function parseMoneyCell(raw) {
+  if (raw == null || raw === "") return 0;
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : 0;
+  const s = String(raw).trim();
+  if (!s) return 0;
+  const cleaned = s.replace(/,/g, "").replace(/[^\d.-].*$/, "").trim();
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : 0;
 }
 
 function inferColumnMap(headers) {
@@ -41,6 +57,24 @@ function inferColumnMap(headers) {
     }
   }
   return map;
+}
+
+// Sanfort register sheets often have title rows above the real header.
+function findHeaderRow(matrix) {
+  for (let i = 0; i < Math.min(12, matrix.length); i++) {
+    const norms = (matrix[i] || []).map(normHeader);
+    if (norms.some((h) => h === "stockid" || h === "itemname" || h === "balancestock")) return i;
+    if (norms.includes("name") && (norms.includes("category") || norms.includes("supplier"))) return i;
+  }
+  return 0;
+}
+
+function totalCostOf(it) {
+  const purchased = Number(it.qtyPurchased) || 0;
+  const unit = Number(it.unitPrice) || 0;
+  if (purchased > 0 && unit > 0) return purchased * unit;
+  const bal = Number(it.onHand) || 0;
+  return bal * unit;
 }
 
 // Pretty-print a category id ("lab_equipment" → "Lab equipment") for chips,
@@ -110,6 +144,8 @@ export default function ScreenInventory({ E, refresh, role }) {
   const [showImport, setShowImport] = useState(false);
   const [showMove, setShowMove] = useState(null); // 'in' | 'out' | null
   const [movePreset, setMovePreset] = useState(null); // pre-selected itemId
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
   const [toast, setToast] = useState(null);
 
   const items = E.INVENTORY || [];
@@ -165,7 +201,7 @@ export default function ScreenInventory({ E, refresh, role }) {
 
   const totalSkus = items.length;
   const outCount  = items.filter(isOut).length;
-  const stockValue = items.reduce((a, i) => a + (i.onHand || 0) * (i.unitPrice || 0), 0);
+  const stockValue = items.reduce((a, i) => a + totalCostOf(i), 0);
   const supplierCount = new Set(items.map((i) => i.supplier).filter(Boolean)).size;
 
   // Class-wise health — bucketed by out-of-stock count.
@@ -257,29 +293,126 @@ export default function ScreenInventory({ E, refresh, role }) {
       });
       const json = await r.json().catch(() => ({}));
       if (!r.ok || !json.ok) throw new Error(json.error || "Failed");
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(it.id);
+        return next;
+      });
       showToast(`${it.name} removed`, "ok");
       await refresh?.();
     } catch (e) { showToast(e.message, "err"); }
   }
 
+  const filteredIds = useMemo(() => filtered.map((i) => i.id), [filtered]);
+  const allFilteredSelected = filteredIds.length > 0 && filteredIds.every((id) => selectedIds.has(id));
+  const selectedCount = selectedIds.size;
+
+  function toggleSelect(id) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAllFiltered() {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allFilteredSelected) {
+        for (const id of filteredIds) next.delete(id);
+      } else {
+        for (const id of filteredIds) next.add(id);
+      }
+      return next;
+    });
+  }
+
+  async function handleBulkDelete() {
+    if (!selectedCount || bulkBusy) return;
+    if (!confirm(`Delete ${selectedCount} selected item${selectedCount === 1 ? "" : "s"} from inventory?`)) return;
+    setBulkBusy(true);
+    try {
+      const r = await fetch("/api/inventory", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ids: [...selectedIds] }),
+      });
+      const json = await r.json().catch(() => ({}));
+      if (!r.ok || !json.ok) throw new Error(json.error || "Bulk delete failed");
+      setSelectedIds(new Set());
+      showToast(`Deleted ${json.removed || selectedCount} item${(json.removed || selectedCount) === 1 ? "" : "s"}`, "ok");
+      await refresh?.();
+    } catch (e) {
+      showToast(e.message, "err");
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   const itemMap = useMemo(() => Object.fromEntries(items.map((i) => [i.id, i])), [items]);
-  const fmtRupees = (n) => `₹${Math.round(n).toLocaleString("en-IN")}`;
-  const iconForCat = (c) => c === "book" ? "book" : c === "uniform" ? "user" : "box";
-  const colourSoftForCat = (c) => c === "book" ? "var(--info-soft, #dfe9f3)" : c === "uniform" ? "var(--accent-soft)" : "var(--card-2)";
-  const colourInkForCat = (c) => c === "book" ? "var(--info, #4a6b8c)" : c === "uniform" ? "var(--accent-2)" : "var(--ink-3)";
+  const fmtRupees = (n) => `₹${Math.round(n || 0).toLocaleString("en-IN")}`;
+  const fmtQty = (n) => {
+    const v = Number(n) || 0;
+    return Number.isInteger(v) ? String(v) : String(Math.round(v * 100) / 100);
+  };
+  const iconForCat = (c) => c === "book" || String(c).includes("book") ? "book" : c === "uniform" ? "user" : "box";
+  const colourSoftForCat = (c) => c === "book" || String(c).includes("book") ? "var(--info-soft, #dfe9f3)" : c === "uniform" ? "var(--accent-soft)" : "var(--card-2)";
+  const colourInkForCat = (c) => c === "book" || String(c).includes("book") ? "var(--info, #4a6b8c)" : c === "uniform" ? "var(--accent-2)" : "var(--ink-3)";
+
+  function exportRegister() {
+    const data = [
+      ["Stock ID", "Item Name", "Category", "Description / Specification", "Supplier / Vendor", "Unit Cost (₹)", "Total Cost (₹)", "Qty Purchased", "Qty Issued / Used", "Balance Stock", "Reorder Level", "Storage Location"],
+      ...items.map((it) => [
+        it.id,
+        it.name,
+        prettyCat(it.category),
+        it.description || "",
+        it.supplier || "",
+        it.unitPrice || 0,
+        Math.round(totalCostOf(it)),
+        it.qtyPurchased ?? "",
+        it.issued ?? 0,
+        it.onHand ?? 0,
+        it.min ?? 0,
+        it.storageLocation || "",
+      ]),
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Stock Register");
+    XLSX.writeFile(wb, `stock-register-${new Date().toISOString().slice(0, 10)}.xlsx`);
+  }
 
   return (
     <div className="page">
       <div className="page-head">
         <div>
           <div className="page-eyebrow">Operations · Inventory</div>
-          <div className="page-title">Inventory <span className="amber">register</span></div>
-          <div className="page-sub">Books · uniforms · assets · class-wise stock</div>
+          <div className="page-title">Stock register</div>
+          <div className="page-sub">Purchased · issued · balance · import Excel or add items</div>
         </div>
         <div className="page-actions">
+          {canEdit && selectedCount > 0 && (
+            <button
+              className="btn"
+              onClick={handleBulkDelete}
+              disabled={bulkBusy}
+              title="Delete selected items"
+              style={{ borderColor: "var(--err, #b13c1c)", color: "var(--err, #b13c1c)" }}
+            >
+              <Icon name="x" size={13} />
+              {bulkBusy ? "Deleting…" : `Delete ${selectedCount}`}
+            </button>
+          )}
+          {items.length > 0 && (
+            <button className="btn" onClick={exportRegister} title="Download current register as Excel">
+              <Icon name="download" size={13} />Export
+            </button>
+          )}
           {canEdit && (
             <>
-              <button className="btn" onClick={() => setShowImport(true)} title="Bulk-import items from an Excel/CSV file">
+              <button className="btn" onClick={() => setShowImport(true)} title="Import Sanfort stock register Excel/CSV">
                 <Icon name="upload" size={13} />Import Excel
               </button>
               <button className="btn" onClick={() => { setMovePreset(null); setShowMove("in"); }} disabled={items.length === 0}>
@@ -326,108 +459,172 @@ export default function ScreenInventory({ E, refresh, role }) {
           puck="cream" puckIcon="trending"
           details={{
             title: `Stock value · ${stockValue ? fmtRupees(stockValue) : "₹0"}`,
-            sub: "On-hand × unit price, top items first",
+            sub: "Purchased × unit price (fallback Balance × unit), top items first",
             items: [...items]
-              .map((i) => ({ ...i, total: (i.onHand || 0) * (i.unitPrice || 0) }))
+              .map((i) => ({ ...i, total: totalCostOf(i) }))
               .sort((a, b) => b.total - a.total)
               .slice(0, 10)
-              .map((i) => ({ label: i.name, value: fmtRupees(i.total), sub: `${i.onHand} × ₹${i.unitPrice}` })),
+              .map((i) => ({ label: i.name, value: fmtRupees(i.total), sub: `${i.qtyPurchased || i.onHand || 0} × ₹${i.unitPrice || 0}` })),
           }}
         />
         <KPI label="Suppliers" value={supplierCount} sub={supplierCount ? "unique" : "add suppliers"} puck="sky" puckIcon="users" />
       </div>
 
-      <div className="grid g-12">
-        <div className="card col-8">
-          <div className="card-head">
-            <div>
-              <div className="card-title">Stock register</div>
-              <div className="card-sub">Live · auto-updates on stock-in/out</div>
-            </div>
-            <div className="card-actions">
-              <div className="segmented">
-                {FILTERS.map((f) => (
-                  <button key={f.k} className={filter === f.k ? "active" : ""} onClick={() => setFilter(f.k)}>{f.label}</button>
-                ))}
-              </div>
-              <select
-                className="select"
-                value={classFilter}
-                onChange={(e) => setClassFilter(e.target.value)}
-                title="Filter by class"
-                style={{ minWidth: 150 }}
-              >
-                <option value="">All classes</option>
-                <option value="all">All-class items only</option>
-                {classOptions.map((c) => (
-                  <option key={c} value={c}>Class {c}</option>
-                ))}
-              </select>
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div className="card-head" style={{ flexWrap: "wrap", gap: 12, alignItems: "flex-start" }}>
+          <div style={{ flex: "1 1 220px", minWidth: 0 }}>
+            <div className="card-title">Stock register</div>
+            <div className="card-sub">
+              {filtered.length} shown
+              {items.length !== filtered.length ? ` of ${items.length}` : ""}
+              {" · "}Balance is live on-hand
             </div>
           </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginLeft: "auto" }}>
+            {selectedCount > 0 && (
+              <span className="chip" style={{ fontSize: 11 }}>{selectedCount} selected</span>
+            )}
+            <select
+              className="select"
+              value={classFilter}
+              onChange={(e) => setClassFilter(e.target.value)}
+              title="Filter by class"
+              style={{ minWidth: 160 }}
+            >
+              <option value="">All classes</option>
+              <option value="all">All-class items only</option>
+              {classOptions.map((c) => (
+                <option key={c} value={c}>{formatClassLabel(String(c))}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div style={{
+          display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center",
+          padding: "10px 16px", borderBottom: "1px solid var(--rule-2)",
+        }}>
+          {FILTERS.map((f) => {
+            const active = filter === f.k;
+            return (
+              <button
+                key={f.k}
+                type="button"
+                onClick={() => setFilter(f.k)}
+                className="btn sm"
+                style={{
+                  height: 28,
+                  padding: "0 10px",
+                  fontSize: 11.5,
+                  background: active ? "var(--ink)" : "var(--card)",
+                  color: active ? "var(--bg)" : "var(--ink-2)",
+                  borderColor: active ? "var(--ink)" : "var(--rule)",
+                }}
+              >
+                {f.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {filtered.length === 0 ? (
+          <div className="empty" style={{ padding: 40 }}>
+            {items.length === 0
+              ? "No items yet. Import the stock register Excel or click “Add item”."
+              : (() => {
+                  const catLbl = FILTERS.find((f) => f.k === filter)?.label;
+                  const clsLbl = !classFilter
+                    ? null
+                    : classFilter === "all" ? "All-class items only" : `${formatClassLabel(String(classFilter))} items only`;
+                  const bits = [];
+                  if (filter !== "all") bits.push(`“${catLbl}”`);
+                  if (clsLbl) bits.push(`“${clsLbl}”`);
+                  return bits.length
+                    ? `No items match the ${bits.join(" + ")} filter${bits.length > 1 ? "s" : ""}.`
+                    : "No items to show.";
+                })()}
+          </div>
+        ) : (
           <div style={{ overflowX: "auto" }}>
-            <table className="table">
+            <table className="table" style={{ minWidth: 960 }}>
               <thead>
                 <tr>
-                  <th>Item</th><th>Category</th><th>Class</th>
-                  <th className="num">On hand</th><th className="num">Min</th><th className="num">Issued</th>
-                  <th>Status</th>
+                  {canEdit && (
+                    <th style={{ width: 36 }}>
+                      <input
+                        type="checkbox"
+                        checked={allFilteredSelected}
+                        onChange={toggleSelectAllFiltered}
+                        title={allFilteredSelected ? "Clear selection" : "Select all visible"}
+                        aria-label="Select all visible items"
+                      />
+                    </th>
+                  )}
+                  <th>Stock ID</th>
+                  <th>Item</th>
+                  <th>Category</th>
+                  <th>Supplier</th>
+                  <th className="num">Unit ₹</th>
+                  <th className="num">Total ₹</th>
+                  <th className="num">Purchased</th>
+                  <th className="num">Issued</th>
+                  <th className="num">Balance</th>
+                  <th className="num">Reorder</th>
+                  <th>Location</th>
                   {canEdit && <th></th>}
                 </tr>
               </thead>
               <tbody>
-                {filtered.length === 0 && (
-                  <tr><td colSpan={canEdit ? 8 : 7} className="empty">
-                    {items.length === 0
-                      ? "No items yet. Click “Add item” to start tracking stock."
-                      : (() => {
-                          const catLbl = FILTERS.find((f) => f.k === filter)?.label;
-                          const clsLbl = !classFilter
-                            ? null
-                            : classFilter === "all" ? "All-class items only" : `${formatClassLabel(String(classFilter))} items only`;
-                          const bits = [];
-                          if (filter !== "all") bits.push(`“${catLbl}”`);
-                          if (clsLbl) bits.push(`“${clsLbl}”`);
-                          return bits.length
-                            ? `No items match the ${bits.join(" + ")} filter${bits.length > 1 ? "s" : ""}.`
-                            : "No items to show.";
-                        })()}
-                  </td></tr>
-                )}
                 {filtered.map((it) => {
                   const out = isOut(it);
+                  const low = !out && (Number(it.min) || 0) > 0 && (Number(it.onHand) || 0) <= (Number(it.min) || 0);
+                  const checked = selectedIds.has(it.id);
                   return (
-                    <tr key={it.id}>
+                    <tr key={it.id} style={checked ? { background: "var(--accent-soft)" } : undefined}>
+                      {canEdit && (
+                        <td>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleSelect(it.id)}
+                            aria-label={`Select ${it.name}`}
+                          />
+                        </td>
+                      )}
+                      <td style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-3)", whiteSpace: "nowrap" }}>{it.id}</td>
                       <td>
-                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                          <div style={{ width: 28, height: 28, borderRadius: 7, background: colourSoftForCat(it.category), color: colourInkForCat(it.category), display: "grid", placeItems: "center" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 140 }}>
+                          <div style={{ width: 28, height: 28, borderRadius: 7, background: colourSoftForCat(it.category), color: colourInkForCat(it.category), display: "grid", placeItems: "center", flexShrink: 0 }}>
                             <Icon name={iconForCat(it.category)} size={14} />
                           </div>
-                          <div>
+                          <div style={{ minWidth: 0 }}>
                             <div style={{ fontSize: 12.5, fontWeight: 500 }}>{it.name}</div>
-                            <div style={{ fontSize: 10.5, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>{it.id}{it.supplier ? ` · ${it.supplier}` : ""}</div>
+                            {it.description ? (
+                              <div style={{ fontSize: 10.5, color: "var(--ink-4)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 220 }}>{it.description}</div>
+                            ) : null}
                           </div>
                         </div>
                       </td>
                       <td><span className="chip">{prettyCat(it.category)}</span></td>
-                      <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{it.cls || "—"}</td>
-                      <td className="num" style={{ color: out ? "var(--err, #b13c1c)" : "inherit", fontWeight: out ? 500 : 400 }}>{it.onHand ?? 0}</td>
-                      <td className="num" style={{ color: "var(--ink-3)" }}>{it.min ?? 0}</td>
-                      <td className="num" style={{ color: "var(--ink-3)" }}>{it.issued ?? 0}</td>
-                      <td>
-                        {(it.onHand || 0) === 0
-                          ? <span className="chip bad"><span className="dot" />Out of stock</span>
-                          : <span className="chip ok"><span className="dot" />In stock</span>}
-                      </td>
+                      <td style={{ fontSize: 11.5, color: "var(--ink-3)", maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={it.supplier || ""}>{it.supplier || "—"}</td>
+                      <td className="num" style={{ color: "var(--ink-3)" }}>{it.unitPrice ? fmtRupees(it.unitPrice) : "—"}</td>
+                      <td className="num">{totalCostOf(it) ? fmtRupees(totalCostOf(it)) : "—"}</td>
+                      <td className="num" style={{ color: "var(--ink-3)" }}>{fmtQty(it.qtyPurchased)}</td>
+                      <td className="num" style={{ color: "var(--ink-3)" }}>{fmtQty(it.issued)}</td>
+                      <td className="num" style={{ color: out ? "var(--err, #b13c1c)" : low ? "var(--warn, #b07a18)" : "inherit", fontWeight: out || low ? 600 : 400 }}>{fmtQty(it.onHand)}</td>
+                      <td className="num" style={{ color: "var(--ink-3)" }}>{fmtQty(it.min)}</td>
+                      <td style={{ fontSize: 11.5, color: "var(--ink-3)", maxWidth: 100, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.storageLocation || "—"}</td>
                       {canEdit && (
-                        <td style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
-                          <button className="btn sm" onClick={() => { setMovePreset(it.id); setShowMove("in"); }} title="Stock in">
-                            <Icon name="upload" size={11} />In
-                          </button>
-                          <button className="btn sm" onClick={() => { setMovePreset(it.id); setShowMove("out"); }} title="Stock out" disabled={(it.onHand || 0) === 0}>
-                            <Icon name="download" size={11} />Out
-                          </button>
-                          <button className="icon-btn" onClick={() => handleRemove(it)} title="Remove"><Icon name="x" size={12} /></button>
+                        <td>
+                          <div style={{ display: "inline-flex", gap: 4, justifyContent: "flex-end" }}>
+                            <button className="btn sm" onClick={() => { setMovePreset(it.id); setShowMove("in"); }} title="Stock in">
+                              <Icon name="upload" size={11} />In
+                            </button>
+                            <button className="btn sm" onClick={() => { setMovePreset(it.id); setShowMove("out"); }} title="Stock out" disabled={(it.onHand || 0) === 0}>
+                              <Icon name="download" size={11} />Out
+                            </button>
+                            <button className="icon-btn" onClick={() => handleRemove(it)} title="Remove"><Icon name="x" size={12} /></button>
+                          </div>
                         </td>
                       )}
                     </tr>
@@ -436,68 +633,70 @@ export default function ScreenInventory({ E, refresh, role }) {
               </tbody>
             </table>
           </div>
+        )}
+      </div>
+
+      <div className="grid g-2" style={{ gap: 14 }}>
+        <div className="card">
+          <div className="card-head"><div><div className="card-title">Class-wise stock health</div></div></div>
+          {classHealth.length === 0 ? (
+            <div className="empty" style={{ padding: 20 }}>Stock health appears once items are tagged to classes.</div>
+          ) : (
+            <div style={{ padding: "8px 14px 14px", display: "flex", flexDirection: "column", gap: 6 }}>
+              {classHealth.map(([cls, info]) => (
+                <div key={cls} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, alignItems: "center" }}>
+                  <span style={{ color: "var(--ink-2)" }}>{formatClassLabel(String(cls))}</span>
+                  <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                    <span className="mono" style={{ color: "var(--ink-3)" }}>{info.items} item{info.items === 1 ? "" : "s"}</span>
+                    {info.out > 0 ? (
+                      <span className="chip bad"><span className="dot" />{info.out} out</span>
+                    ) : (
+                      <span className="chip ok"><span className="dot" />In stock</span>
+                    )}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
-        <div className="col-4" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <div className="card">
-            <div className="card-head"><div><div className="card-title">Class-wise stock health</div></div></div>
-            {classHealth.length === 0 ? (
-              <div className="empty">Stock health appears here once items are tagged to classes.</div>
-            ) : (
-              <div style={{ padding: "8px 14px 14px", display: "flex", flexDirection: "column", gap: 6 }}>
-                {classHealth.map(([cls, info]) => (
-                  <div key={cls} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, alignItems: "center" }}>
-                    <span style={{ color: "var(--ink-2)" }}>{formatClassLabel(String(cls))}</span>
-                    <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-                      <span className="mono" style={{ color: "var(--ink-3)" }}>{info.items} item{info.items === 1 ? "" : "s"}</span>
-                      {info.out > 0 ? (
-                        <span className="chip bad"><span className="dot" />{info.out} out</span>
-                      ) : (
-                        <span className="chip ok"><span className="dot" />In stock</span>
-                      )}
+        <div className="card">
+          <div className="card-head"><div><div className="card-title">Recent stock movements</div></div></div>
+          {movements.length === 0 ? (
+            <div className="empty" style={{ padding: 20 }}>No stock-in / stock-out movements logged yet.</div>
+          ) : (
+            <div style={{ padding: "8px 14px 14px", display: "flex", flexDirection: "column", gap: 6 }}>
+              {movements.slice(0, 8).map((m) => {
+                const item = itemMap[m.itemId];
+                const inMove = m.type === "in";
+                return (
+                  <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                    <span style={{
+                      display: "inline-flex", alignItems: "center", justifyContent: "center",
+                      width: 22, height: 22, borderRadius: 5,
+                      background: inMove ? "var(--ok-soft, #dfecd8)" : "var(--err-soft, #fbe1d8)",
+                      color: inMove ? "var(--ok)" : "var(--err, #b13c1c)",
+                    }}>
+                      <Icon name={inMove ? "upload" : "download"} size={11} />
                     </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div className="card">
-            <div className="card-head"><div><div className="card-title">Recent stock movements</div></div></div>
-            {movements.length === 0 ? (
-              <div className="empty">No stock-in / stock-out movements logged yet.</div>
-            ) : (
-              <div style={{ padding: "8px 14px 14px", display: "flex", flexDirection: "column", gap: 6 }}>
-                {movements.slice(0, 8).map((m) => {
-                  const item = itemMap[m.itemId];
-                  const inMove = m.type === "in";
-                  return (
-                    <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-                      <span style={{
-                        display: "inline-flex", alignItems: "center", justifyContent: "center",
-                        width: 22, height: 22, borderRadius: 5,
-                        background: inMove ? "var(--ok-soft, #dfecd8)" : "var(--err-soft, #fbe1d8)",
-                        color:      inMove ? "var(--ok)"             : "var(--err, #b13c1c)",
-                      }}>
-                        <Icon name={inMove ? "upload" : "download"} size={11} />
-                      </span>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 12, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                          {item?.name || m.itemId}
-                        </div>
-                        <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>
-                          {inMove ? "Stocked in" : "Issued"} · {m.who}{m.note ? ` · ${m.note}` : ""}
-                        </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {item?.name || m.itemId}
                       </div>
-                      <div className="mono" style={{ fontSize: 12, fontWeight: 500, color: inMove ? "var(--ok)" : "var(--err, #b13c1c)" }}>
-                        {inMove ? "+" : "−"}{m.qty}
+                      <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>
+                        {inMove ? "Stocked in" : "Issued"}
+                        {!inMove && m.issuedTo ? ` → ${m.issuedTo}` : ""}
+                        {" · "}{m.who}{m.note ? ` · ${m.note}` : ""}
                       </div>
                     </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+                    <div className="mono" style={{ fontSize: 12, fontWeight: 500, color: inMove ? "var(--ok)" : "var(--err, #b13c1c)" }}>
+                      {inMove ? "+" : "−"}{m.qty}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       </div>
 
@@ -535,8 +734,9 @@ function AddItemModal({ classes, existingCats, onClose, onSubmit, onSaveCategory
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [form, setForm] = useState({
-    name: "", category: "book", cls: "all",
-    onHand: "", min: "", unitPrice: "", supplier: "",
+    id: "", name: "", category: "asset", cls: "all",
+    description: "", storageLocation: "",
+    onHand: "", qtyPurchased: "", issued: "", min: "", unitPrice: "", supplier: "",
   });
   // When the user picks "Add new…" from the category dropdown we flip into a
   // text-entry mode so they can type whatever bucket they want.
@@ -556,12 +756,17 @@ function AddItemModal({ classes, existingCats, onClose, onSubmit, onSaveCategory
       const cat = customCat ? customCatVal.trim() : form.category;
       if (!cat) throw new Error("Category is required");
       await onSubmit({
+        id: form.id.trim() || null,
         name: form.name.trim(),
         category: cat,
+        description: form.description.trim() || "",
+        storageLocation: form.storageLocation.trim() || "",
         cls: form.cls === "all" ? "all" : form.cls,
-        onHand: Number(form.onHand) || 0,
-        min: Number(form.min) || 0,
-        unitPrice: Number(form.unitPrice) || 0,
+        onHand: parseMoneyCell(form.onHand),
+        qtyPurchased: form.qtyPurchased === "" ? undefined : parseMoneyCell(form.qtyPurchased),
+        issued: parseMoneyCell(form.issued),
+        min: parseMoneyCell(form.min),
+        unitPrice: parseMoneyCell(form.unitPrice),
         supplier: form.supplier.trim() || null,
       });
     } catch (ex) { setErr(ex.message || String(ex)); setBusy(false); }
@@ -573,10 +778,18 @@ function AddItemModal({ classes, existingCats, onClose, onSubmit, onSaveCategory
   )];
 
   return (
-    <ModalShell title="Add inventory item" sub="Auto-assigned ID · counts as one SKU" onClose={onClose} width={520}>
+    <ModalShell title="Add stock item" sub="Optional Stock ID (e.g. SIS-001) · else auto INV-…" onClose={onClose} width={560}>
       <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        <Field label="Item name *">
-          <input className="input" ref={nameRef} value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. Class 5 maths textbook" />
+        <div style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: 10 }}>
+          <Field label="Stock ID">
+            <input className="input" value={form.id} onChange={(e) => set("id", e.target.value)} placeholder="SIS-001" />
+          </Field>
+          <Field label="Item name *">
+            <input className="input" ref={nameRef} value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. Fan / Plastic Chair" />
+          </Field>
+        </div>
+        <Field label="Description / Specification">
+          <input className="input" value={form.description} onChange={(e) => set("description", e.target.value)} placeholder="e.g. Half Pant & Shirt" />
         </Field>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           <Field label="Category" hint={customCat ? "Letters, numbers, _ and - · Save to keep this option for next time" : undefined}>
@@ -646,19 +859,30 @@ function AddItemModal({ classes, existingCats, onClose, onSubmit, onSaveCategory
             </select>
           </Field>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
-          <Field label="On hand">
-            <input className="input" inputMode="numeric" value={form.onHand} onChange={(e) => set("onHand", e.target.value.replace(/\D/g, ""))} placeholder="0" />
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10 }}>
+          <Field label="Balance stock" hint="Current on-hand">
+            <input className="input" inputMode="decimal" value={form.onHand} onChange={(e) => set("onHand", e.target.value)} placeholder="0" />
           </Field>
-          <Field label="Min stock">
-            <input className="input" inputMode="numeric" value={form.min} onChange={(e) => set("min", e.target.value.replace(/\D/g, ""))} placeholder="0" />
+          <Field label="Qty purchased" hint="Blank = same as balance">
+            <input className="input" inputMode="decimal" value={form.qtyPurchased} onChange={(e) => set("qtyPurchased", e.target.value)} placeholder="=" />
           </Field>
-          <Field label="Unit price (₹)">
-            <input className="input" inputMode="numeric" value={form.unitPrice} onChange={(e) => set("unitPrice", e.target.value.replace(/\D/g, ""))} placeholder="0" />
+          <Field label="Qty issued">
+            <input className="input" inputMode="decimal" value={form.issued} onChange={(e) => set("issued", e.target.value)} placeholder="0" />
+          </Field>
+          <Field label="Reorder level">
+            <input className="input" inputMode="decimal" value={form.min} onChange={(e) => set("min", e.target.value)} placeholder="0" />
           </Field>
         </div>
-        <Field label="Supplier (optional)">
-          <input className="input" value={form.supplier} onChange={(e) => set("supplier", e.target.value)} placeholder="e.g. Sapna Books" />
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <Field label="Unit cost (₹)">
+            <input className="input" inputMode="decimal" value={form.unitPrice} onChange={(e) => set("unitPrice", e.target.value)} placeholder="0" />
+          </Field>
+          <Field label="Storage location">
+            <input className="input" value={form.storageLocation} onChange={(e) => set("storageLocation", e.target.value)} placeholder="e.g. Store room" />
+          </Field>
+        </div>
+        <Field label="Supplier / Vendor">
+          <input className="input" value={form.supplier} onChange={(e) => set("supplier", e.target.value)} placeholder="e.g. NIVA uniform" />
         </Field>
 
         {err && (
@@ -684,6 +908,7 @@ function MoveModal({ items, type, presetItemId, onClose, onSubmit }) {
   const [form, setForm] = useState({
     itemId: presetItemId || items[0]?.id || "",
     qty: "1",
+    issuedTo: "",
     note: "",
   });
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
@@ -695,16 +920,22 @@ function MoveModal({ items, type, presetItemId, onClose, onSubmit }) {
     if (busy) return;
     setBusy(true); setErr("");
     try {
-      const q = Math.max(1, Number(form.qty) || 0);
+      const q = parseMoneyCell(form.qty);
+      if (q <= 0) throw new Error("Quantity must be positive");
       if (type === "out" && q > max) throw new Error(`Only ${max} on hand`);
-      await onSubmit({ itemId: form.itemId, qty: q, note: form.note.trim() || null });
+      await onSubmit({
+        itemId: form.itemId,
+        qty: q,
+        issuedTo: type === "out" ? (form.issuedTo.trim() || null) : null,
+        note: form.note.trim() || null,
+      });
     } catch (ex) { setErr(ex.message || String(ex)); setBusy(false); }
   }
 
   return (
     <ModalShell
       title={type === "in" ? "Stock in" : "Stock out"}
-      sub={type === "in" ? "Add purchased units to stock" : "Issue units (to a class, student, or staff)"}
+      sub={type === "in" ? "Increases Balance + Qty Purchased" : "Decreases Balance · increases Qty Issued"}
       onClose={onClose}
       width={460}
     >
@@ -713,21 +944,26 @@ function MoveModal({ items, type, presetItemId, onClose, onSubmit }) {
           <select className="select" value={form.itemId} onChange={(e) => set("itemId", e.target.value)}>
             {items.map((i) => (
               <option key={i.id} value={i.id}>
-                {i.name} · {i.id} · {i.onHand ?? 0} on hand
+                {i.name} · {i.id} · balance {i.onHand ?? 0}
               </option>
             ))}
           </select>
         </Field>
-        <Field label="Quantity" hint={type === "out" ? `Max ${max} (current on-hand)` : undefined}>
+        <Field label="Quantity" hint={type === "out" ? `Max ${max} (current balance)` : undefined}>
           <input
-            className="input" type="number" min={1}
+            className="input" type="number" min={0.001} step="any"
             max={type === "out" ? max : undefined}
             value={form.qty}
-            onChange={(e) => set("qty", e.target.value.replace(/\D/g, ""))}
+            onChange={(e) => set("qty", e.target.value)}
           />
         </Field>
-        <Field label="Note (optional)" hint={type === "out" ? "e.g. issued to Class 5-A · 30 students" : "e.g. PO #4521 · supplier delivery"}>
-          <input className="input" value={form.note} onChange={(e) => set("note", e.target.value)} placeholder={type === "in" ? "PO / delivery note" : "Issued to / reason"} />
+        {type === "out" && (
+          <Field label="Issued to / Dept" hint="e.g. Class 5-A · Office · Lab">
+            <input className="input" value={form.issuedTo} onChange={(e) => set("issuedTo", e.target.value)} placeholder="Who received the stock" />
+          </Field>
+        )}
+        <Field label="Note (optional)" hint={type === "in" ? "e.g. PO #4521 · supplier delivery" : "Optional extra note"}>
+          <input className="input" value={form.note} onChange={(e) => set("note", e.target.value)} placeholder={type === "in" ? "PO / delivery note" : "Reason"} />
         </Field>
 
         {err && (
@@ -758,13 +994,19 @@ function ImportInventoryModal({ onClose, onSubmit }) {
   const fileRef = useRef(null);
 
   const FIELD_LABELS = {
+    id: "Stock ID",
     name: "Item name",
     category: "Category",
+    description: "Description",
     cls: "Class",
-    onHand: "On hand",
-    min: "Min stock",
-    unitPrice: "Unit price",
+    onHand: "Balance stock",
+    qtyPurchased: "Qty purchased",
+    issued: "Qty issued",
+    min: "Reorder level",
+    unitPrice: "Unit cost",
+    totalCost: "Total cost",
     supplier: "Supplier",
+    storageLocation: "Storage location",
   };
 
   async function handleFile(e) {
@@ -778,11 +1020,20 @@ function ImportInventoryModal({ onClose, onSubmit }) {
       const ws = wb.Sheets[wb.SheetNames[0]];
       const arr = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "", blankrows: false });
       if (!arr.length) throw new Error("Spreadsheet is empty");
-      const [head, ...body] = arr;
+      const headerIdx = findHeaderRow(arr);
+      const head = arr[headerIdx] || [];
       const headerArr = head.map((h) => String(h || "").trim());
+      const map = inferColumnMap(headerArr);
+      const nameIdx = map.name;
+      // Drop blank spreadsheet rows early — registers often pad to hundreds of empty lines.
+      const body = arr.slice(headerIdx + 1).filter((r) => {
+        if (!Array.isArray(r)) return false;
+        if (nameIdx != null) return String(r[nameIdx] ?? "").trim();
+        return r.some((c) => String(c ?? "").trim());
+      });
       setHeaders(headerArr);
       setRows(body);
-      setColMap(inferColumnMap(headerArr));
+      setColMap(map);
     } catch (ex) {
       setHeaders([]); setRows([]); setColMap({});
       setErr(ex.message || "Couldn't read the file");
@@ -794,12 +1045,14 @@ function ImportInventoryModal({ onClose, onSubmit }) {
 
   const previewRows = useMemo(() => {
     return rows.slice(0, 50).map((r) => ({
+      id: cell(r, "id"),
       name: cell(r, "name"),
       category: cell(r, "category", "asset"),
-      cls: cell(r, "cls", "all"),
-      onHand: Number(cell(r, "onHand", 0)) || 0,
-      min: Number(cell(r, "min", 0)) || 0,
-      unitPrice: Number(cell(r, "unitPrice", 0)) || 0,
+      description: cell(r, "description"),
+      onHand: parseMoneyCell(cell(r, "onHand", 0)),
+      qtyPurchased: parseMoneyCell(cell(r, "qtyPurchased", "")),
+      issued: parseMoneyCell(cell(r, "issued", 0)),
+      unitPrice: parseMoneyCell(cell(r, "unitPrice", 0)),
       supplier: cell(r, "supplier"),
     }));
   }, [rows, colMap]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -815,15 +1068,24 @@ function ImportInventoryModal({ onClose, onSubmit }) {
     if (colMap.name == null) { setErr("Map a column to “Item name” — it's required"); return; }
     setBusy(true); setErr("");
     try {
-      const payload = rows.map((r) => ({
-        name: cell(r, "name"),
-        category: cell(r, "category", "asset") || "asset",
-        cls: cell(r, "cls", "all") || "all",
-        onHand: Number(cell(r, "onHand", 0)) || 0,
-        min: Number(cell(r, "min", 0)) || 0,
-        unitPrice: Number(cell(r, "unitPrice", 0)) || 0,
-        supplier: cell(r, "supplier") || null,
-      })).filter((r) => r.name && String(r.name).trim());
+      const payload = rows.map((r) => {
+        const purchasedCell = cell(r, "qtyPurchased", "");
+        return {
+          id: cell(r, "id") || null,
+          name: cell(r, "name"),
+          category: cell(r, "category", "asset") || "asset",
+          description: cell(r, "description") || "",
+          cls: cell(r, "cls", "all") || "all",
+          onHand: parseMoneyCell(cell(r, "onHand", 0)),
+          qtyPurchased: purchasedCell === "" || purchasedCell == null ? undefined : parseMoneyCell(purchasedCell),
+          issued: parseMoneyCell(cell(r, "issued", 0)),
+          min: parseMoneyCell(cell(r, "min", 0)),
+          unitPrice: parseMoneyCell(cell(r, "unitPrice", 0)),
+          totalCost: parseMoneyCell(cell(r, "totalCost", 0)),
+          supplier: cell(r, "supplier") || null,
+          storageLocation: cell(r, "storageLocation") || "",
+        };
+      }).filter((r) => r.name && String(r.name).trim());
       if (!payload.length) throw new Error("No rows had an item name");
       const j = await onSubmit(payload);
       setResult(j);
@@ -833,20 +1095,19 @@ function ImportInventoryModal({ onClose, onSubmit }) {
 
   function downloadSample() {
     const data = [
-      ["Name", "Category", "Class", "On_Hand", "Min", "Unit_Price", "Supplier"],
-      ["Class 1 Notebook", "stationery", "1-A", 120, 20, 25, "Local Stores"],
-      ["Boys Uniform Shirt", "uniform", "all", 40, 10, 350, "Uniform Hub"],
-      ["Projector HDMI Cable", "computer", "all", 8, 2, 450, "Tech Mart"],
-      ["NCERT Maths Class 5", "book", "5-A", 30, 5, 120, "Book Depot"],
+      ["Stock ID", "Item Name", "Category", "Description / Specification", "Supplier / Vendor", "Unit Cost (₹)", "Total Cost (₹)", "Qty Purchased", "Qty Issued / Used", "Balance Stock", "Reorder Level", "Storage Location"],
+      ["SIS-001", "Fan", "Electronics", "", "", "", "", 44, "", 44, "", ""],
+      ["SIS-073", "TCL(Tv 43 inch)", "Electronics", "", "Darling digtal world", 61500, 184500, 3, "", 3, "", ""],
+      ["SIS-091", "KG(boys)", "Other", "Half Pant&Shirt", "NIVA uniform", 595, 26180, 44, "", 44, "", ""],
     ];
     const ws = XLSX.utils.aoa_to_sheet(data);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Inventory");
-    XLSX.writeFile(wb, "inventory-import-template.xlsx");
+    XLSX.utils.book_append_sheet(wb, ws, "Stock Register");
+    XLSX.writeFile(wb, "stock-register-import-template.xlsx");
   }
 
   return (
-    <ModalShell title="Import inventory" sub="Upload an Excel or CSV file — preview before importing" onClose={onClose} width={780}>
+    <ModalShell title="Import stock register" sub="Sanfort Excel layout · blank rows skipped · batch insert" onClose={onClose} width={860}>
       <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <input
@@ -911,12 +1172,13 @@ function ImportInventoryModal({ onClose, onSubmit }) {
                 <thead>
                   <tr>
                     <th>#</th>
+                    <th>Stock ID</th>
                     <th>Item</th>
                     <th>Category</th>
-                    <th>Class</th>
-                    <th className="num">On hand</th>
-                    <th className="num">Min</th>
-                    <th className="num">Price</th>
+                    <th className="num">Purchased</th>
+                    <th className="num">Issued</th>
+                    <th className="num">Balance</th>
+                    <th className="num">Unit ₹</th>
                     <th>Supplier</th>
                   </tr>
                 </thead>
@@ -926,11 +1188,15 @@ function ImportInventoryModal({ onClose, onSubmit }) {
                     return (
                       <tr key={i} style={ok ? undefined : { background: "var(--err-soft, #fbe1d8)" }}>
                         <td style={{ color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>{i + 1}</td>
-                        <td style={{ fontWeight: 500 }}>{String(r.name || "—")}</td>
+                        <td style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}>{String(r.id || "—")}</td>
+                        <td style={{ fontWeight: 500 }}>
+                          {String(r.name || "—")}
+                          {r.description ? <div style={{ fontSize: 10, color: "var(--ink-4)" }}>{String(r.description)}</div> : null}
+                        </td>
                         <td style={{ color: "var(--ink-3)" }}>{String(r.category || "asset")}</td>
-                        <td style={{ color: "var(--ink-3)" }}>{String(r.cls || "all")}</td>
+                        <td className="num">{r.qtyPurchased || "—"}</td>
+                        <td className="num">{r.issued || 0}</td>
                         <td className="num">{r.onHand}</td>
-                        <td className="num">{r.min}</td>
                         <td className="num">{r.unitPrice || "—"}</td>
                         <td style={{ color: "var(--ink-3)" }}>{String(r.supplier || "—")}</td>
                       </tr>

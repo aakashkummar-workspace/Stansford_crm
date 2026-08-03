@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { addInventoryItem, archiveInventoryItem, logAudit } from "@/lib/db";
+import { addInventoryItem, archiveInventoryItem, bulkArchiveInventoryItems, logAudit } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 
 export async function POST(req) {
@@ -21,14 +21,37 @@ export async function POST(req) {
 
 export async function DELETE(req) {
   const session = await getSession();
+  if (!session || (session.role !== "admin" && session.role !== "principal")) {
+    return NextResponse.json({ ok: false, error: "Only admin or principal can delete inventory" }, { status: 403 });
+  }
   const actor = session?.name || "Principal";
 
   let body; try { body = await req.json(); } catch { body = null; }
-  if (!body?.id) {
-    return NextResponse.json({ ok: false, error: "id required" }, { status: 400 });
+
+  // Bulk delete: { ids: ["SIS-001", ...] }
+  const ids = Array.isArray(body?.ids)
+    ? body.ids
+    : body?.id
+      ? [body.id]
+      : null;
+  if (!ids?.length) {
+    return NextResponse.json({ ok: false, error: "id or ids required" }, { status: 400 });
   }
-  const removed = await archiveInventoryItem(body.id);
-  if (!removed) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 });
-  try { await logAudit(actor, "Removed inventory item", `${removed.id} ${removed.name}`); } catch {}
-  return NextResponse.json({ ok: true });
+
+  try {
+    if (ids.length === 1) {
+      const removed = await archiveInventoryItem(ids[0]);
+      if (!removed) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 });
+      try { await logAudit(actor, "Removed inventory item", `${removed.id} ${removed.name}`); } catch {}
+      return NextResponse.json({ ok: true, removed: 1, ids: [removed.id] });
+    }
+
+    const result = await bulkArchiveInventoryItems(ids);
+    try {
+      await logAudit(actor, "Bulk deleted inventory", `${result.removed} item${result.removed === 1 ? "" : "s"}`);
+    } catch {}
+    return NextResponse.json({ ok: true, ...result });
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: e.message || "Delete failed" }, { status: 500 });
+  }
 }

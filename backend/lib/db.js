@@ -5344,35 +5344,86 @@ function fileAddRecipientList(filled) {
 }
 
 // ---------- inventory ----------
+// Parse Indian-style amounts: "61,500", "3,36,756", "595(per.pcs)", "100(each)".
+function parseInventoryNumber(raw) {
+  if (raw == null || raw === "") return 0;
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : 0;
+  const s = String(raw).trim();
+  if (!s) return 0;
+  const cleaned = s.replace(/,/g, "").replace(/[^\d.-].*$/, "").trim();
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function slugInventoryCategory(raw) {
+  const s = String(raw || "asset").trim().toLowerCase().slice(0, 48);
+  return s.replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "asset";
+}
+
+function normalizeStockId(raw) {
+  const id = String(raw || "").trim().toUpperCase();
+  if (!id) return null;
+  // Prefer school register IDs like SIS-001; also allow INV-… custom ids.
+  if (/^[A-Z]{2,8}-\d+[A-Z]?$/i.test(id)) return id;
+  return null;
+}
+
 export async function addInventoryItem(row) {
-  const id = row.id || `INV-${1000 + Math.floor(Math.random() * 8999)}`;
+  const customId = normalizeStockId(row.id || row.stockId);
+  const id = customId || `INV-${1000 + Math.floor(Math.random() * 8999)}`;
+  const onHand = Math.max(0, parseInventoryNumber(row.onHand));
+  const qtyPurchasedRaw = row.qtyPurchased != null && row.qtyPurchased !== ""
+    ? parseInventoryNumber(row.qtyPurchased)
+    : null;
+  // Balance is source of truth; if purchased omitted, default to balance
+  // (matches Excel rows where Purchased ≈ Balance and Issued is blank).
+  const qtyPurchased = Math.max(0, qtyPurchasedRaw != null ? qtyPurchasedRaw : onHand);
+  const issued = Math.max(0, parseInventoryNumber(row.issued));
+  let unitPrice = Math.max(0, parseInventoryNumber(row.unitPrice));
+  const totalCost = parseInventoryNumber(row.totalCost);
+  if (!unitPrice && totalCost > 0 && qtyPurchased > 0) {
+    unitPrice = Math.round((totalCost / qtyPurchased) * 100) / 100;
+  }
   const filled = {
     id,
     name: String(row.name || "").trim(),
-    // Categories used to be restricted to {book, uniform, asset}. Now any
-    // string up to 32 chars is accepted (lowercased + slugged) so the school
-    // can create their own buckets — "stationery", "lab", "sports" etc.
-    category: (() => {
-      const raw = String(row.category || "asset").trim().toLowerCase().slice(0, 32);
-      return raw.replace(/[^a-z0-9_-]+/g, "_") || "asset";
-    })(),
+    category: slugInventoryCategory(row.category),
     cls: row.cls || null,
-    onHand: Math.max(0, Number(row.onHand) || 0),
-    min: Math.max(0, Number(row.min) || 0),
-    issued: 0,
-    unitPrice: Math.max(0, Number(row.unitPrice) || 0),
-    supplier: row.supplier || null,
+    description: String(row.description || "").trim() || "",
+    storageLocation: String(row.storageLocation || "").trim() || "",
+    onHand,
+    min: Math.max(0, parseInventoryNumber(row.min)),
+    issued,
+    qtyPurchased,
+    unitPrice,
+    supplier: row.supplier ? String(row.supplier).trim() : null,
   };
   if (!filled.name) throw new Error("Item name is required");
 
   let saved;
   if (supabaseEnabled) {
-    const ins = await supabase.from("inventory").insert(toInventory(filled)).select().single();
+    let payload = toInventory(filled);
+    let ins = await supabase.from("inventory").insert(payload).select().single();
+    // Older DBs may lack new columns — retry without them.
+    if (ins.error && /(description|storage_location|qty_purchased)/i.test(ins.error.message)) {
+      const { description, storage_location, qty_purchased, ...legacy } = payload;
+      ins = await supabase.from("inventory").insert(legacy).select().single();
+    }
     if (ins.error) {
-      if (/inventory/i.test(ins.error.message)) {
-        saved = fileAddInventory(filled);
+      if (/duplicate|unique/i.test(ins.error.message) && customId) {
+        // SIS-005 appeared twice in the sheet — suffix and retry once.
+        filled.id = `${customId}B`;
+        payload = toInventory(filled);
+        ins = await supabase.from("inventory").insert(payload).select().single();
+      }
+      if (ins.error) {
+        if (/inventory/i.test(ins.error.message)) {
+          saved = fileAddInventory(filled);
+        } else {
+          throw new Error(ins.error.message);
+        }
       } else {
-        throw new Error(ins.error.message);
+        saved = fromInventory(ins.data);
       }
     } else {
       saved = fromInventory(ins.data);
@@ -5390,10 +5441,150 @@ export async function addInventoryItem(row) {
   // expense itself and only wants the inventory row — without it we'd
   // double-book the same purchase.
   if (!row.skipExpenseCascade) {
-    await maybeLogInventoryExpense(saved, row.recordedBy);
+    await maybeLogInventoryExpense(saved, row.recordedBy, saved.qtyPurchased || saved.onHand);
   }
 
   return saved;
+}
+
+// Build one inventory row object without writing (used by bulk import).
+function buildInventoryItem(row, usedIds) {
+  const customId = normalizeStockId(row.id || row.stockId);
+  let id = customId || `INV-${1000 + Math.floor(Math.random() * 8999)}`;
+  if (usedIds.has(id)) {
+    if (customId) {
+      let n = 2;
+      let candidate = `${customId}B`;
+      while (usedIds.has(candidate)) {
+        n += 1;
+        candidate = `${customId}${String.fromCharCode(64 + n)}`; // C, D, …
+      }
+      id = candidate;
+    } else {
+      while (usedIds.has(id)) id = `INV-${1000 + Math.floor(Math.random() * 8999)}`;
+    }
+  }
+  usedIds.add(id);
+
+  const onHand = Math.max(0, parseInventoryNumber(row.onHand));
+  const qtyPurchasedRaw = row.qtyPurchased != null && row.qtyPurchased !== ""
+    ? parseInventoryNumber(row.qtyPurchased)
+    : null;
+  const qtyPurchased = Math.max(0, qtyPurchasedRaw != null ? qtyPurchasedRaw : onHand);
+  const issued = Math.max(0, parseInventoryNumber(row.issued));
+  let unitPrice = Math.max(0, parseInventoryNumber(row.unitPrice));
+  const totalCost = parseInventoryNumber(row.totalCost);
+  if (!unitPrice && totalCost > 0 && qtyPurchased > 0) {
+    unitPrice = Math.round((totalCost / qtyPurchased) * 100) / 100;
+  }
+  const name = String(row.name || "").trim();
+  if (!name) return null;
+  return {
+    id,
+    name,
+    category: slugInventoryCategory(row.category),
+    cls: row.cls || "all",
+    description: String(row.description || "").trim() || "",
+    storageLocation: String(row.storageLocation || "").trim() || "",
+    onHand,
+    min: Math.max(0, parseInventoryNumber(row.min)),
+    issued,
+    qtyPurchased,
+    unitPrice,
+    supplier: row.supplier ? String(row.supplier).trim() : null,
+  };
+}
+
+// Fast path for Excel import: one (or few) batch inserts instead of N round-trips.
+export async function bulkAddInventoryItems(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const usedIds = new Set();
+  const filled = [];
+  const errors = [];
+  const catsSeen = new Set();
+
+  for (let i = 0; i < list.length; i++) {
+    const row = list[i];
+    if (!row || typeof row !== "object") {
+      errors.push({ row: i + 1, reason: "not an object" });
+      continue;
+    }
+    try {
+      const item = buildInventoryItem(row, usedIds);
+      if (!item) {
+        // Blank name — skip quietly (Excel sheets often have hundreds of empty rows).
+        continue;
+      }
+      filled.push({ item, row: i + 1 });
+      if (item.category) catsSeen.add(item.category);
+    } catch (e) {
+      errors.push({ row: i + 1, reason: e.message || "Invalid row" });
+    }
+  }
+
+  if (!filled.length) {
+    return { imported: [], errors, categories: [...catsSeen] };
+  }
+
+  const imported = [];
+
+  if (supabaseEnabled) {
+    const CHUNK = 100;
+    let useLegacy = false;
+    for (let i = 0; i < filled.length; i += CHUNK) {
+      const chunk = filled.slice(i, i + CHUNK);
+      let payloads = chunk.map(({ item }) => toInventory(item));
+      if (useLegacy) {
+        payloads = payloads.map(({ description, storage_location, qty_purchased, ...rest }) => rest);
+      }
+      let ins = await supabase.from("inventory").insert(payloads).select("id, name, category");
+      if (ins.error && !useLegacy && /(description|storage_location|qty_purchased)/i.test(ins.error.message)) {
+        useLegacy = true;
+        payloads = chunk.map(({ item }) => {
+          const full = toInventory(item);
+          const { description, storage_location, qty_purchased, ...rest } = full;
+          return rest;
+        });
+        ins = await supabase.from("inventory").insert(payloads).select("id, name, category");
+      }
+      if (ins.error) {
+        // Fall back to per-row for this chunk so one bad id doesn't kill the batch.
+        for (const { item, row } of chunk) {
+          try {
+            const saved = await addInventoryItem({ ...item, skipExpenseCascade: true });
+            imported.push({ row, id: saved.id, name: saved.name });
+          } catch (e) {
+            errors.push({ row, reason: e.message || "Failed to add" });
+          }
+        }
+      } else {
+        const data = ins.data || [];
+        for (let j = 0; j < chunk.length; j++) {
+          const saved = data[j];
+          imported.push({
+            row: chunk[j].row,
+            id: saved?.id || chunk[j].item.id,
+            name: saved?.name || chunk[j].item.name,
+          });
+        }
+      }
+    }
+  } else {
+    const db = fileRead();
+    if (!Array.isArray(db.inventory)) db.inventory = [];
+    for (const { item, row } of filled) {
+      db.inventory.unshift(item);
+      imported.push({ row, id: item.id, name: item.name });
+    }
+    fileWrite(db);
+  }
+
+  // Categories once at the end (not per row).
+  for (const cat of catsSeen) {
+    try { await addInventoryCategory(cat); } catch {}
+  }
+
+  return { imported, errors, categories: [...catsSeen] };
 }
 
 // Helper: write an expense row mirroring an inventory purchase. Called
@@ -5454,10 +5645,10 @@ export async function addInventoryCategory(rawCategory) {
   return slug;
 }
 
-export async function moveInventory({ itemId, type, qty, note, who }) {
+export async function moveInventory({ itemId, type, qty, note, who, issuedTo }) {
   if (!itemId) throw new Error("Item required");
   const t = type === "out" ? "out" : "in";
-  const q = Math.max(1, Number(qty) || 0);
+  const q = Math.max(0.001, parseInventoryNumber(qty));
   if (!q) throw new Error("Quantity must be positive");
 
   // Find current item (try Supabase first, then file).
@@ -5476,36 +5667,55 @@ export async function moveInventory({ itemId, type, qty, note, who }) {
   }
   if (!current) throw new Error("Item not found");
 
-  if (t === "out" && q > current.onHand) {
+  if (t === "out" && q > (Number(current.onHand) || 0) + 1e-9) {
     throw new Error(`Only ${current.onHand} on hand — can't issue ${q}`);
   }
 
-  const newOnHand = t === "in" ? current.onHand + q : current.onHand - q;
-  const newIssued = t === "out" ? (current.issued || 0) + q : (current.issued || 0);
+  const newOnHand = t === "in"
+    ? (Number(current.onHand) || 0) + q
+    : (Number(current.onHand) || 0) - q;
+  const newIssued = t === "out"
+    ? (Number(current.issued) || 0) + q
+    : (Number(current.issued) || 0);
+  const newPurchased = t === "in"
+    ? (Number(current.qtyPurchased) || 0) + q
+    : (Number(current.qtyPurchased) || 0);
   const moveId = `MOV-${Date.now().toString(36).toUpperCase()}`;
+  const issuedToVal = issuedTo ? String(issuedTo).trim() : null;
   const moveRow = {
     id: moveId, itemId, type: t, qty: q,
-    note: note || null, who: who || "—",
+    note: note || null, issuedTo: issuedToVal, who: who || "—",
     at: new Date().toISOString(),
   };
 
   if (backend === "supabase") {
-    let upd = await supabase.from("inventory")
-      .update({ on_hand: newOnHand, issued: newIssued })
-      .eq("id", itemId);
+    let body = { on_hand: newOnHand, issued: newIssued, qty_purchased: newPurchased };
+    let upd = await supabase.from("inventory").update(body).eq("id", itemId);
+    if (upd.error && /qty_purchased/i.test(upd.error.message)) {
+      const { qty_purchased, ...legacy } = body;
+      upd = await supabase.from("inventory").update(legacy).eq("id", itemId);
+    }
     if (upd.error) throw new Error(upd.error.message);
     // Movement log is best-effort — don't fail the move if the table is missing.
     try {
-      await supabase.from("inventory_movements").insert({
+      let mov = {
         id: moveId, item_id: itemId, type: t, qty: q,
-        note: moveRow.note, who: moveRow.who, at: moveRow.at,
-      });
+        note: moveRow.note, issued_to: issuedToVal, who: moveRow.who, at: moveRow.at,
+      };
+      let ins = await supabase.from("inventory_movements").insert(mov);
+      if (ins.error && /issued_to/i.test(ins.error.message)) {
+        delete mov.issued_to;
+        await supabase.from("inventory_movements").insert(mov);
+      }
     } catch {}
     // Cascade to expenses on a stock-IN movement.
     if (t === "in") {
       try { await maybeLogInventoryExpense(current, who, q); } catch {}
     }
-    return { item: { ...current, onHand: newOnHand, issued: newIssued }, movement: moveRow };
+    return {
+      item: { ...current, onHand: newOnHand, issued: newIssued, qtyPurchased: newPurchased },
+      movement: moveRow,
+    };
   }
 
   // File backend update
@@ -5514,7 +5724,12 @@ export async function moveInventory({ itemId, type, qty, note, who }) {
   if (!Array.isArray(db.movements)) db.movements = [];
   const idx = db.inventory.findIndex((r) => r.id === itemId);
   if (idx === -1) throw new Error("Item not found");
-  db.inventory[idx] = { ...db.inventory[idx], onHand: newOnHand, issued: newIssued };
+  db.inventory[idx] = {
+    ...db.inventory[idx],
+    onHand: newOnHand,
+    issued: newIssued,
+    qtyPurchased: newPurchased,
+  };
   db.movements.unshift(moveRow);
   if (db.movements.length > 100) db.movements.length = 100;
   fileWrite(db);
@@ -5545,6 +5760,40 @@ export async function archiveInventoryItem(id) {
   db.inventory.splice(idx, 1);
   fileWrite(db);
   return removed;
+}
+
+// Bulk archive/remove — one DB update for Supabase, one file write locally.
+export async function bulkArchiveInventoryItems(ids) {
+  const list = Array.from(new Set((Array.isArray(ids) ? ids : []).map((id) => String(id || "").trim()).filter(Boolean)));
+  if (!list.length) return { removed: 0, ids: [] };
+  if (list.length > 2000) throw new Error("Max 2000 items per bulk delete");
+
+  if (supabaseEnabled) {
+    const now = new Date().toISOString();
+    let upd = await supabase.from("inventory").update({ archived_at: now }).in("id", list);
+    if (upd.error && /archived_at/.test(upd.error.message)) {
+      upd = await supabase.from("inventory").delete().in("id", list);
+    }
+    if (upd.error) throw new Error(upd.error.message);
+    // Also mirror into file store so local fallback stays consistent.
+    try {
+      const db = fileRead();
+      if (Array.isArray(db.inventory) && db.inventory.length) {
+        const drop = new Set(list);
+        db.inventory = db.inventory.filter((r) => !drop.has(r.id));
+        fileWrite(db);
+      }
+    } catch {}
+    return { removed: list.length, ids: list };
+  }
+
+  const db = fileRead();
+  if (!Array.isArray(db.inventory)) db.inventory = [];
+  const drop = new Set(list);
+  const before = db.inventory.length;
+  db.inventory = db.inventory.filter((r) => !drop.has(r.id));
+  fileWrite(db);
+  return { removed: before - db.inventory.length, ids: list };
 }
 
 // ---------- library ----------

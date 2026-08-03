@@ -274,17 +274,21 @@ create table if not exists recipient_lists (
 alter table recipient_lists enable row level security;
 
 -- ---------- inventory ----------
--- Stock register for books / uniforms / assets. on_hand and issued are
--- updated by inventory_movements rows so we always have an audit trail.
+-- Stock register for books / uniforms / assets. on_hand (Balance) is the
+-- live source of truth; qty_purchased / issued track lifetime totals via
+-- inventory_movements.
 create table if not exists inventory (
   id text primary key,
   name text not null,
-  category text default 'asset',     -- 'book' | 'uniform' | 'asset'
+  category text default 'asset',     -- 'book' | 'uniform' | 'asset' | custom
   cls text,                          -- '5-A' / 'all' / null
-  on_hand int default 0,
-  min int default 0,
-  issued int default 0,
-  unit_price int default 0,
+  description text,
+  storage_location text,
+  on_hand numeric default 0,         -- Balance Stock
+  min numeric default 0,             -- Reorder Level
+  issued numeric default 0,          -- Qty Issued / Used (lifetime)
+  qty_purchased numeric default 0,   -- Qty Purchased (lifetime)
+  unit_price numeric default 0,
   supplier text,
   archived_at timestamptz,
   created_at timestamptz default now()
@@ -296,8 +300,9 @@ create table if not exists inventory_movements (
   id text primary key,
   item_id text not null,
   type text not null,                -- 'in' | 'out'
-  qty int not null,
+  qty numeric not null,
   note text,
+  issued_to text,                    -- Issued To / Dept (stock-out)
   who text,
   at timestamptz default now()
 );

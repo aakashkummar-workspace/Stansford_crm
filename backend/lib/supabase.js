@@ -218,20 +218,33 @@ export const fromRecipientList = (r) => r && {
 
 export const fromInventory = (r) => r && {
   id: r.id, name: r.name, category: r.category, cls: r.cls,
-  onHand: r.on_hand ?? 0, min: r.min ?? 0, issued: r.issued ?? 0,
-  unitPrice: r.unit_price ?? 0, supplier: r.supplier,
+  description: r.description ?? "",
+  storageLocation: r.storage_location ?? r.storageLocation ?? "",
+  onHand: r.on_hand != null ? Number(r.on_hand) : 0,
+  min: r.min != null ? Number(r.min) : 0,
+  issued: r.issued != null ? Number(r.issued) : 0,
+  qtyPurchased: r.qty_purchased != null ? Number(r.qty_purchased) : (r.qtyPurchased != null ? Number(r.qtyPurchased) : 0),
+  unitPrice: r.unit_price != null ? Number(r.unit_price) : 0,
+  supplier: r.supplier,
   archivedAt: r.archived_at ?? null,
 };
 export const toInventory = (r) => ({
   id: r.id, name: r.name, category: r.category ?? "asset",
   cls: r.cls ?? null,
-  on_hand: r.onHand ?? 0, min: r.min ?? 0, issued: r.issued ?? 0,
-  unit_price: r.unitPrice ?? 0, supplier: r.supplier ?? null,
+  description: r.description || null,
+  storage_location: r.storageLocation || r.storage_location || null,
+  on_hand: r.onHand ?? 0,
+  min: r.min ?? 0,
+  issued: r.issued ?? 0,
+  qty_purchased: r.qtyPurchased ?? r.qty_purchased ?? 0,
+  unit_price: r.unitPrice ?? 0,
+  supplier: r.supplier ?? null,
 });
 
 export const fromMovement = (r) => r && {
-  id: r.id, itemId: r.item_id, type: r.type, qty: r.qty,
-  note: r.note, who: r.who, at: r.at,
+  id: r.id, itemId: r.item_id, type: r.type, qty: r.qty != null ? Number(r.qty) : 0,
+  note: r.note, issuedTo: r.issued_to ?? r.issuedTo ?? null,
+  who: r.who, at: r.at,
 };
 
 export const fromStaff = (r) => r && {
