@@ -4,8 +4,9 @@ import Icon from "../Icon";
 import { KPI } from "../ui";
 import { money, moneyK, formatClassLabel } from "@/lib/format";
 import { openPrintWindow } from "./Reports";
+import QuickAccessRecent from "../QuickAccessRecent";
 
-export default function ScreenTrust({ E, setCurrent, role }) {
+export default function ScreenTrust({ E, setCurrent, role, session, onOpenItem }) {
   const isTrustOnly = role === "trust_accountant";
   // Defaults on every destructured array — when the trust accountant
   // role (or any role without the Schools feature) lands here, json
@@ -128,6 +129,8 @@ export default function ScreenTrust({ E, setCurrent, role }) {
           </button>
         </div>
       </div>
+
+      <QuickAccessRecent role={role} session={session} onOpenItem={onOpenItem} />
 
       {isTrustOnly && (() => {
         // Trust Accountant overview — strictly trust ledger numbers. No

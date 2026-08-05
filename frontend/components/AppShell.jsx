@@ -649,7 +649,7 @@ export default function AppShell({ initialData, session }) {
         style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: "32px 16px", background: "var(--bg-2)" }}
       >
         <MobileShell current={current} setCurrent={setCurrent} role={role}>
-          <Comp E={E} refresh={refresh} role={role} session={session} setCurrent={setCurrent} searchFocus={searchFocus} clearSearchFocus={clearSearchFocus} />
+          <Comp E={E} refresh={refresh} role={role} session={session} setCurrent={setCurrent} searchFocus={searchFocus} clearSearchFocus={clearSearchFocus} onOpenItem={(item) => { if (item?.screen) setCurrent(item.screen); setSearchFocus(item); }} />
         </MobileShell>
         <ViewToggle view={view} setView={(v) => setSetting("view", v)} />
         <Tweaks show={showTweaks} settings={settings} setSetting={setSetting} />
@@ -728,7 +728,7 @@ export default function AppShell({ initialData, session }) {
           </div>
         </div>
 
-        <Comp E={E} refresh={refresh} role={role} session={session} setCurrent={setCurrent} searchFocus={searchFocus} clearSearchFocus={clearSearchFocus} />
+        <Comp E={E} refresh={refresh} role={role} session={session} setCurrent={setCurrent} searchFocus={searchFocus} clearSearchFocus={clearSearchFocus} onOpenItem={(item) => { if (item?.screen) setCurrent(item.screen); setSearchFocus(item); }} />
 
         <BrandFooter />
       </div>

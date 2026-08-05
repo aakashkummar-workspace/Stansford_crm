@@ -5,6 +5,7 @@ import Icon from "../Icon";
 import { resolveSchool, downloadPdf } from "@/lib/export";
 import { formatClassLabel, getWorkingDays, getHolidayDates, attendanceFromLogs } from "@/backend/lib/format.js";
 import { KPI, AvatarChip } from "../ui";
+import QuickAccessRecent from "../QuickAccessRecent";
 
 // Build the last 8 week-start dates relative to today. Computed lazily on
 // the client (see useEffect in the component) so server- and client-rendered
@@ -110,7 +111,7 @@ function mergeSubjectLogs(existingLogs, editedLogs) {
   return Array.from(map.values());
 }
 
-export default function ScreenAcademic({ E, refresh, role, session }) {
+export default function ScreenAcademic({ E, refresh, role, session, onOpenItem }) {
   const school = resolveSchool(E?.SETTINGS);
   const actor  = session?.name || null;
   const classes = E.CLASSES;
@@ -602,6 +603,8 @@ export default function ScreenAcademic({ E, refresh, role, session }) {
           )}
         </div>
       </div>
+
+      <QuickAccessRecent role={role} session={session} onOpenItem={onOpenItem} />
 
       {/* Teacher picker — one chip per class+subject so each subject is logged separately. */}
       {role === "teacher" && teacherLogScopes.length > 0 && (

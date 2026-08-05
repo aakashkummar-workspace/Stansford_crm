@@ -5,7 +5,22 @@ import Icon from "../Icon";
 import { KPI } from "../ui";
 import { formatClassLabel } from "@/lib/format";
 
+// The periodic tests + term exams get a dedicated class-teacher grid (below);
+// they're also listed here so their type labels render across the exam
+// roster/reports.
+const PERIODIC_TESTS = [
+  { k: "periodic_1", label: "Periodic Test I" },
+  { k: "periodic_2", label: "Periodic Test II" },
+  { k: "periodic_3", label: "Periodic Test III" },
+  { k: "periodic_4", label: "Periodic Test IV" },
+];
+const TERM_EXAMS = [
+  { k: "term_1", label: "Term I" },
+  { k: "term_2", label: "Term II" },
+];
 const EXAM_TYPES = [
+  ...PERIODIC_TESTS,
+  ...TERM_EXAMS,
   { k: "unit_test",  label: "Unit test" },
   { k: "mid_term",   label: "Mid-term" },
   { k: "final",      label: "Final" },
@@ -196,6 +211,11 @@ export default function ScreenExams({ E, refresh, role, session }) {
         </div>
       )}
 
+      {/* Periodic tests — class-teacher subject-wise grid */}
+      {isStaff && (
+        <PeriodicTests E={E} role={role} session={session} showToast={showToast} refresh={refresh} />
+      )}
+
       {/* Exams roster */}
       <div className="card">
         <div className="card-head">
@@ -258,6 +278,179 @@ export default function ScreenExams({ E, refresh, role, session }) {
           showToast={showToast}
         />
       )}
+    </div>
+  );
+}
+
+// ---------- Periodic tests: class-teacher subject-wise grid ----------
+// Pick a class + test (I–IV), then enter every student's mark for every
+// subject in one grid. Backed by /api/exams/periodic (exams/exam_marks).
+function PeriodicTests({ E, role, session, showToast, refresh }) {
+  const isTeacher = role === "teacher";
+
+  // Class options: teachers → their assigned classes; others → all classes.
+  const classOptions = useMemo(() => {
+    if (isTeacher) {
+      const arr = Array.isArray(session?.linkedClasses) && session.linkedClasses.length
+        ? session.linkedClasses
+        : (session?.linkedId ? [session.linkedId] : []);
+      return [...new Set(arr)].filter(Boolean);
+    }
+    const out = [];
+    (E.CLASSES || []).forEach((c) => (c.sections || ["A"]).forEach((s) => out.push(`${c.n}-${s}`)));
+    return [...new Set(out)];
+  }, [isTeacher, session, E.CLASSES]);
+
+  const [cls, setCls] = useState(classOptions[0] || "");
+  const [test, setTest] = useState("periodic_1");
+  const [maxMarks, setMaxMarks] = useState(25);
+  const [grid, setGrid] = useState(null);   // { subjects, students, marks }
+  const [edits, setEdits] = useState({});   // { studentId: { subject: value } }
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => { if (!cls && classOptions.length) setCls(classOptions[0]); }, [classOptions]); // eslint-disable-line
+
+  async function loadGrid(targetCls = cls, targetTest = test) {
+    if (!targetCls || !targetTest) return;
+    setLoading(true); setEdits({});
+    try {
+      const r = await fetch(`/api/exams/periodic?cls=${encodeURIComponent(targetCls)}&test=${targetTest}`, { cache: "no-store" });
+      const j = await r.json();
+      if (j.ok) { setGrid(j); setMaxMarks(j.maxMarks || 25); } else { setGrid(null); }
+    } catch { setGrid(null); }
+    finally { setLoading(false); }
+  }
+  useEffect(() => { loadGrid(); }, [cls, test]); // eslint-disable-line
+
+  const cellValue = (sid, subject) => {
+    const e = edits[sid]?.[subject];
+    if (e !== undefined) return e;
+    const m = grid?.marks?.[sid]?.[subject];
+    return m == null ? "" : String(m);
+  };
+  const setCell = (sid, subject, val) =>
+    setEdits((p) => ({ ...p, [sid]: { ...(p[sid] || {}), [subject]: String(val).replace(/[^\d]/g, "") } }));
+
+  async function save() {
+    if (!grid) return;
+    const entries = [];
+    for (const sid of Object.keys(edits)) {
+      const stu = grid.students.find((s) => s.id === sid);
+      for (const sub of Object.keys(edits[sid])) {
+        const v = edits[sid][sub];
+        if (v === "") continue; // blank stays unrecorded
+        entries.push({ studentId: sid, studentName: stu?.name, subject: sub, score: Number(v) });
+      }
+    }
+    if (!entries.length) { showToast("No new marks to save", "err"); return; }
+    setSaving(true);
+    try {
+      const r = await fetch("/api/exams/periodic", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ cls, test, maxMarks, entries }),
+      });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
+      showToast(`Saved ${j.saved} mark${j.saved === 1 ? "" : "s"}`, "ok");
+      await loadGrid();
+      await refresh?.();
+    } catch (e) { showToast(e.message, "err"); }
+    finally { setSaving(false); }
+  }
+
+  const subjects = grid?.subjects || [];
+  const students = grid?.students || [];
+
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="card-head">
+        <div>
+          <div className="card-title">Test &amp; term marks</div>
+          <div className="card-sub">Class-teacher · enter Periodic Test I–IV and Term I / Term II marks subject-wise for every student</div>
+        </div>
+      </div>
+
+      <div style={{ padding: "10px 14px", display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end", borderBottom: "1px solid var(--rule)" }}>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: 0.4 }}>Class</span>
+          <select className="select" value={cls} onChange={(e) => setCls(e.target.value)} style={{ minWidth: 130 }}>
+            {classOptions.length === 0 && <option value="">No class assigned</option>}
+            {classOptions.map((c) => <option key={c} value={c}>{formatClassLabel(c)}</option>)}
+          </select>
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: 0.4 }}>Test</span>
+          <select className="select" value={test} onChange={(e) => setTest(e.target.value)} style={{ minWidth: 160 }}>
+            <optgroup label="Periodic tests">
+              {PERIODIC_TESTS.map((p) => <option key={p.k} value={p.k}>{p.label}</option>)}
+            </optgroup>
+            <optgroup label="Term exams">
+              {TERM_EXAMS.map((p) => <option key={p.k} value={p.k}>{p.label}</option>)}
+            </optgroup>
+          </select>
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: 0.4 }}>Max marks</span>
+          <input
+            className="input" type="number" min="1"
+            value={maxMarks}
+            onChange={(e) => setMaxMarks(Math.max(1, Math.floor(Number(e.target.value) || 1)))}
+            style={{ width: 90 }}
+          />
+        </label>
+        <button className="btn accent" onClick={save} disabled={saving || loading || !cls} style={{ marginLeft: "auto" }}>
+          <Icon name="check" size={13} />{saving ? "Saving…" : "Save marks"}
+        </button>
+      </div>
+
+      {loading ? (
+        <div className="empty" style={{ padding: 24 }}>Loading…</div>
+      ) : !cls ? (
+        <div className="empty" style={{ padding: 24 }}>Pick a class to start.</div>
+      ) : subjects.length === 0 ? (
+        <div className="empty" style={{ padding: 24 }}>No subjects set for {formatClassLabel(cls)} — add subjects to this class on the Classes screen first.</div>
+      ) : students.length === 0 ? (
+        <div className="empty" style={{ padding: 24 }}>No students in {formatClassLabel(cls)} yet.</div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table className="table" style={{ minWidth: 480 }}>
+            <thead>
+              <tr>
+                <th style={{ minWidth: 170 }}>Student</th>
+                {subjects.map((sub) => <th key={sub} className="num" style={{ minWidth: 74 }}>{sub}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {students.map((s) => (
+                <tr key={s.id}>
+                  <td>
+                    <div style={{ fontSize: 12.5, fontWeight: 500 }}>{s.name}</div>
+                    <div style={{ fontSize: 10, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>{s.id}</div>
+                  </td>
+                  {subjects.map((sub) => (
+                    <td key={sub} style={{ textAlign: "center" }}>
+                      <input
+                        className="input"
+                        inputMode="numeric"
+                        value={cellValue(s.id, sub)}
+                        onChange={(e) => setCell(s.id, sub, e.target.value)}
+                        placeholder="—"
+                        style={{ width: 56, textAlign: "center", padding: "4px 4px" }}
+                      />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div style={{ padding: "8px 14px", fontSize: 11, color: "var(--ink-4)" }}>
+        Marks out of {maxMarks}. Blank cells stay unrecorded. Saved marks feed the academic performance report.
+      </div>
     </div>
   );
 }

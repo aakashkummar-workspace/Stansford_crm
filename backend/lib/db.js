@@ -3858,7 +3858,20 @@ export async function listTeacherAttendance({ teacherId, fromDate, toDate } = {}
 // ---------- exams & marks ----------
 // An exam describes the assessment ("Unit Test 1 · 5-A · Maths" with max marks).
 // Marks are stored per (examId, studentId). One mark row per student per exam.
-const EXAM_TYPES = ["unit_test", "mid_term", "final", "assignment", "practical", "project"];
+const EXAM_TYPES = ["unit_test", "mid_term", "final", "assignment", "practical", "project", "periodic_1", "periodic_2", "periodic_3", "periodic_4", "term_1", "term_2"];
+// Assessments class teachers record subject-wise via the marks grid: the four
+// periodic tests (I–IV) and the two term exams (Term I / Term II).
+export const PERIODIC_TESTS = [
+  { k: "periodic_1", label: "Periodic Test I" },
+  { k: "periodic_2", label: "Periodic Test II" },
+  { k: "periodic_3", label: "Periodic Test III" },
+  { k: "periodic_4", label: "Periodic Test IV" },
+];
+export const TERM_EXAMS = [
+  { k: "term_1", label: "Term I" },
+  { k: "term_2", label: "Term II" },
+];
+const ASSESSMENT_LABEL = Object.fromEntries([...PERIODIC_TESTS, ...TERM_EXAMS].map((p) => [p.k, p.label]));
 
 export async function addExam({ name, type, cls, subject, maxMarks, date, createdBy }) {
   if (!name || !cls || !subject) throw new Error("name, cls and subject required");
@@ -3981,6 +3994,97 @@ export async function listMarks({ examId, studentId } = {}) {
 
 export const __EXAM_META = { TYPES: EXAM_TYPES };
 export const __TEACHER_ATTENDANCE_META = { STATUSES: TEACHER_ATTENDANCE_STATUSES };
+
+// ---------- periodic tests (I–IV): class-teacher, subject-wise grid ----------
+// The grid is backed by the existing exams/exam_marks model: each
+// (class × periodic test × subject) is one exam of type periodic_N, and each
+// student's cell is one exam_mark. Exams are auto-created on first save.
+
+// Subjects taught in a class (from the class record's `subjects`; falls back
+// to the global subject list so the grid is never empty).
+async function classSubjectsFor(cls, all) {
+  const n = Number(String(cls).split("-")[0]) || 0;
+  const classes = (all && all.classes) || (await readAllData().catch(() => ({}))).classes || [];
+  const row = (classes || []).find((c) => Number(c.n) === n);
+  let subs = (row && Array.isArray(row.subjects)) ? row.subjects.filter(Boolean) : [];
+  if (!subs.length) {
+    const list = await listSubjects().catch(() => []);
+    subs = (list || []).map((s) => s.name).filter(Boolean);
+  }
+  return subs;
+}
+
+async function updateExamMaxMarks(id, maxMarks) {
+  const mm = Math.max(1, Math.floor(Number(maxMarks) || 25));
+  if (supabaseEnabled) {
+    const up = await supabase.from("exams").update({ max_marks: mm }).eq("id", id);
+    if (up.error && !isSchemaMissError(up.error)) console.warn(`[db] exam max update failed: ${up.error.message}`);
+  }
+  const db = fileRead();
+  if (Array.isArray(db.exams)) {
+    const i = db.exams.findIndex((e) => e.id === id);
+    if (i !== -1) { db.exams[i].maxMarks = mm; fileWrite(db); }
+  }
+}
+
+// Load the grid for one class + test: subjects (columns), students (rows),
+// the current marks, and the max. Returns empty marks until any are saved.
+export async function getPeriodicGrid({ cls, test }) {
+  const type = EXAM_TYPES.includes(test) ? test : "periodic_1";
+  const all = await readAllData().catch(() => ({}));
+  const subjects = await classSubjectsFor(cls, all);
+  const students = (all.addedStudents || [])
+    .filter((s) => s.cls === cls && (s.status ?? "active") !== "archived")
+    .map((s) => ({ id: s.id, name: s.name, cls: s.cls, roll: s.roll || null }));
+  const exams = (await listExams({ cls })).filter((e) => e.type === type);
+  const examBySubject = {};
+  for (const e of exams) examBySubject[e.subject] = e.id;
+  const defaultMax = String(type).startsWith("term_") ? 100 : 25;
+  const maxMarks = exams.length ? Number(exams[0].maxMarks) || defaultMax : defaultMax;
+  const marks = {};
+  for (const e of exams) {
+    const ms = await listMarks({ examId: e.id });
+    for (const m of ms) {
+      if (!marks[m.studentId]) marks[m.studentId] = {};
+      marks[m.studentId][e.subject] = m.score;
+    }
+  }
+  return { cls, test: type, label: ASSESSMENT_LABEL[type] || "Assessment", subjects, maxMarks, students, marks, examBySubject };
+}
+
+// Save grid marks. `entries` = [{ studentId, studentName, subject, score }].
+// Ensures one exam per subject (creating/updating maxMarks), then upserts each
+// non-blank cell. Blank scores are skipped (leaves that cell unrecorded).
+export async function savePeriodicMarks({ cls, test, maxMarks, entries, actor = "Teacher" }) {
+  if (!cls) throw new Error("cls required");
+  const type = EXAM_TYPES.includes(test) ? test : "periodic_1";
+  const mm = Math.max(1, Math.floor(Number(maxMarks) || (String(type).startsWith("term_") ? 100 : 25)));
+  const label = ASSESSMENT_LABEL[type] || "Assessment";
+  const existing = (await listExams({ cls })).filter((e) => e.type === type);
+  const examBySubject = {};
+  for (const e of existing) examBySubject[e.subject] = e;
+  const subjects = [...new Set((entries || []).map((x) => x.subject).filter(Boolean))];
+  for (const sub of subjects) {
+    let ex = examBySubject[sub];
+    if (!ex) {
+      ex = await addExam({ name: `${label} · ${sub}`, type, cls, subject: sub, maxMarks: mm, date: new Date().toISOString().slice(0, 10), createdBy: actor });
+      examBySubject[sub] = ex;
+    } else if (Number(ex.maxMarks) !== mm) {
+      await updateExamMaxMarks(ex.id, mm);
+      ex.maxMarks = mm;
+    }
+  }
+  let saved = 0;
+  for (const e of (entries || [])) {
+    const ex = examBySubject[e.subject];
+    if (!ex) continue;
+    if (e.score === "" || e.score == null) continue;
+    const score = Math.max(0, Math.min(mm, Math.floor(Number(e.score) || 0)));
+    await saveMarks({ examId: ex.id, studentId: e.studentId, studentName: e.studentName || null, score, remarks: null, recordedBy: actor });
+    saved++;
+  }
+  return { ok: true, saved, subjects: subjects.length, maxMarks: mm };
+}
 
 // ---------- vehicle maintenance ----------
 // One log entry per maintenance event. Tied to a bus by `busNumber` (string —

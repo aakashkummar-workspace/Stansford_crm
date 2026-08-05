@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Icon from "../Icon";
 import { KPI, BarChart, LineBarChart, Ring, AvatarChip } from "../ui";
+import QuickAccessRecent from "../QuickAccessRecent";
 import { money, moneyK, formatClassLabel, feeTypeLabel, getWorkingDays, getHolidayDates, attendanceFromLogs } from "@/lib/format";
 
 // Deferred current-time state. Returns 0 during SSR + the first client
@@ -34,7 +35,7 @@ function useTodayDayName() {
   return day;
 }
 
-export default function ScreenDashboard({ E, role, session, refresh, setCurrent }) {
+export default function ScreenDashboard({ E, role, session, refresh, setCurrent, onOpenItem }) {
   const { KPIS, CLASS_STRENGTH, RECENT_FEES, PENDING_FEES, ACTIVITIES, ROUTES, INCOME_SERIES } = E;
   const isParent = role === "parent";
   const child = isParent ? (E.ADDED_STUDENTS || [])[0] : null;
@@ -151,6 +152,8 @@ export default function ScreenDashboard({ E, role, session, refresh, setCurrent 
           </div>
         </div>
       </div>
+
+      <QuickAccessRecent role={role} session={session} onOpenItem={onOpenItem} />
 
       {(() => {
         const studentCount = (E.ADDED_STUDENTS || []).length;

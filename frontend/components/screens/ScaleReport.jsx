@@ -65,7 +65,7 @@ const INDICATOR_LABELS = {
   "B.peer_tone":       "Peer tone",
 };
 
-export default function ScreenScaleReport({ E, role, session }) {
+export default function ScreenScaleReport({ E, role, session, searchFocus, clearSearchFocus }) {
   const isParent = role === "parent";
   const myClasses = Array.isArray(session?.linkedClasses) ? session.linkedClasses : [];
   const isTeacher = role === "teacher";
@@ -117,6 +117,33 @@ export default function ScreenScaleReport({ E, role, session }) {
       setStudentId(filteredRoster[0].id);
     }
   }, [filteredRoster, studentId]);
+
+  // Deep-link: when opened from the dashboard "Recently viewed" card (or global
+  // search), jump straight to the requested student instead of the first one.
+  useEffect(() => {
+    if (!searchFocus?.id) return;
+    const stu = roster.find((s) => s.id === searchFocus.id);
+    if (stu) { setClassFilter(stu.cls || ""); setStudentId(stu.id); }
+    clearSearchFocus?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchFocus, roster]);
+
+  // Track recently-viewed students (per user, in localStorage) so the dashboard
+  // quick-access card can offer one-tap return to a report.
+  useEffect(() => {
+    if (!studentId) return;
+    const stu = roster.find((s) => s.id === studentId);
+    if (!stu) return;
+    try {
+      const uid = session?.sub || session?.id || "anon";
+      const key = `scaleRecent:${uid}`;
+      const prev = JSON.parse(localStorage.getItem(key) || "[]");
+      const entry = { id: stu.id, name: stu.name, cls: stu.cls, ts: Date.now() };
+      const next = [entry, ...prev.filter((x) => x && x.id !== stu.id)].slice(0, 8);
+      localStorage.setItem(key, JSON.stringify(next));
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [studentId, roster]);
 
   async function reload() {
     if (!studentId) return;
