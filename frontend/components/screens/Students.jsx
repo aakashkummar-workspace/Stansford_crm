@@ -20,6 +20,9 @@ export default function ScreenStudents({ E, refresh, role, session, searchFocus,
   // they can't even see this screen on the current nav, but the gate is
   // defensive.
   const canEdit = role === "principal" || role === "admin" || role === "teacher";
+  // Teachers don't get to see (or export) parent contact numbers — those are
+  // hidden from the teacher login for privacy.
+  const isTeacher = role === "teacher";
 
   // ---------- state ----------
   const [classFilter, setClassFilter] = useState("All");
@@ -238,7 +241,8 @@ export default function ScreenStudents({ E, refresh, role, session, searchFocus,
         { key: "id",         label: "Admission",  width: "100px" },
         { key: "name",       label: "Name" },
         { key: "cls",        label: "Class",      align: "center", width: "60px" },
-        { key: "parent",     label: "Parent contact" },
+        // Parent contact is hidden from the teacher login.
+        ...(!isTeacher ? [{ key: "parent", label: "Parent contact" }] : []),
         { key: "transport",  label: "Transport",  align: "center", width: "80px" },
         { key: "fee",        label: "Fee",        align: "center", width: "70px" },
         { key: "attendance", label: "Attendance", align: "right",  width: "80px" },
@@ -406,7 +410,7 @@ export default function ScreenStudents({ E, refresh, role, session, searchFocus,
             items: roster.slice(0, 12).map((s) => ({
               label: s.name,
               value: formatClassLabel(s.cls),
-              sub: `${s.id} · ${s.parent}`,
+              sub: isTeacher ? s.id : `${s.id} · ${s.parent}`,
             })),
           }}
         />
@@ -590,7 +594,7 @@ export default function ScreenStudents({ E, refresh, role, session, searchFocus,
                 <th>Student</th>
                 <th>ID</th>
                 <th>Class</th>
-                <th>Parent</th>
+                {!isTeacher && <th>Parent</th>}
                 <th>Attendance</th>
                 <th>Fee</th>
                 <th>Transport</th>
@@ -600,7 +604,7 @@ export default function ScreenStudents({ E, refresh, role, session, searchFocus,
             </thead>
             <tbody>
               {visible.length === 0 && (
-                <tr><td colSpan={10} className="empty">No students match this filter.</td></tr>
+                <tr><td colSpan={isTeacher ? 9 : 10} className="empty">No students match this filter.</td></tr>
               )}
               {visible.map((s) => (
                 <tr
@@ -649,21 +653,23 @@ export default function ScreenStudents({ E, refresh, role, session, searchFocus,
                   </td>
                   <td style={{ fontFamily: "var(--font-mono)", fontSize: 11.5, color: "var(--ink-3)" }}>{s.id}</td>
                   <td><span className="chip">{formatClassLabel(s.cls)}</span></td>
-                  <td style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--ink-3)" }}>
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                      <span>{s.parent}</span>
-                      {canEdit && (
-                        <button
-                          className="icon-btn"
-                          style={{ width: 22, height: 22 }}
-                          onClick={() => setPhoneEditingOf(s)}
-                          title="Edit parent phone number"
-                        >
-                          <Icon name="pencil" size={11} />
-                        </button>
-                      )}
-                    </span>
-                  </td>
+                  {!isTeacher && (
+                    <td style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--ink-3)" }}>
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                        <span>{s.parent}</span>
+                        {canEdit && (
+                          <button
+                            className="icon-btn"
+                            style={{ width: 22, height: 22 }}
+                            onClick={() => setPhoneEditingOf(s)}
+                            title="Edit parent phone number"
+                          >
+                            <Icon name="pencil" size={11} />
+                          </button>
+                        )}
+                      </span>
+                    </td>
+                  )}
                   <td>
                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                       <div className="bar" style={{ width: 60 }}>
@@ -756,6 +762,7 @@ export default function ScreenStudents({ E, refresh, role, session, searchFocus,
       {profileOf && (
         <ProfileModal
           student={profileOf}
+          hideContact={isTeacher}
           onClose={() => setProfileOf(null)}
           onMessage={() => { setMessageStudent(profileOf); setProfileOf(null); }}
           onTC={() => { setTcReasonFor(profileOf); setProfileOf(null); }}
@@ -2081,7 +2088,7 @@ function ConfirmArchive({ student, onCancel, onConfirm }) {
   );
 }
 
-function ProfileModal({ student, onClose, onMessage, onTC }) {
+function ProfileModal({ student, onClose, onMessage, onTC, hideContact = false }) {
   // Derive a stable 28-day attendance pattern from the student id
   const heatmap = useMemo(() => {
     const seedChar = student.id.charCodeAt(student.id.length - 1) || 7;
@@ -2164,7 +2171,9 @@ function ProfileModal({ student, onClose, onMessage, onTC }) {
           {/* Left: Parent contact + transport */}
           <div style={{ padding: "20px 22px", borderRight: "1px solid var(--rule-2)", display: "flex", flexDirection: "column", gap: 16 }}>
             <ProfileSection title="Parent contact">
-              {student.parent && student.parent !== "—" ? (
+              {hideContact ? (
+                <div style={{ fontSize: 12.5, color: "var(--ink-3)" }}>Hidden</div>
+              ) : student.parent && student.parent !== "—" ? (
                 <>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5 }}>
                     <Icon name="phone" size={14} style={{ color: "var(--ink-3)" }} />

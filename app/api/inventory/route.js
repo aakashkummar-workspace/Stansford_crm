@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { addInventoryItem, archiveInventoryItem, bulkArchiveInventoryItems, logAudit } from "@/lib/db";
+import { addInventoryItem, updateInventoryItem, archiveInventoryItem, bulkArchiveInventoryItems, logAudit } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 
 export async function POST(req) {
@@ -16,6 +16,26 @@ export async function POST(req) {
     return NextResponse.json({ ok: true, item });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e.message || "Failed to add item" }, { status: 500 });
+  }
+}
+
+export async function PATCH(req) {
+  const session = await getSession();
+  if (!session || (session.role !== "admin" && session.role !== "principal")) {
+    return NextResponse.json({ ok: false, error: "Only admin or principal can edit inventory" }, { status: 403 });
+  }
+  const actor = session?.name || "Principal";
+
+  let body; try { body = await req.json(); } catch { body = null; }
+  if (!body?.id) {
+    return NextResponse.json({ ok: false, error: "id required" }, { status: 400 });
+  }
+  try {
+    const item = await updateInventoryItem(body);
+    try { await logAudit(actor, "Edited inventory item", `${item.id} ${item.name || ""}`.trim()); } catch {}
+    return NextResponse.json({ ok: true, item });
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: e.message || "Update failed" }, { status: 500 });
   }
 }
 

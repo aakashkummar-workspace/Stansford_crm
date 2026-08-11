@@ -8,6 +8,23 @@ import { resolveSchool, downloadPdf } from "@/lib/export";
 
 const DEMO_PARENT_PHONE = "+919876543210";
 
+// Customized bulk-reminder presets. `combo` = students who have BOTH fee types
+// pending (reminds both lines); `type` = a single fee type pending. `group`
+// rows are non-clickable section headers in the menu.
+const REMIND_PRESETS = [
+  { group: "Admission + another (both pending)" },
+  { label: "Admission + Term I",     combo: ["application", "term1"] },
+  { label: "Admission + Term II",    combo: ["application", "term2"] },
+  { label: "Admission + Term III",   combo: ["application", "term3"] },
+  { label: "Admission + Transport",  combo: ["application", "transport"] },
+  { group: "Single fee type pending" },
+  { label: "Admission fees only",    type: "application" },
+  { label: "Transport fees only",    type: "transport" },
+  { label: "Term I",                 type: "term1" },
+  { label: "Term II",                type: "term2" },
+  { label: "Term III",               type: "term3" },
+];
+
 // Escape HTML for the print-popup template (the receipt is built as a string
 // because it lives in a fresh window outside React's reach).
 function escapeHtml(s) {
@@ -71,6 +88,7 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
   const [classFilter, setClassFilter] = useState("All");
   const [feeTypeFilter, setFeeTypeFilter] = useState("All"); // All | term1 | term2 | term3 | transport | application
   const [filterOpen, setFilterOpen] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
   const [collectOpen, setCollectOpen] = useState(false);
   const [picked, setPicked] = useState(new Set());
 
@@ -96,6 +114,8 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
   const [structureOpen, setStructureOpen] = useState(false);
   const [remindConfirm, setRemindConfirm] = useState(false);
   const [remindBusy, setRemindBusy] = useState(false);
+  const [remindMenuOpen, setRemindMenuOpen] = useState(false);
+  const [bulkRemind, setBulkRemind] = useState(null); // { label, ids, students, amount } | null
 
   const handleAddFee = async (payload) => {
     const r = await fetch("/api/fees/add", {
@@ -199,6 +219,33 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
     pending: scopedPending.reduce((a, f) => a + f.amount, 0),
     overdue: scopedPending.filter((f) => f.overdue).reduce((a, f) => a + f.amount, 0),
   };
+
+  // Resolve a bulk-reminder preset into the pending fee lines it targets, plus
+  // a parent count + total amount for the confirm dialog. `combo` presets pick
+  // students with BOTH types pending and remind both their lines.
+  const resolveRemindPreset = (p) => {
+    const pend = scopedPending;
+    let lines;
+    if (p.combo) {
+      const [a, b] = p.combo;
+      const sa = new Set(pend.filter((f) => feeTypeOf(f) === a).map(studentOf));
+      const sb = new Set(pend.filter((f) => feeTypeOf(f) === b).map(studentOf));
+      const both = new Set([...sa].filter((s) => sb.has(s)));
+      lines = pend.filter((f) => both.has(studentOf(f)) && (feeTypeOf(f) === a || feeTypeOf(f) === b));
+    } else {
+      lines = pend.filter((f) => feeTypeOf(f) === p.type);
+    }
+    return {
+      ids: lines.map((f) => f.id),
+      students: new Set(lines.map(studentOf)).size,
+      amount: lines.reduce((s, f) => s + (Number(f.amount) || 0), 0),
+    };
+  };
+  const remindPresetRows = useMemo(
+    () => REMIND_PRESETS.map((p) => (p.group ? p : { ...p, ...resolveRemindPreset(p) })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [scopedPending]
+  );
 
   // After data refresh, if `selected` is paid and we're in "pick", advance to next pending
   useEffect(() => {
@@ -428,6 +475,66 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
     }
   };
 
+  // Scoped report generator — same branded PDF, but restricted to one payment
+  // status ("paid" / "unpaid") and/or one fee type (term1/term2/term3/
+  // application/transport…). Drives the "Generate report" preset menu so admin
+  // can pull e.g. "only Term I", "only paid", "only Transport" in one click.
+  const generateReport = ({ statusKey = "all", feeTypeKey = "all", label }) => {
+    let rows = all;
+    if (feeTypeKey !== "all") rows = rows.filter((f) => feeTypeOf(f) === feeTypeKey);
+    if (statusKey === "paid") rows = rows.filter((f) => f.status === "paid");
+    else if (statusKey === "unpaid") rows = rows.filter((f) => f.status === "pending" || f.status === "overdue");
+
+    if (rows.length === 0) { flash(`No records for "${label}"`, "bad"); return; }
+
+    const collected = rows.filter((f) => f.status === "paid").reduce((a, f) => a + (Number(f.amount) || 0), 0);
+    const outstanding = rows.filter((f) => f.status !== "paid").reduce((a, f) => a + (Number(f.amount) || 0), 0);
+    const studentCount = new Set(rows.map(studentOf).filter(Boolean)).size;
+
+    const opened = downloadPdf({
+      title: `Fees Report · ${label}`,
+      subtitle: `${rows.length} record${rows.length === 1 ? "" : "s"} · ${studentCount} student${studentCount === 1 ? "" : "s"}`,
+      school,
+      actor,
+      dateRange: "Current snapshot",
+      orientation: "landscape",
+      summary: [
+        { label: "Records",     value: rows.length },
+        { label: "Students",    value: studentCount },
+        { label: "Collected",   value: money(collected) },
+        { label: "Outstanding", value: money(outstanding) },
+      ],
+      columns: [
+        { key: "i",      label: "#",        align: "right",  width: "32px" },
+        { key: "id",     label: "Receipt / ID", width: "150px" },
+        { key: "name",   label: "Student" },
+        { key: "cls",    label: "Class",    align: "center", width: "60px" },
+        { key: "feeType",label: "Fee type" },
+        { key: "amount", label: "Amount",   align: "right" },
+        { key: "status", label: "Status",   align: "center", width: "80px" },
+        { key: "method", label: "Method",   align: "center", width: "80px" },
+        { key: "time",   label: "When",     align: "right",  width: "90px" },
+      ],
+      rows: rows.map((f, i) => ({
+        i: i + 1,
+        id: f.id,
+        name: f.name || "—",
+        cls: f.cls ? formatClassLabel(f.cls) : "—",
+        feeType: feeTypeLabel(f.feeType) || "—",
+        amount: money(f.amount || 0),
+        status: (f.status || "—").replace(/^./, (c) => c.toUpperCase()),
+        method: f.method || "—",
+        time: f.time || "—",
+      })),
+      filename: `${school.name.replace(/\s+/g, "-").toLowerCase()}-fees-${String(label).toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${new Date().toISOString().slice(0, 10)}`,
+    });
+    if (opened === false) {
+      flash("Pop-up blocked — please allow pop-ups for this site", "bad");
+    } else {
+      flash(`Opened report · ${label} · ${rows.length} rows`);
+    }
+  };
+
   const importStructure = () => {
     const input = document.createElement("input");
     input.type = "file";
@@ -555,9 +662,7 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
         <div class="trust">Sanvi Educational and Charitable Trust</div>
       </div>
     </div>
-    <div class="reg">Reg No: SIS/2026/${receiptNo}</div>
-    <div class="addr">No.45, MG Road, Chennai - 600 001.</div>
-    <div class="cell">Cell : 9876 543 210</div>
+    <div class="cell">Cell : 98765 43210</div>
 
     <div class="meta">
       <div class="row">
@@ -635,9 +740,23 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
           ) : (
             <>
               <button className="btn" onClick={importStructure}><Icon name="upload" size={13} />Import structure</button>
-              <button className="btn" onClick={exportPdf} title="Open a printable, branded PDF report">
-                <Icon name="download" size={13} />Export PDF
-              </button>
+              <div style={{ position: "relative" }}>
+                <button
+                  className={`btn ${reportOpen ? "accent" : ""}`}
+                  onClick={() => setReportOpen((v) => !v)}
+                  title="Generate a branded PDF report — full register or scoped to paid / unpaid / a fee type"
+                >
+                  <Icon name="download" size={13} />Generate report
+                  <Icon name="chevronDown" size={11} />
+                </button>
+                {reportOpen && (
+                  <ReportMenu
+                    onClose={() => setReportOpen(false)}
+                    onFull={() => { setReportOpen(false); exportPdf(); }}
+                    onPick={(preset) => { setReportOpen(false); generateReport(preset); }}
+                  />
+                )}
+              </div>
               <button className="btn" onClick={() => setAddFeeOpen(true)} title="Create a new pending fee item (Kit, ECA, Term I…)">
                 <Icon name="plus" size={13} />Add fee
               </button>
@@ -665,6 +784,28 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
                   />
                 )}
               </div>
+              <div style={{ position: "relative" }}>
+                <button
+                  className={`btn ${remindMenuOpen ? "accent" : ""}`}
+                  onClick={() => setRemindMenuOpen((v) => !v)}
+                  disabled={scopedPending.length === 0}
+                  title="Send a customized bulk reminder — by fee type or admission+term/transport combinations"
+                >
+                  <Icon name="megaphone" size={13} />Bulk reminder
+                  <Icon name="chevronDown" size={11} />
+                </button>
+                {remindMenuOpen && (
+                  <RemindMenu
+                    rows={remindPresetRows}
+                    onClose={() => setRemindMenuOpen(false)}
+                    onPick={(r) => {
+                      setRemindMenuOpen(false);
+                      if (!r.ids || r.ids.length === 0) { flash(`No parents pending for "${r.label}"`, "bad"); return; }
+                      setBulkRemind({ label: r.label, ids: r.ids, students: r.students, amount: r.amount });
+                    }}
+                  />
+                )}
+              </div>
               <button
                 className="btn"
                 onClick={() => {
@@ -674,7 +815,7 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
                 disabled={scopedPending.length === 0}
                 title={scopedPending.length === 0 ? "No pending fees" : `Reminds all ${scopedPending.length} parents with pending fees`}
               >
-                <Icon name="megaphone" size={13} />Remind overdue
+                <Icon name="megaphone" size={13} />Remind all
               </button>
             </>
           )}
@@ -1129,9 +1270,7 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
                       </div>
                     </div>
                     <div style={{ textAlign: "center", color: navy }}>
-                      <div style={{ fontWeight: 600, fontSize: 10 }}>Reg No: SIS/2026/{slNo}</div>
-                      <div style={{ fontWeight: 600, fontSize: 10 }}>No.45, MG Road, Chennai - 600 001.</div>
-                      <div style={{ fontWeight: 600, fontSize: 10 }}>Cell : 9876 543 210</div>
+                      <div style={{ fontWeight: 600, fontSize: 10 }}>Cell : 98765 43210</div>
                     </div>
 
                     <div style={{ marginTop: 8, fontSize: 11, color: navy, fontWeight: 600 }}>
@@ -1249,6 +1388,32 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
               await refresh?.();
             } catch (e) { flash(e.message, "bad"); }
             finally { setRemindBusy(false); setRemindConfirm(false); }
+          }}
+        />
+      )}
+
+      {bulkRemind && (
+        <ConfirmModal
+          title="Send bulk reminder?"
+          message={`${bulkRemind.label} — this reminds ${bulkRemind.students} parent${bulkRemind.students === 1 ? "" : "s"} (${money(bulkRemind.amount)} across ${bulkRemind.ids.length} fee line${bulkRemind.ids.length === 1 ? "" : "s"}). Continue?`}
+          confirmLabel="Yes, send"
+          cancelLabel="No"
+          busy={remindBusy}
+          onCancel={() => { if (!remindBusy) setBulkRemind(null); }}
+          onConfirm={async () => {
+            setRemindBusy(true);
+            try {
+              const r = await fetch("/api/fees/remind", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ ids: bulkRemind.ids }),
+              });
+              const j = await r.json();
+              if (!r.ok || !j.ok) throw new Error(j.error || "Failed");
+              flash(`${bulkRemind.label} · ${j.sent.length} reminder${j.sent.length === 1 ? "" : "s"} sent`, "ok");
+              await refresh?.();
+            } catch (e) { flash(e.message, "bad"); }
+            finally { setRemindBusy(false); setBulkRemind(null); }
           }}
         />
       )}
@@ -2102,6 +2267,136 @@ function FilterMenu({ value, classes = [], onPick, onClose }) {
           {o.label}
         </button>
       ))}
+    </div>
+  );
+}
+
+// Preset menu for the "Generate report" button. One-click scoped PDF reports —
+// full register, by payment status (paid / not paid), or by fee type
+// (Term I/II/III, Admission, Transport). Each item calls back with a filter
+// preset consumed by generateReport().
+function ReportMenu({ onFull, onPick, onClose }) {
+  useEffect(() => {
+    const onDoc = (e) => {
+      if (!e.target.closest(".report-menu") && !e.target.closest(".btn")) onClose();
+    };
+    setTimeout(() => document.addEventListener("click", onDoc), 0);
+    return () => document.removeEventListener("click", onDoc);
+  }, [onClose]);
+
+  const Section = ({ children }) => (
+    <div style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.08em", padding: "8px 10px 4px" }}>
+      {children}
+    </div>
+  );
+  const Item = ({ label, onClick }) => (
+    <button
+      onClick={onClick}
+      className="btn ghost"
+      style={{ width: "100%", justifyContent: "flex-start", height: 30, padding: "0 10px", fontSize: 12.5, color: "var(--ink)" }}
+    >
+      {label}
+    </button>
+  );
+
+  const byPayment = [
+    { label: "Paid — collected",       preset: { statusKey: "paid",   label: "Paid" } },
+    { label: "Not paid — outstanding", preset: { statusKey: "unpaid", label: "Not paid" } },
+  ];
+  const byType = [
+    { label: "Term I",         preset: { feeTypeKey: "term1",       label: "Term I" } },
+    { label: "Term II",        preset: { feeTypeKey: "term2",       label: "Term II" } },
+    { label: "Term III",       preset: { feeTypeKey: "term3",       label: "Term III" } },
+    { label: "Admission fees", preset: { feeTypeKey: "application", label: "Admission Fees" } },
+    { label: "Transport",      preset: { feeTypeKey: "transport",   label: "Transport" } },
+  ];
+
+  return (
+    <div
+      className="report-menu"
+      style={{
+        position: "absolute",
+        top: "calc(100% + 6px)",
+        left: 0,
+        zIndex: 50,
+        background: "var(--card)",
+        border: "1px solid var(--rule)",
+        borderRadius: 10,
+        boxShadow: "var(--shadow-lg)",
+        padding: 6,
+        minWidth: 220,
+        maxHeight: 380,
+        overflowY: "auto",
+      }}
+    >
+      <Item label="Full register — everything" onClick={onFull} />
+      <Section>By payment</Section>
+      {byPayment.map((o) => <Item key={o.label} label={o.label} onClick={() => onPick(o.preset)} />)}
+      <Section>By fee type</Section>
+      {byType.map((o) => <Item key={o.label} label={o.label} onClick={() => onPick(o.preset)} />)}
+    </div>
+  );
+}
+
+// Customized bulk-reminder menu. Each row shows the preset label + how many
+// parents it currently targets, so admin sees the reach before sending. Rows
+// with no pending parents are disabled. Group rows are section headers.
+function RemindMenu({ rows, onPick, onClose }) {
+  useEffect(() => {
+    const onDoc = (e) => {
+      if (!e.target.closest(".remind-menu") && !e.target.closest(".btn")) onClose();
+    };
+    setTimeout(() => document.addEventListener("click", onDoc), 0);
+    return () => document.removeEventListener("click", onDoc);
+  }, [onClose]);
+
+  return (
+    <div
+      className="remind-menu"
+      style={{
+        position: "absolute",
+        top: "calc(100% + 6px)",
+        right: 0,
+        zIndex: 50,
+        background: "var(--card)",
+        border: "1px solid var(--rule)",
+        borderRadius: 10,
+        boxShadow: "var(--shadow-lg)",
+        padding: 6,
+        minWidth: 260,
+        maxHeight: 420,
+        overflowY: "auto",
+      }}
+    >
+      {rows.map((r, i) =>
+        r.group ? (
+          <div key={`g-${i}`} style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.08em", padding: "8px 10px 4px" }}>
+            {r.group}
+          </div>
+        ) : (
+          <button
+            key={r.label}
+            onClick={() => onPick(r)}
+            disabled={!r.ids || r.ids.length === 0}
+            className="btn ghost"
+            style={{
+              width: "100%",
+              justifyContent: "space-between",
+              height: 34,
+              padding: "0 10px",
+              fontSize: 12.5,
+              color: "var(--ink)",
+              opacity: !r.ids || r.ids.length === 0 ? 0.45 : 1,
+            }}
+            title={!r.ids || r.ids.length === 0 ? "No parents pending" : `Remind ${r.students} parent${r.students === 1 ? "" : "s"}`}
+          >
+            <span>{r.label}</span>
+            <span style={{ fontSize: 11, color: "var(--ink-3)", fontFamily: "var(--font-mono)" }}>
+              {r.students || 0}
+            </span>
+          </button>
+        )
+      )}
     </div>
   );
 }

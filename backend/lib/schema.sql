@@ -294,6 +294,9 @@ create table if not exists inventory (
   created_at timestamptz default now()
 );
 create index if not exists idx_inventory_category on inventory (category);
+-- Free-text remarks per item (condition notes, specifications, etc.). Added
+-- after the initial release, so guard it for existing installs.
+alter table inventory add column if not exists remarks text;
 alter table inventory enable row level security;
 
 create table if not exists inventory_movements (

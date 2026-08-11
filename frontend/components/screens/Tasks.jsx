@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../Icon";
 import { KPI } from "../ui";
 
@@ -230,6 +230,148 @@ export default function ScreenTasks({ E, refresh, role, session }) {
     [id]: { ...(d[id] || { response: null, remarks: "" }), ...patch },
   }));
 
+  // Admin view: bucket the numbered rows into one group per assignee so each
+  // teacher renders as its own titled table.
+  const groups = useMemo(() => {
+    if (!isAdmin) return [];
+    const map = new Map();
+    for (const r of rows) {
+      const k = r.groupKey;
+      if (!map.has(k)) {
+        map.set(k, {
+          key: k,
+          name: r.task.assignedToName || "—",
+          role: r.task.assignedToRole,
+          tasks: [],
+        });
+      }
+      map.get(k).tasks.push(r);
+    }
+    return [...map.values()];
+  }, [rows, isAdmin]);
+
+  // One task row (<tr>). Shared by the admin per-teacher tables and the
+  // teacher's own list. `showAssignee` adds the assignee column (unused inside
+  // per-teacher tables where the whole table already belongs to one person).
+  function renderTaskRow(t, n, { showAssignee }) {
+    const pri = PRIORITIES.find((p) => p.k === t.priority) || PRIORITIES[1];
+    const overdue = t.dueDate && t.response !== "yes" && new Date(t.dueDate) < new Date(new Date().toISOString().slice(0, 10));
+    const draft = drafts[t.id] || { response: t.response || null, remarks: t.remarks || "" };
+    const dirty = draft.response !== (t.response || null) || (draft.remarks || "") !== (t.remarks || "");
+    return (
+      <tr key={t.id}>
+        <td style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 600, color: "var(--ink-2)", verticalAlign: "top" }}>
+          {n}.
+        </td>
+        <td style={{ verticalAlign: "top" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 12.5, fontWeight: 500 }}>{t.title}</span>
+            {isSelfCreated(t) && (
+              <span className="chip" style={{ fontSize: 9.5 }} title="Created by the assignee">Self</span>
+            )}
+          </div>
+          {t.description && (
+            <div
+              title={t.description}
+              style={{
+                fontSize: 11, color: "var(--ink-4)", marginTop: 2, lineHeight: 1.4,
+                maxWidth: 380, display: "-webkit-box", WebkitLineClamp: 2,
+                WebkitBoxOrient: "vertical", overflow: "hidden",
+              }}
+            >
+              {t.description}
+            </div>
+          )}
+          <div style={{ fontSize: 10, color: "var(--ink-4)", marginTop: 3, fontFamily: "var(--font-mono)" }}>
+            {t.id} · by {t.assignedByName}
+          </div>
+        </td>
+        {showAssignee && (
+          <td style={{ verticalAlign: "top" }}>
+            <div style={{ fontSize: 12, fontWeight: 500 }}>{t.assignedToName}</div>
+            <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{ROLE_LABEL[t.assignedToRole] || t.assignedToRole}</div>
+          </td>
+        )}
+        <td style={{ verticalAlign: "top" }}><span className={`chip ${pri.tone}`}><span className="dot" />{pri.label}</span></td>
+        <td style={{ fontSize: 11.5, color: overdue ? "var(--err, #b13c1c)" : "var(--ink-3)", whiteSpace: "nowrap", verticalAlign: "top" }}>
+          {t.dueDate || "—"}{overdue ? " · overdue" : ""}
+        </td>
+        <td style={{ verticalAlign: "top" }}>
+          {isAdmin ? (
+            <ResponseChip response={t.response} />
+          ) : (
+            <div className="segmented" style={{ width: "fit-content" }}>
+              <button
+                type="button"
+                className={draft.response === "yes" ? "active" : ""}
+                onClick={() => setDraft(t.id, { response: "yes" })}
+                style={draft.response === "yes" ? { background: "var(--ok-soft)", color: "var(--ok)" } : {}}
+              >
+                Yes
+              </button>
+              <button
+                type="button"
+                className={draft.response === "no" ? "active" : ""}
+                onClick={() => setDraft(t.id, { response: "no" })}
+                style={draft.response === "no" ? { background: "var(--bad-soft, #fbe1d8)", color: "var(--err, #b13c1c)" } : {}}
+              >
+                No
+              </button>
+            </div>
+          )}
+        </td>
+        <td style={{ minWidth: 180, verticalAlign: "top" }}>
+          {isAdmin ? (
+            <div style={{ fontSize: 12, color: t.remarks ? "var(--ink-2)" : "var(--ink-4)", maxWidth: 260, lineHeight: 1.4 }}>
+              {t.remarks || "—"}
+            </div>
+          ) : (
+            <input
+              className="input"
+              style={{ height: 30, fontSize: 12, minWidth: 160 }}
+              value={draft.remarks}
+              onChange={(e) => setDraft(t.id, { remarks: e.target.value })}
+              placeholder="Status remarks…"
+            />
+          )}
+        </td>
+        <td style={{ verticalAlign: "top" }}>
+          <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+            {!isAdmin && (
+              <button
+                className="btn sm accent"
+                onClick={() => handleSaveResponse(t)}
+                disabled={busyId === t.id || !dirty}
+                title="Save Yes/No and remarks for Admin"
+              >
+                <Icon name="check" size={11} />{busyId === t.id ? "Saving…" : "Save"}
+              </button>
+            )}
+            {(isAdmin || isSelfCreated(t)) && (
+              <button className="icon-btn" onClick={() => handleRemove(t)} disabled={busyId === t.id} title="Remove">
+                <Icon name="x" size={12} />
+              </button>
+            )}
+          </div>
+        </td>
+      </tr>
+    );
+  }
+
+  const taskTableHead = (
+    <thead>
+      <tr>
+        <th style={{ width: 48 }}>#</th>
+        <th>Task</th>
+        <th>Priority</th>
+        <th>Due</th>
+        <th>Yes / No</th>
+        <th>Remarks</th>
+        <th></th>
+      </tr>
+    </thead>
+  );
+
   return (
     <div className="page">
       <Toast msg={toast?.msg} tone={toast?.tone} onClose={() => setToast(null)} />
@@ -269,166 +411,82 @@ export default function ScreenTasks({ E, refresh, role, session }) {
         <KPI label="No" value={counts.no} sub="not done / declined" puck="rose" puckIcon="x" />
       </div>
 
-      <div className="card">
-        <div className="card-head">
-          <div>
-            <div className="card-title">{isAdmin ? "All tasks" : "Tasks for you"}</div>
-            <div className="card-sub">{rows.length} shown · numbered per {isAdmin ? "assignee" : "list"}</div>
-          </div>
-          <div className="card-actions">
-            <div className="segmented">
-              {[
-                { k: "all", label: "All" },
-                { k: "awaiting", label: "Awaiting" },
-                { k: "yes", label: "Yes" },
-                { k: "no", label: "No" },
-              ].map((f) => (
-                <button key={f.k} className={filter === f.k ? "active" : ""} onClick={() => setFilter(f.k)}>
-                  {f.label}
-                </button>
-              ))}
-            </div>
-          </div>
+      {/* Filter toolbar — shared across the per-teacher tables. */}
+      <div className="card" style={{ marginBottom: 14, padding: "10px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 12.5, color: "var(--ink-3)" }}>
+          {rows.length} task{rows.length === 1 ? "" : "s"} shown
+          {isAdmin && groups.length > 0 && ` · ${groups.length} ${groups.length === 1 ? "person" : "people"}`}
         </div>
-        <div style={{ overflowX: "auto" }}>
-          <table className="table">
-            <thead>
-              <tr>
-                <th style={{ width: 48 }}>#</th>
-                <th>Task</th>
-                {isAdmin && <th>Assigned to</th>}
-                <th>Priority</th>
-                <th>Due</th>
-                <th>Yes / No</th>
-                <th>Remarks</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.length === 0 && (
-                <tr><td colSpan={isAdmin ? 8 : 7} className="empty">
-                  {tasks.length === 0
-                    ? (isAdmin ? "No tasks yet. Click \"New task\" to assign work." : "No tasks have been assigned to you yet.")
-                    : "No matching tasks."}
-                </td></tr>
-              )}
-              {rows.map(({ task: t, n, groupKey }, idx) => {
-                const pri = PRIORITIES.find((p) => p.k === t.priority) || PRIORITIES[1];
-                const overdue = t.dueDate && t.response !== "yes" && new Date(t.dueDate) < new Date(new Date().toISOString().slice(0, 10));
-                const draft = drafts[t.id] || { response: t.response || null, remarks: t.remarks || "" };
-                const dirty = draft.response !== (t.response || null) || (draft.remarks || "") !== (t.remarks || "");
-                // Group header when admin view switches assignee
-                const prevKey = idx > 0 ? rows[idx - 1].groupKey : null;
-                const showGroup = isAdmin && groupKey !== prevKey;
-                return (
-                  <Fragment key={t.id}>
-                    {showGroup && (
-                      <tr>
-                        <td colSpan={8} style={{
-                          background: "var(--bg-2)", fontSize: 11, fontWeight: 600,
-                          color: "var(--ink-2)", letterSpacing: 0.03, padding: "8px 12px",
-                        }}>
-                          {t.assignedToName || "—"}
-                          <span style={{ fontWeight: 400, color: "var(--ink-4)", marginLeft: 8 }}>
-                            {ROLE_LABEL[t.assignedToRole] || t.assignedToRole}
-                          </span>
-                        </td>
-                      </tr>
-                    )}
-                    <tr>
-                      <td style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 600, color: "var(--ink-2)" }}>
-                        {n}.
-                      </td>
-                      <td>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                          <span style={{ fontSize: 12.5, fontWeight: 500 }}>{t.title}</span>
-                          {isSelfCreated(t) && (
-                            <span className="chip" style={{ fontSize: 9.5 }} title="Created by the assignee">Self</span>
-                          )}
-                        </div>
-                        {t.description && (
-                          <div style={{ fontSize: 11, color: "var(--ink-4)", marginTop: 2, lineHeight: 1.4, maxWidth: 360 }}>{t.description}</div>
-                        )}
-                        <div style={{ fontSize: 10, color: "var(--ink-4)", marginTop: 3, fontFamily: "var(--font-mono)" }}>
-                          {t.id} · by {t.assignedByName}
-                        </div>
-                      </td>
-                      {isAdmin && (
-                        <td>
-                          <div style={{ fontSize: 12, fontWeight: 500 }}>{t.assignedToName}</div>
-                          <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{ROLE_LABEL[t.assignedToRole] || t.assignedToRole}</div>
-                        </td>
-                      )}
-                      <td><span className={`chip ${pri.tone}`}><span className="dot" />{pri.label}</span></td>
-                      <td style={{ fontSize: 11.5, color: overdue ? "var(--err, #b13c1c)" : "var(--ink-3)", whiteSpace: "nowrap" }}>
-                        {t.dueDate || "—"}{overdue ? " · overdue" : ""}
-                      </td>
-                      <td>
-                        {isAdmin ? (
-                          <ResponseChip response={t.response} />
-                        ) : (
-                          <div className="segmented" style={{ width: "fit-content" }}>
-                            <button
-                              type="button"
-                              className={draft.response === "yes" ? "active" : ""}
-                              onClick={() => setDraft(t.id, { response: "yes" })}
-                              style={draft.response === "yes" ? { background: "var(--ok-soft)", color: "var(--ok)" } : {}}
-                            >
-                              Yes
-                            </button>
-                            <button
-                              type="button"
-                              className={draft.response === "no" ? "active" : ""}
-                              onClick={() => setDraft(t.id, { response: "no" })}
-                              style={draft.response === "no" ? { background: "var(--bad-soft, #fbe1d8)", color: "var(--err, #b13c1c)" } : {}}
-                            >
-                              No
-                            </button>
-                          </div>
-                        )}
-                      </td>
-                      <td style={{ minWidth: 180 }}>
-                        {isAdmin ? (
-                          <div style={{ fontSize: 12, color: t.remarks ? "var(--ink-2)" : "var(--ink-4)", maxWidth: 260, lineHeight: 1.4 }}>
-                            {t.remarks || "—"}
-                          </div>
-                        ) : (
-                          <input
-                            className="input"
-                            style={{ height: 30, fontSize: 12, minWidth: 160 }}
-                            value={draft.remarks}
-                            onChange={(e) => setDraft(t.id, { remarks: e.target.value })}
-                            placeholder="Status remarks…"
-                          />
-                        )}
-                      </td>
-                      <td>
-                        <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
-                          {!isAdmin && (
-                            <button
-                              className="btn sm accent"
-                              onClick={() => handleSaveResponse(t)}
-                              disabled={busyId === t.id || !dirty}
-                              title="Save Yes/No and remarks for Admin"
-                            >
-                              <Icon name="check" size={11} />{busyId === t.id ? "Saving…" : "Save"}
-                            </button>
-                          )}
-                          {(isAdmin || isSelfCreated(t)) && (
-                            <button className="icon-btn" onClick={() => handleRemove(t)} disabled={busyId === t.id} title="Remove">
-                              <Icon name="x" size={12} />
-                            </button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  </Fragment>
-                );
-              })}
-            </tbody>
-          </table>
+        <div className="segmented">
+          {[
+            { k: "all", label: "All" },
+            { k: "awaiting", label: "Awaiting" },
+            { k: "yes", label: "Yes" },
+            { k: "no", label: "No" },
+          ].map((f) => (
+            <button key={f.k} className={filter === f.k ? "active" : ""} onClick={() => setFilter(f.k)}>
+              {f.label}
+            </button>
+          ))}
         </div>
       </div>
+
+      {isAdmin ? (
+        groups.length === 0 ? (
+          <div className="card">
+            <div className="empty" style={{ padding: 24 }}>
+              {tasks.length === 0
+                ? "No tasks yet. Click \"New task\" to assign work."
+                : "No matching tasks."}
+            </div>
+          </div>
+        ) : (
+          groups.map((g) => (
+            <div className="card" key={g.key} style={{ marginBottom: 14 }}>
+              <div className="card-head">
+                <div>
+                  <div className="card-title">{g.name}</div>
+                  <div className="card-sub">
+                    {ROLE_LABEL[g.role] || g.role} · {g.tasks.length} task{g.tasks.length === 1 ? "" : "s"}
+                  </div>
+                </div>
+              </div>
+              <div style={{ overflowX: "auto" }}>
+                <table className="table">
+                  {taskTableHead}
+                  <tbody>
+                    {g.tasks.map(({ task, n }) => renderTaskRow(task, n, { showAssignee: false }))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))
+        )
+      ) : (
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">Tasks for you</div>
+              <div className="card-sub">{rows.length} shown</div>
+            </div>
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table className="table">
+              {taskTableHead}
+              <tbody>
+                {rows.length === 0 && (
+                  <tr><td colSpan={7} className="empty">
+                    {tasks.length === 0
+                      ? "No tasks have been assigned to you yet."
+                      : "No matching tasks."}
+                  </td></tr>
+                )}
+                {rows.map(({ task, n }) => renderTaskRow(task, n, { showAssignee: false }))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {showAdd && (
         <AddTaskModal

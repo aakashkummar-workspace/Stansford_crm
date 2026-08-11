@@ -77,6 +77,15 @@ function totalCostOf(it) {
   return bal * unit;
 }
 
+// Stock status from balance vs reorder level: Out (0) / Low (≤ reorder) / In.
+function stockStatusOf(it) {
+  const bal = Number(it.onHand) || 0;
+  const min = Number(it.min) || 0;
+  if (bal <= 0) return { key: "out", label: "Out of stock", cls: "bad" };
+  if (min > 0 && bal <= min) return { key: "low", label: "Low stock", cls: "warn" };
+  return { key: "in", label: "In stock", cls: "ok" };
+}
+
 // Pretty-print a category id ("lab_equipment" → "Lab equipment") for chips,
 // the filter strip, and the table.
 function prettyCat(c) {
@@ -142,7 +151,7 @@ export default function ScreenInventory({ E, refresh, role }) {
   const [classFilter, setClassFilter] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
-  const [showMove, setShowMove] = useState(null); // 'in' | 'out' | null
+  const [showMove, setShowMove] = useState(null); // 'in' | 'out' | 'return' | null
   const [movePreset, setMovePreset] = useState(null); // pre-selected itemId
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -279,7 +288,22 @@ export default function ScreenInventory({ E, refresh, role }) {
     const json = await r.json().catch(() => ({}));
     if (!r.ok || !json.ok) throw new Error(json.error || "Failed");
     setShowMove(null); setMovePreset(null);
-    showToast(`${json.item.name}: ${type === "in" ? "+" : "-"}${payload.qty} (now ${json.item.onHand} on hand)`, "ok");
+    const sign = (type === "in" || type === "return") ? "+" : "-";
+    showToast(`${json.item.name}: ${sign}${payload.qty} (now ${json.item.onHand} on hand)`, "ok");
+    await refresh?.();
+  }
+
+  // Save an item's remarks inline (best-effort; persists via the override map
+  // even before the DB column migration).
+  async function saveRemarks(id, remarks) {
+    const r = await fetch("/api/inventory", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id, remarks }),
+    });
+    const json = await r.json().catch(() => ({}));
+    if (!r.ok || !json.ok) { showToast(json.error || "Couldn't save remarks", "err"); return; }
+    showToast("Remarks saved", "ok");
     await refresh?.();
   }
 
@@ -362,7 +386,7 @@ export default function ScreenInventory({ E, refresh, role }) {
 
   function exportRegister() {
     const data = [
-      ["Stock ID", "Item Name", "Category", "Description / Specification", "Supplier / Vendor", "Unit Cost (₹)", "Total Cost (₹)", "Qty Purchased", "Qty Issued / Used", "Balance Stock", "Reorder Level", "Storage Location"],
+      ["Stock ID", "Item Name", "Category", "Description / Specification", "Supplier / Vendor", "Unit Cost (₹)", "Total Cost (₹)", "Qty Purchased", "Qty Issued / Used", "Balance Stock", "Reorder Level", "Stock Status", "Storage Location", "Remarks"],
       ...items.map((it) => [
         it.id,
         it.name,
@@ -375,7 +399,9 @@ export default function ScreenInventory({ E, refresh, role }) {
         it.issued ?? 0,
         it.onHand ?? 0,
         it.min ?? 0,
+        stockStatusOf(it).label,
         it.storageLocation || "",
+        it.remarks || "",
       ]),
     ];
     const ws = XLSX.utils.aoa_to_sheet(data);
@@ -415,11 +441,14 @@ export default function ScreenInventory({ E, refresh, role }) {
               <button className="btn" onClick={() => setShowImport(true)} title="Import Sanfort stock register Excel/CSV">
                 <Icon name="upload" size={13} />Import Excel
               </button>
-              <button className="btn" onClick={() => { setMovePreset(null); setShowMove("in"); }} disabled={items.length === 0}>
+              <button className="btn" onClick={() => { setMovePreset(null); setShowMove("in"); }} disabled={items.length === 0} title="Purchase / restock — increases balance & purchased">
                 <Icon name="upload" size={13} />Stock in
               </button>
-              <button className="btn" onClick={() => { setMovePreset(null); setShowMove("out"); }} disabled={items.length === 0}>
-                <Icon name="download" size={13} />Stock out
+              <button className="btn" onClick={() => { setMovePreset(null); setShowMove("out"); }} disabled={items.length === 0} title="Issue stock to a person / class">
+                <Icon name="download" size={13} />Issue
+              </button>
+              <button className="btn" onClick={() => { setMovePreset(null); setShowMove("return"); }} disabled={items.length === 0} title="Return issued stock">
+                <Icon name="upload" size={13} />Return
               </button>
               <button className="btn accent" onClick={() => setShowAdd(true)}>
                 <Icon name="plus" size={13} />Add item
@@ -570,7 +599,9 @@ export default function ScreenInventory({ E, refresh, role }) {
                   <th className="num">Issued</th>
                   <th className="num">Balance</th>
                   <th className="num">Reorder</th>
+                  <th>Status</th>
                   <th>Location</th>
+                  <th>Remarks</th>
                   {canEdit && <th></th>}
                 </tr>
               </thead>
@@ -613,15 +644,19 @@ export default function ScreenInventory({ E, refresh, role }) {
                       <td className="num" style={{ color: "var(--ink-3)" }}>{fmtQty(it.issued)}</td>
                       <td className="num" style={{ color: out ? "var(--err, #b13c1c)" : low ? "var(--warn, #b07a18)" : "inherit", fontWeight: out || low ? 600 : 400 }}>{fmtQty(it.onHand)}</td>
                       <td className="num" style={{ color: "var(--ink-3)" }}>{fmtQty(it.min)}</td>
+                      <td>
+                        {(() => { const s = stockStatusOf(it); return <span className={`chip ${s.cls}`}><span className="dot" />{s.label}</span>; })()}
+                      </td>
                       <td style={{ fontSize: 11.5, color: "var(--ink-3)", maxWidth: 100, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.storageLocation || "—"}</td>
+                      <td><RemarksCell item={it} canEdit={canEdit} onSave={saveRemarks} /></td>
                       {canEdit && (
                         <td>
                           <div style={{ display: "inline-flex", gap: 4, justifyContent: "flex-end" }}>
-                            <button className="btn sm" onClick={() => { setMovePreset(it.id); setShowMove("in"); }} title="Stock in">
-                              <Icon name="upload" size={11} />In
+                            <button className="btn sm" onClick={() => { setMovePreset(it.id); setShowMove("out"); }} title="Issue to a person / class" disabled={(it.onHand || 0) === 0}>
+                              <Icon name="download" size={11} />Issue
                             </button>
-                            <button className="btn sm" onClick={() => { setMovePreset(it.id); setShowMove("out"); }} title="Stock out" disabled={(it.onHand || 0) === 0}>
-                              <Icon name="download" size={11} />Out
+                            <button className="btn sm" onClick={() => { setMovePreset(it.id); setShowMove("return"); }} title="Return issued stock">
+                              <Icon name="upload" size={11} />Return
                             </button>
                             <button className="icon-btn" onClick={() => handleRemove(it)} title="Remove"><Icon name="x" size={12} /></button>
                           </div>
@@ -668,29 +703,30 @@ export default function ScreenInventory({ E, refresh, role }) {
             <div style={{ padding: "8px 14px 14px", display: "flex", flexDirection: "column", gap: 6 }}>
               {movements.slice(0, 8).map((m) => {
                 const item = itemMap[m.itemId];
-                const inMove = m.type === "in";
+                const positive = m.type === "in" || m.type === "return";
+                const label = m.type === "in" ? "Stocked in" : m.type === "return" ? "Returned" : "Issued";
                 return (
                   <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
                     <span style={{
                       display: "inline-flex", alignItems: "center", justifyContent: "center",
                       width: 22, height: 22, borderRadius: 5,
-                      background: inMove ? "var(--ok-soft, #dfecd8)" : "var(--err-soft, #fbe1d8)",
-                      color: inMove ? "var(--ok)" : "var(--err, #b13c1c)",
+                      background: positive ? "var(--ok-soft, #dfecd8)" : "var(--err-soft, #fbe1d8)",
+                      color: positive ? "var(--ok)" : "var(--err, #b13c1c)",
                     }}>
-                      <Icon name={inMove ? "upload" : "download"} size={11} />
+                      <Icon name={positive ? "upload" : "download"} size={11} />
                     </span>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 12, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                         {item?.name || m.itemId}
                       </div>
                       <div style={{ fontSize: 10.5, color: "var(--ink-4)" }}>
-                        {inMove ? "Stocked in" : "Issued"}
-                        {!inMove && m.issuedTo ? ` → ${m.issuedTo}` : ""}
+                        {label}
+                        {m.issuedTo ? ` ${m.type === "return" ? "from" : "→"} ${m.issuedTo}` : ""}
                         {" · "}{m.who}{m.note ? ` · ${m.note}` : ""}
                       </div>
                     </div>
-                    <div className="mono" style={{ fontSize: 12, fontWeight: 500, color: inMove ? "var(--ok)" : "var(--err, #b13c1c)" }}>
-                      {inMove ? "+" : "−"}{m.qty}
+                    <div className="mono" style={{ fontSize: 12, fontWeight: 500, color: positive ? "var(--ok)" : "var(--err, #b13c1c)" }}>
+                      {positive ? "+" : "−"}{m.qty}
                     </div>
                   </div>
                 );
@@ -736,7 +772,7 @@ function AddItemModal({ classes, existingCats, onClose, onSubmit, onSaveCategory
   const [form, setForm] = useState({
     id: "", name: "", category: "asset", cls: "all",
     description: "", storageLocation: "",
-    onHand: "", qtyPurchased: "", issued: "", min: "", unitPrice: "", supplier: "",
+    onHand: "", qtyPurchased: "", issued: "", min: "", unitPrice: "", supplier: "", remarks: "",
   });
   // When the user picks "Add new…" from the category dropdown we flip into a
   // text-entry mode so they can type whatever bucket they want.
@@ -768,6 +804,7 @@ function AddItemModal({ classes, existingCats, onClose, onSubmit, onSaveCategory
         min: parseMoneyCell(form.min),
         unitPrice: parseMoneyCell(form.unitPrice),
         supplier: form.supplier.trim() || null,
+        remarks: form.remarks.trim() || "",
       });
     } catch (ex) { setErr(ex.message || String(ex)); setBusy(false); }
   }
@@ -884,6 +921,9 @@ function AddItemModal({ classes, existingCats, onClose, onSubmit, onSaveCategory
         <Field label="Supplier / Vendor">
           <input className="input" value={form.supplier} onChange={(e) => set("supplier", e.target.value)} placeholder="e.g. NIVA uniform" />
         </Field>
+        <Field label="Remarks" hint="Condition, specification, or any note">
+          <input className="input" value={form.remarks} onChange={(e) => set("remarks", e.target.value)} placeholder="e.g. 2 pcs damaged · size L" />
+        </Field>
 
         {err && (
           <div style={{ background: "var(--err-soft, #fbe1d8)", color: "var(--err, #b13c1c)", padding: "9px 12px", borderRadius: 7, fontSize: 12 }}>
@@ -902,7 +942,16 @@ function AddItemModal({ classes, existingCats, onClose, onSubmit, onSaveCategory
   );
 }
 
+// type: "in" (Stock in / purchase) · "out" (Issue to a person/class) ·
+// "return" (issued stock comes back). Issue caps at current balance; Return
+// adds back and clears the issued count.
+const MOVE_META = {
+  in:     { title: "Stock in",  sub: "Increases Balance + Qty Purchased",       icon: "upload",   cta: "Stock in" },
+  out:    { title: "Issue",     sub: "Decreases Balance · increases Qty Issued", icon: "download", cta: "Issue" },
+  return: { title: "Return",    sub: "Increases Balance · decreases Qty Issued", icon: "upload",   cta: "Return" },
+};
 function MoveModal({ items, type, presetItemId, onClose, onSubmit }) {
+  const meta = MOVE_META[type] || MOVE_META.in;
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [form, setForm] = useState({
@@ -914,6 +963,7 @@ function MoveModal({ items, type, presetItemId, onClose, onSubmit }) {
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
   const selected = items.find((i) => i.id === form.itemId);
   const max = type === "out" ? (selected?.onHand || 0) : Infinity;
+  const holderField = type === "out" || type === "return";
 
   async function submit(e) {
     e.preventDefault();
@@ -926,19 +976,14 @@ function MoveModal({ items, type, presetItemId, onClose, onSubmit }) {
       await onSubmit({
         itemId: form.itemId,
         qty: q,
-        issuedTo: type === "out" ? (form.issuedTo.trim() || null) : null,
+        issuedTo: holderField ? (form.issuedTo.trim() || null) : null,
         note: form.note.trim() || null,
       });
     } catch (ex) { setErr(ex.message || String(ex)); setBusy(false); }
   }
 
   return (
-    <ModalShell
-      title={type === "in" ? "Stock in" : "Stock out"}
-      sub={type === "in" ? "Increases Balance + Qty Purchased" : "Decreases Balance · increases Qty Issued"}
-      onClose={onClose}
-      width={460}
-    >
+    <ModalShell title={meta.title} sub={meta.sub} onClose={onClose} width={460}>
       <form onSubmit={submit} className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <Field label="Item">
           <select className="select" value={form.itemId} onChange={(e) => set("itemId", e.target.value)}>
@@ -957,9 +1002,14 @@ function MoveModal({ items, type, presetItemId, onClose, onSubmit }) {
             onChange={(e) => set("qty", e.target.value)}
           />
         </Field>
-        {type === "out" && (
-          <Field label="Issued to / Dept" hint="e.g. Class 5-A · Office · Lab">
-            <input className="input" value={form.issuedTo} onChange={(e) => set("issuedTo", e.target.value)} placeholder="Who received the stock" />
+        {holderField && (
+          <Field label={type === "return" ? "Returned by / from" : "Issued to / Dept"} hint="e.g. Class 5-A · Office · Lab">
+            <input
+              className="input"
+              value={form.issuedTo}
+              onChange={(e) => set("issuedTo", e.target.value)}
+              placeholder={type === "return" ? "Who returned the stock" : "Who received the stock"}
+            />
           </Field>
         )}
         <Field label="Note (optional)" hint={type === "in" ? "e.g. PO #4521 · supplier delivery" : "Optional extra note"}>
@@ -975,11 +1025,66 @@ function MoveModal({ items, type, presetItemId, onClose, onSubmit }) {
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
           <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
           <button type="submit" className="btn accent" disabled={busy || !form.itemId}>
-            {busy ? "Saving…" : <><Icon name={type === "in" ? "upload" : "download"} size={13} />{type === "in" ? "Stock in" : "Stock out"}</>}
+            {busy ? "Saving…" : <><Icon name={meta.icon} size={13} />{meta.cta}</>}
           </button>
         </div>
       </form>
     </ModalShell>
+  );
+}
+
+// Inline-editable remarks cell. Read-only text for non-editors; click-to-edit
+// input for admin/principal that saves on blur / Enter.
+function RemarksCell({ item, canEdit, onSave }) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(item.remarks || "");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { if (!editing) setVal(item.remarks || ""); }, [item.remarks, editing]);
+
+  if (!canEdit) {
+    return (
+      <span style={{ fontSize: 11.5, color: item.remarks ? "var(--ink-3)" : "var(--ink-4)", display: "inline-block", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.remarks || ""}>
+        {item.remarks || "—"}
+      </span>
+    );
+  }
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        className="btn ghost sm"
+        onClick={() => setEditing(true)}
+        title={item.remarks || "Add remarks"}
+        style={{ height: 24, padding: "0 6px", fontSize: 11.5, maxWidth: 170, justifyContent: "flex-start", color: item.remarks ? "var(--ink-2)" : "var(--ink-4)" }}
+      >
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {item.remarks || "+ Add"}
+        </span>
+      </button>
+    );
+  }
+  const commit = async () => {
+    if (busy) return;
+    if ((val || "").trim() === (item.remarks || "").trim()) { setEditing(false); return; }
+    setBusy(true);
+    try { await onSave(item.id, val.trim()); setEditing(false); }
+    finally { setBusy(false); }
+  };
+  return (
+    <input
+      autoFocus
+      className="input"
+      value={val}
+      disabled={busy}
+      onChange={(e) => setVal(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") { e.preventDefault(); commit(); }
+        else if (e.key === "Escape") { setVal(item.remarks || ""); setEditing(false); }
+      }}
+      placeholder="Remarks…"
+      style={{ height: 26, fontSize: 11.5, minWidth: 130 }}
+    />
   );
 }
 

@@ -10,8 +10,8 @@ export async function POST(req) {
   if (!body?.itemId || !body?.qty) {
     return NextResponse.json({ ok: false, error: "itemId and qty required" }, { status: 400 });
   }
-  if (!["in", "out"].includes(body.type)) {
-    return NextResponse.json({ ok: false, error: "type must be 'in' or 'out'" }, { status: 400 });
+  if (!["in", "out", "return"].includes(body.type)) {
+    return NextResponse.json({ ok: false, error: "type must be 'in', 'out' or 'return'" }, { status: 400 });
   }
   try {
     const result = await moveInventory({
@@ -22,10 +22,11 @@ export async function POST(req) {
       issuedTo: body.issuedTo,
       who: actor,
     });
+    const actionLabel = body.type === "in" ? "Stock in" : body.type === "return" ? "Returned" : "Issued";
     try {
       await logAudit(
         actor,
-        body.type === "in" ? "Stock in" : "Stock out",
+        actionLabel,
         `${result.item.id} ${result.item.name} · ${body.qty}${body.issuedTo ? " → " + body.issuedTo : ""}${body.note ? " · " + body.note : ""}`,
       );
     } catch {}

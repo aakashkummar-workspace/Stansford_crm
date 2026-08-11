@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Icon from "../Icon";
 import { KPI, BarChart, LineBarChart, Ring, AvatarChip } from "../ui";
 import QuickAccessRecent from "../QuickAccessRecent";
+import AttendanceTodayCard from "../AttendanceTodayCard";
 import { money, moneyK, formatClassLabel, feeTypeLabel, getWorkingDays, getHolidayDates, attendanceFromLogs } from "@/lib/format";
 
 // Deferred current-time state. Returns 0 during SSR + the first client
@@ -169,6 +170,13 @@ export default function ScreenDashboard({ E, role, session, refresh, setCurrent,
         for (const s of (E.ADDED_STUDENTS || [])) {
           studentsByClass[s.cls] = (studentsByClass[s.cls] || 0) + 1;
         }
+        // Today's student attendance snapshot (from daily logs).
+        const attLogs = (E.DAILY_LOGS || []).filter((l) => l.date === todayIso);
+        const attPresent = attLogs.filter((l) => ["present", "late", "parent_drop"].includes(l.attendance)).length;
+        const attAbsent = attLogs.filter((l) => l.attendance === "absent").length;
+        const attLeave = attLogs.filter((l) => l.attendance === "leave").length;
+        const attMarked = attLogs.length;
+        const attPct = attMarked ? Math.round((attPresent / attMarked) * 100) : null;
         return (
           <div className="grid g-4" style={{ marginBottom: 20 }}>
             <KPI
@@ -202,8 +210,18 @@ export default function ScreenDashboard({ E, role, session, refresh, setCurrent,
               }}
             />
             <KPI
-              label="Attendance" value="—" sub="needs attendance data"
+              label="Student attendance"
+              value={attPct != null ? `${attPct}%` : "—"}
+              sub={attMarked ? `${attPresent}/${attMarked} present today` : "not marked yet"}
               puck="cream" puckIcon="check"
+              details={{
+                title: `Attendance today · ${attPresent}/${attMarked} present`,
+                sub: `${attAbsent} absent · ${attLeave} on leave · ${attMarked} marked`,
+                items: attLogs
+                  .filter((l) => l.attendance === "absent" || l.attendance === "leave")
+                  .slice(0, 12)
+                  .map((l) => ({ label: l.studentName || "—", value: l.attendance === "leave" ? "Leave" : "Absent", sub: formatClassLabel(l.cls), tone: "bad" })),
+              }}
             />
             <KPI
               label="Buses" value={(E.ROUTES || []).length || 0}
@@ -226,6 +244,8 @@ export default function ScreenDashboard({ E, role, session, refresh, setCurrent,
           </div>
         );
       })()}
+
+      {!isParent && <AttendanceTodayCard E={E} role={role} setCurrent={setCurrent} />}
 
       <div className="grid g-12" style={{ marginBottom: 20 }}>
         <div className="card col-12">

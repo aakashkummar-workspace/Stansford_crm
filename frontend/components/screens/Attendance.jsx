@@ -27,6 +27,9 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
     return <ParentAttendanceView E={E} />;
   }
 
+  // Parent contact numbers are hidden from the teacher login for privacy.
+  const isTeacher = role === "teacher";
+
   // Teachers can be assigned to several classes. Build the picker list from
   // session.linkedClasses (legacy session.linkedId still honoured).
   const teacherClassList = role === "teacher"
@@ -230,27 +233,50 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
         </div>
       </div>
 
-      {/* Mode tab strip — only relevant for principal / admin */}
-      {canMarkTeachers && (
-        <div className="card" style={{ marginBottom: 14, padding: "10px 14px", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-          <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 500, marginRight: 4 }}>Take attendance for:</span>
-          {[
-            { k: "students", label: "Students" },
-            { k: "teachers", label: "Teachers" },
-            { k: "correct",  label: "Correct past" },
-          ].map((t) => (
-            <button
-              key={t.k}
-              onClick={() => setMode(t.k)}
-              style={{
-                padding: "6px 14px", borderRadius: 999,
-                background: mode === t.k ? "var(--accent)" : "var(--bg-2)",
-                color: mode === t.k ? "#fff" : "var(--ink-2)",
-                border: 0, cursor: "pointer", fontSize: 12.5, fontWeight: 500,
-              }}
-            >{t.label}</button>
-          ))}
-        </div>
+      {/* Mode tab strip. Admin/principal get the full set; teachers get their
+          own two tabs (mark today + view history). */}
+      {(() => {
+        const tabs = canMarkTeachers
+          ? [
+              { k: "students", label: "Students" },
+              { k: "teachers", label: "Teachers" },
+              { k: "correct",  label: "Correct past" },
+              { k: "history",  label: "View history" },
+            ]
+          : [
+              { k: "students", label: "Mark today" },
+              { k: "history",  label: "View history" },
+            ];
+        return (
+          <div className="card" style={{ marginBottom: 14, padding: "10px 14px", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 500, marginRight: 4 }}>
+              {canMarkTeachers ? "Take attendance for:" : "Attendance:"}
+            </span>
+            {tabs.map((t) => (
+              <button
+                key={t.k}
+                onClick={() => setMode(t.k)}
+                style={{
+                  padding: "6px 14px", borderRadius: 999,
+                  background: mode === t.k ? "var(--accent)" : "var(--bg-2)",
+                  color: mode === t.k ? "#fff" : "var(--ink-2)",
+                  border: 0, cursor: "pointer", fontSize: 12.5, fontWeight: 500,
+                }}
+              >{t.label}</button>
+            ))}
+          </div>
+        );
+      })()}
+
+      {mode === "history" && (
+        <AttendanceHistoryPanel
+          E={E}
+          role={role}
+          isTeacher={isTeacher}
+          todayIso={todayIso}
+          teacherClassList={teacherClassList}
+          showToast={showToast}
+        />
       )}
 
       {mode === "teachers" && canMarkTeachers ? (
@@ -406,7 +432,7 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
                 <th style={{ width: 36 }}>#</th>
                 <th>Student</th>
                 <th>Roll · ID</th>
-                <th>Parent</th>
+                {!isTeacher && <th>Parent</th>}
                 <th style={{ width: 320 }}>Status</th>
                 <th>Reason (late · absent · leave)</th>
                 <th></th>
@@ -414,7 +440,7 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
             </thead>
             <tbody>
               {roster.length === 0 && (
-                <tr><td colSpan={7} className="empty">
+                <tr><td colSpan={isTeacher ? 6 : 7} className="empty">
                   No students in {formatClassLabel(`${cls}-${sec}`)} yet. Add students from the Students screen first.
                 </td></tr>
               )}
@@ -451,7 +477,7 @@ export default function ScreenAttendance({ E, refresh, role, session }) {
                     <td style={{ fontSize: 11, color: "var(--ink-3)", fontFamily: "var(--font-mono)" }}>
                       {String(s.roll).padStart(2, "0")} · {s.id}
                     </td>
-                    <td style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{s.parent}</td>
+                    {!isTeacher && <td style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{s.parent}</td>}
                     <td>
                       <div className="segmented" style={{ width: "fit-content", opacity: lockedForToday ? 0.7 : 1, flexWrap: "wrap" }}>
                         {STATE_PILLS.map((p) => {
@@ -1155,6 +1181,298 @@ function CorrectPastAttendancePanel({ E, todayIso, refresh, showToast }) {
           </table>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Read-only attendance viewer for teachers (and staff) — Day-wise (one date,
+// per-student status) or Month-wise (a full register grid + per-student
+// present/absent/% totals). Data comes from GET /api/academic/attendance,
+// which paginates past the bootstrap 1000-row cap.
+function AttendanceHistoryPanel({ E, role, isTeacher, todayIso, teacherClassList, showToast }) {
+  const CELL = {
+    present:     { t: "P",  bg: "var(--ok-soft, #dfecd8)",   fg: "var(--ok)" },
+    late:        { t: "L",  bg: "var(--warn-soft, #fff4e0)", fg: "var(--warn, #a05a00)" },
+    absent:      { t: "A",  bg: "var(--bad-soft, #fbe1d8)",  fg: "var(--err, #b13c1c)" },
+    leave:       { t: "Lv", bg: "var(--accent-soft)",        fg: "var(--accent-2)" },
+    parent_drop: { t: "P",  bg: "var(--ok-soft, #dfecd8)",   fg: "var(--ok)" },
+  };
+  const STATUS_LABEL = { present: "Present", late: "Late", absent: "Absent", leave: "Leave", parent_drop: "By parent" };
+  const DOW = ["S", "M", "T", "W", "T", "F", "S"];
+
+  // Selectable classes: teachers see their linked classes; others see all
+  // class-sections in the school.
+  const classKeys = useMemo(() => {
+    if (isTeacher) return teacherClassList || [];
+    return (E.CLASSES || []).flatMap((c) =>
+      ((c.sections && c.sections.length) ? c.sections : ["A"]).map((s) => `${c.n}-${s}`)
+    );
+  }, [E.CLASSES, isTeacher, teacherClassList]);
+
+  const [classKey, setClassKey] = useState(classKeys[0] || "");
+  const [view, setView] = useState("day");            // "day" | "month"
+  const [day, setDay] = useState(todayIso || "");
+  const [month, setMonth] = useState((todayIso || "").slice(0, 7)); // YYYY-MM
+  const [logs, setLogs] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (todayIso) {
+      setDay((d) => d || todayIso);
+      setMonth((m) => m || todayIso.slice(0, 7));
+    }
+  }, [todayIso]);
+  useEffect(() => {
+    if (!classKey && classKeys.length) setClassKey(classKeys[0]);
+  }, [classKeys, classKey]);
+
+  const range = useMemo(() => {
+    if (view === "day") return { from: day, to: day };
+    if (!month) return { from: "", to: "" };
+    const [y, m] = month.split("-").map(Number);
+    const lastDay = new Date(y, m, 0).getDate();
+    return { from: `${month}-01`, to: `${month}-${String(lastDay).padStart(2, "0")}` };
+  }, [view, day, month]);
+
+  const roster = useMemo(() => {
+    if (!classKey) return [];
+    return (E.ADDED_STUDENTS || [])
+      .filter((s) => s.cls === classKey)
+      .map((s, i) => ({ id: s.id, name: s.name, roll: i + 1 }));
+  }, [E.ADDED_STUDENTS, classKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      if (!classKey || !range.from || !range.to) { setLogs([]); return; }
+      setLoading(true);
+      try {
+        const r = await fetch(`/api/academic/attendance?cls=${encodeURIComponent(classKey)}&from=${range.from}&to=${range.to}`, { cache: "no-store" });
+        const j = await r.json();
+        if (!cancelled) {
+          if (j.ok) setLogs(j.logs || []);
+          else { setLogs([]); showToast?.(j.error || "Couldn't load attendance", "err"); }
+        }
+      } catch { if (!cancelled) setLogs([]); }
+      finally { if (!cancelled) setLoading(false); }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [classKey, range.from, range.to]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const byStudentDate = useMemo(() => {
+    const out = {};
+    for (const l of logs) {
+      if (!out[l.studentId]) out[l.studentId] = {};
+      out[l.studentId][l.date] = l.attendance || "present";
+    }
+    return out;
+  }, [logs]);
+
+  const monthDays = useMemo(() => {
+    if (view !== "month" || !month) return [];
+    const [y, m] = month.split("-").map(Number);
+    const lastDay = new Date(y, m, 0).getDate();
+    const out = [];
+    for (let d = 1; d <= lastDay; d++) {
+      const ds = `${month}-${String(d).padStart(2, "0")}`;
+      const dow = new Date(`${ds}T00:00:00`).getDay();
+      out.push({ d, ds, dow });
+    }
+    return out;
+  }, [view, month]);
+
+  const summarize = (sid) => {
+    const days = byStudentDate[sid] || {};
+    let present = 0, absent = 0, late = 0, leave = 0, parent = 0;
+    for (const v of Object.values(days)) {
+      if (v === "present") present++;
+      else if (v === "late") late++;
+      else if (v === "absent") absent++;
+      else if (v === "leave") leave++;
+      else if (v === "parent_drop") parent++;
+    }
+    const atSchool = present + late + parent;
+    const marked = atSchool + absent + leave;
+    return { atSchool, absent, marked, pct: marked ? Math.round((atSchool / marked) * 100) : 0 };
+  };
+
+  const dayTotals = useMemo(() => {
+    if (view !== "day") return null;
+    const t = { present: 0, late: 0, absent: 0, leave: 0, parent_drop: 0, unmarked: 0 };
+    for (const s of roster) {
+      const v = byStudentDate[s.id]?.[day];
+      if (v && t[v] != null) t[v]++; else t.unmarked++;
+    }
+    return t;
+  }, [view, roster, byStudentDate, day]);
+
+  return (
+    <div>
+      {/* Controls */}
+      <div className="card" style={{ marginBottom: 14, padding: "12px 16px", display: "flex", gap: 14, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>Class</span>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {classKeys.length === 0 && <span style={{ fontSize: 12, color: "var(--ink-4)" }}>No class assigned</span>}
+            {classKeys.map((k) => (
+              <button
+                key={k}
+                onClick={() => setClassKey(k)}
+                className="btn sm"
+                style={{
+                  background: classKey === k ? "var(--ink)" : "var(--card)",
+                  color: classKey === k ? "var(--bg)" : "var(--ink-2)",
+                  borderColor: classKey === k ? "var(--ink)" : "var(--rule)",
+                }}
+              >{formatClassLabel(k)}</button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>View</span>
+          <div className="segmented">
+            <button className={view === "day" ? "active" : ""} onClick={() => setView("day")}>Day-wise</button>
+            <button className={view === "month" ? "active" : ""} onClick={() => setView("month")}>Month-wise</button>
+          </div>
+        </div>
+
+        {view === "day" ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>Date</span>
+            <input type="date" className="input" value={day} max={todayIso || undefined} onChange={(e) => setDay(e.target.value)} style={{ height: 32, fontSize: 13, minWidth: 150 }} />
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>Month</span>
+            <input type="month" className="input" value={month} max={(todayIso || "").slice(0, 7) || undefined} onChange={(e) => setMonth(e.target.value)} style={{ height: 32, fontSize: 13, minWidth: 150 }} />
+          </div>
+        )}
+
+        <div style={{ marginLeft: "auto", fontSize: 11.5, color: "var(--ink-3)", textAlign: "right" }}>
+          {loading ? "Loading…" : `${roster.length} student${roster.length === 1 ? "" : "s"}`}
+        </div>
+      </div>
+
+      {/* Legend */}
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 12, fontSize: 11, color: "var(--ink-3)" }}>
+        {["present", "late", "absent", "leave"].map((k) => (
+          <span key={k} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+            <span style={{ width: 16, height: 16, borderRadius: 4, background: CELL[k].bg, color: CELL[k].fg, display: "grid", placeItems: "center", fontSize: 9, fontWeight: 700 }}>{CELL[k].t}</span>
+            {STATUS_LABEL[k]}
+          </span>
+        ))}
+      </div>
+
+      {view === "day" ? (
+        <>
+          {dayTotals && (
+            <div className="grid g-4" style={{ marginBottom: 14 }}>
+              <KPI label="Present" value={dayTotals.present + dayTotals.parent_drop} sub={dayTotals.parent_drop ? `${dayTotals.parent_drop} by parent` : "in class"} puck="mint" puckIcon="check" />
+              <KPI label="Late" value={dayTotals.late} sub="—" puck="peach" puckIcon="clock" />
+              <KPI label="Absent / leave" value={dayTotals.absent + dayTotals.leave} sub={`${dayTotals.absent} absent · ${dayTotals.leave} leave`} puck="rose" puckIcon="x" />
+              <KPI label="Not marked" value={dayTotals.unmarked} sub={day || "—"} puck="cream" puckIcon="clock" />
+            </div>
+          )}
+          <div className="card">
+            <div className="card-head">
+              <div>
+                <div className="card-title">{classKey ? formatClassLabel(classKey) : "—"} · {day || "(no date)"}</div>
+                <div className="card-sub">Day-wise attendance</div>
+              </div>
+            </div>
+            <div style={{ overflowX: "auto" }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th style={{ width: 36 }}>#</th>
+                    <th>Student</th>
+                    <th>Roll · ID</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {roster.length === 0 && <tr><td colSpan={4} className="empty">No students in this class.</td></tr>}
+                  {roster.map((s, i) => {
+                    const v = byStudentDate[s.id]?.[day];
+                    const c = v ? CELL[v] : null;
+                    return (
+                      <tr key={s.id}>
+                        <td style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-4)" }}>{String(i + 1).padStart(2, "0")}</td>
+                        <td>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <AvatarChip initials={(s.name || "?").split(" ").map((n) => n[0]).join("")} />
+                            <span style={{ fontSize: 12.5, fontWeight: 500 }}>{s.name}</span>
+                          </div>
+                        </td>
+                        <td style={{ fontSize: 11, color: "var(--ink-3)", fontFamily: "var(--font-mono)" }}>{String(s.roll).padStart(2, "0")} · {s.id}</td>
+                        <td>
+                          {v
+                            ? <span className="chip" style={{ background: c.bg, color: c.fg }}><span className="dot" />{STATUS_LABEL[v]}</span>
+                            : <span style={{ fontSize: 11.5, color: "var(--ink-4)" }}>Not marked</span>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      ) : (
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">{classKey ? formatClassLabel(classKey) : "—"} · {month || "(no month)"}</div>
+              <div className="card-sub">Month-wise register · P present · L late · A absent · Lv leave · P/A/% at the end</div>
+            </div>
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table className="table" style={{ fontSize: 11 }}>
+              <thead>
+                <tr>
+                  <th style={{ position: "sticky", left: 0, background: "var(--card)", zIndex: 1, minWidth: 150 }}>Student</th>
+                  {monthDays.map((d) => (
+                    <th key={d.d} style={{ textAlign: "center", padding: "4px 3px", color: d.dow === 0 ? "var(--err, #b13c1c)" : "var(--ink-3)" }}>
+                      <div style={{ fontSize: 10, fontWeight: 600 }}>{d.d}</div>
+                      <div style={{ fontSize: 8.5, color: "var(--ink-4)" }}>{DOW[d.dow]}</div>
+                    </th>
+                  ))}
+                  <th style={{ textAlign: "center" }} title="Present (incl. late / by parent)">P</th>
+                  <th style={{ textAlign: "center" }} title="Absent">A</th>
+                  <th style={{ textAlign: "center" }}>%</th>
+                </tr>
+              </thead>
+              <tbody>
+                {roster.length === 0 && <tr><td colSpan={monthDays.length + 4} className="empty">No students in this class.</td></tr>}
+                {roster.map((s) => {
+                  const sum = summarize(s.id);
+                  return (
+                    <tr key={s.id}>
+                      <td style={{ position: "sticky", left: 0, background: "var(--card)", zIndex: 1, fontWeight: 500, fontSize: 11.5, whiteSpace: "nowrap" }}>{s.name}</td>
+                      {monthDays.map((d) => {
+                        const v = byStudentDate[s.id]?.[d.ds];
+                        const c = v ? CELL[v] : null;
+                        return (
+                          <td key={d.d} style={{ textAlign: "center", padding: "2px 3px" }}>
+                            {c
+                              ? <span title={`${d.ds} · ${STATUS_LABEL[v]}`} style={{ display: "inline-grid", placeItems: "center", width: 18, height: 18, borderRadius: 4, background: c.bg, color: c.fg, fontSize: 9, fontWeight: 700 }}>{c.t}</span>
+                              : <span style={{ color: d.dow === 0 ? "var(--rule-2)" : "var(--ink-4)" }}>·</span>}
+                          </td>
+                        );
+                      })}
+                      <td style={{ textAlign: "center", fontWeight: 600, color: "var(--ok)" }}>{sum.atSchool}</td>
+                      <td style={{ textAlign: "center", fontWeight: 600, color: "var(--err, #b13c1c)" }}>{sum.absent}</td>
+                      <td style={{ textAlign: "center", fontWeight: 600 }}>{sum.marked ? `${sum.pct}%` : "—"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

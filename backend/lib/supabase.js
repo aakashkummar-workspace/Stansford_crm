@@ -226,6 +226,7 @@ export const fromInventory = (r) => r && {
   qtyPurchased: r.qty_purchased != null ? Number(r.qty_purchased) : (r.qtyPurchased != null ? Number(r.qtyPurchased) : 0),
   unitPrice: r.unit_price != null ? Number(r.unit_price) : 0,
   supplier: r.supplier,
+  remarks: r.remarks ?? "",
   archivedAt: r.archived_at ?? null,
 };
 export const toInventory = (r) => ({
@@ -239,6 +240,7 @@ export const toInventory = (r) => ({
   qty_purchased: r.qtyPurchased ?? r.qty_purchased ?? 0,
   unit_price: r.unitPrice ?? 0,
   supplier: r.supplier ?? null,
+  remarks: r.remarks ? String(r.remarks).trim() : null,
 });
 
 export const fromMovement = (r) => r && {

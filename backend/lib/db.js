@@ -331,10 +331,12 @@ export async function readAllData() {
       ],
       // Same union pattern for inventory + movements (works whether the
       // Supabase tables exist or writes fell back to the local file store).
-      inventory: [
+      // Remarks are merged from a file-store override map so they persist even
+      // before the `remarks` column migration is applied to Supabase.
+      inventory: applyInventoryRemarkOverrides([
         ...(inv || []).filter((r) => !r.archived_at).map(fromInventory),
         ...(fileInventorySafe()),
-      ],
+      ]),
       movements: [
         ...(mv || []).map(fromMovement),
         ...(fileMovementsSafe()),
@@ -3136,6 +3138,27 @@ function fileMovementsSafe() {
   } catch { return []; }
 }
 
+// Per-item remarks override map ({ [itemId]: "text" }). Backs remarks for
+// Supabase-hosted items until the `remarks` column exists; once it does, the
+// column value (non-empty) wins and this is just a mirror.
+function fileInventoryRemarks() {
+  try {
+    if (!fs.existsSync(DB_PATH)) return {};
+    const data = JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
+    return (data && data.inventoryRemarks && typeof data.inventoryRemarks === "object") ? data.inventoryRemarks : {};
+  } catch { return {}; }
+}
+function applyInventoryRemarkOverrides(list) {
+  const ov = fileInventoryRemarks();
+  if (!ov || !Object.keys(ov).length) return list;
+  return list.map((it) => {
+    const o = ov[it.id];
+    // Only fill when the row itself has no remarks — the real column wins.
+    if (o != null && !(it.remarks && String(it.remarks).trim())) return { ...it, remarks: o };
+    return it;
+  });
+}
+
 function fileBroadcastsSafe() {
   try {
     if (!fs.existsSync(DB_PATH)) return [];
@@ -5501,6 +5524,7 @@ export async function addInventoryItem(row) {
     qtyPurchased,
     unitPrice,
     supplier: row.supplier ? String(row.supplier).trim() : null,
+    remarks: String(row.remarks || "").trim() || "",
   };
   if (!filled.name) throw new Error("Item name is required");
 
@@ -5509,8 +5533,8 @@ export async function addInventoryItem(row) {
     let payload = toInventory(filled);
     let ins = await supabase.from("inventory").insert(payload).select().single();
     // Older DBs may lack new columns — retry without them.
-    if (ins.error && /(description|storage_location|qty_purchased)/i.test(ins.error.message)) {
-      const { description, storage_location, qty_purchased, ...legacy } = payload;
+    if (ins.error && /(description|storage_location|qty_purchased|remarks)/i.test(ins.error.message)) {
+      const { description, storage_location, qty_purchased, remarks, ...legacy } = payload;
       ins = await supabase.from("inventory").insert(legacy).select().single();
     }
     if (ins.error) {
@@ -5548,7 +5572,83 @@ export async function addInventoryItem(row) {
     await maybeLogInventoryExpense(saved, row.recordedBy, saved.qtyPurchased || saved.onHand);
   }
 
+  // Mirror remarks into the override map so they show for Supabase-hosted items
+  // even before the `remarks` column migration is applied.
+  if (filled.remarks && !(saved.remarks && String(saved.remarks).trim())) {
+    try {
+      const db = fileRead();
+      if (!db.inventoryRemarks || typeof db.inventoryRemarks !== "object") db.inventoryRemarks = {};
+      db.inventoryRemarks[saved.id] = filled.remarks;
+      fileWrite(db);
+    } catch {}
+    saved.remarks = filled.remarks;
+  }
+
   return saved;
+}
+
+// Edit an existing item's editable fields (Remarks, Rate, Reorder, Supplier,
+// etc.). Resilient to DBs that don't yet have the `remarks` column — the write
+// retries without it and still updates the other fields + the file mirror.
+const INVENTORY_EDITABLE = {
+  name: "name", category: "category", description: "description",
+  storageLocation: "storage_location", supplier: "supplier",
+  min: "min", unitPrice: "unit_price", remarks: "remarks",
+};
+export async function updateInventoryItem({ id, ...patch }) {
+  if (!id) throw new Error("id required");
+
+  // Build the snake_case DB body + a camelCase mirror for the file store.
+  const body = {};
+  const camelPatch = {};
+  for (const [camel, col] of Object.entries(INVENTORY_EDITABLE)) {
+    if (patch[camel] === undefined) continue;
+    let v = patch[camel];
+    if (camel === "min" || camel === "unitPrice") v = Math.max(0, parseInventoryNumber(v));
+    else if (typeof v === "string") v = v.trim();
+    camelPatch[camel] = v;
+    body[col] = v === "" ? null : v;
+  }
+  if (Object.keys(body).length === 0) throw new Error("Nothing to update");
+
+  let saved = null;
+  if (supabaseEnabled) {
+    let upd = await supabase.from("inventory").update(body).eq("id", id).select().single();
+    // Retry without columns the DB may not have yet (remarks/newer fields).
+    if (upd.error && /(remarks|storage_location|unit_price|description)/i.test(upd.error.message)) {
+      const stripped = { ...body };
+      ["remarks", "storage_location", "unit_price", "description"].forEach((c) => delete stripped[c]);
+      upd = Object.keys(stripped).length
+        ? await supabase.from("inventory").update(stripped).eq("id", id).select().single()
+        : { data: null, error: null };
+    }
+    if (upd.error && !/inventory/i.test(upd.error.message)) throw new Error(upd.error.message);
+    if (upd.data) saved = fromInventory(upd.data);
+  }
+
+  // Mirror to the file store (also the sole path when Supabase is off).
+  const db = fileRead();
+  let touched = false;
+  if (Array.isArray(db.inventory)) {
+    const i = db.inventory.findIndex((r) => r.id === id);
+    if (i !== -1) {
+      db.inventory[i] = { ...db.inventory[i], ...camelPatch };
+      touched = true;
+      if (!saved) saved = db.inventory[i];
+    }
+  }
+  // Persist remarks into the override map so they survive for Supabase-hosted
+  // items even before the `remarks` column migration is applied.
+  if (camelPatch.remarks !== undefined) {
+    if (!db.inventoryRemarks || typeof db.inventoryRemarks !== "object") db.inventoryRemarks = {};
+    const v = String(camelPatch.remarks || "").trim();
+    if (v) db.inventoryRemarks[id] = v; else delete db.inventoryRemarks[id];
+    touched = true;
+  }
+  if (touched) fileWrite(db);
+
+  if (saved) return { ...saved, ...camelPatch };
+  return { id, ...camelPatch };
 }
 
 // Build one inventory row object without writing (used by bulk import).
@@ -5749,9 +5849,13 @@ export async function addInventoryCategory(rawCategory) {
   return slug;
 }
 
+// Movement types:
+//   in     — purchase / restock: balance +, qty_purchased +, cascades to Expenses
+//   out    — issue to a person/dept: balance -, issued +
+//   return — issued stock comes back: balance +, issued - (no purchase, no expense)
 export async function moveInventory({ itemId, type, qty, note, who, issuedTo }) {
   if (!itemId) throw new Error("Item required");
-  const t = type === "out" ? "out" : "in";
+  const t = ["out", "return", "in"].includes(type) ? type : "in";
   const q = Math.max(0.001, parseInventoryNumber(qty));
   if (!q) throw new Error("Quantity must be positive");
 
@@ -5775,12 +5879,16 @@ export async function moveInventory({ itemId, type, qty, note, who, issuedTo }) 
     throw new Error(`Only ${current.onHand} on hand — can't issue ${q}`);
   }
 
-  const newOnHand = t === "in"
+  // in + return add to balance; out subtracts. return also clears the issued
+  // count (stock came back), while out increases it.
+  const newOnHand = (t === "in" || t === "return")
     ? (Number(current.onHand) || 0) + q
     : (Number(current.onHand) || 0) - q;
   const newIssued = t === "out"
     ? (Number(current.issued) || 0) + q
-    : (Number(current.issued) || 0);
+    : t === "return"
+      ? Math.max(0, (Number(current.issued) || 0) - q)
+      : (Number(current.issued) || 0);
   const newPurchased = t === "in"
     ? (Number(current.qtyPurchased) || 0) + q
     : (Number(current.qtyPurchased) || 0);
@@ -7290,6 +7398,48 @@ export async function createUser({ id, email, passwordHash, role, name, linkedId
 // leave_reason fields are touched — classwork / homework / handwriting /
 // behaviour / extra notes are preserved. Falls back to file backend the
 // same way upsertDailyLog does.
+// Read attendance-bearing daily logs for one class over a date range (used by
+// the teacher day-wise / month-wise attendance viewer). Paginates past the
+// 1000-row default so a full month is never truncated, unions any file-store
+// rows, and layers correction overlays on top.
+export async function listAttendance({ cls, from, to } = {}) {
+  let rows = [];
+  if (supabaseEnabled) {
+    const PAGE = 1000;
+    let start = 0;
+    for (;;) {
+      let q = supabase.from("daily_logs").select("*").order("date", { ascending: true });
+      if (cls)  q = q.eq("cls", cls);
+      if (from) q = q.gte("date", from);
+      if (to)   q = q.lte("date", to);
+      const r = await q.range(start, start + PAGE - 1);
+      if (r.error) {
+        if (!isSchemaMissError(r.error)) console.warn(`[db] daily_logs range: ${r.error.message}`);
+        break;
+      }
+      const chunk = r.data || [];
+      rows = rows.concat(chunk);
+      if (chunk.length < PAGE) break;
+      start += PAGE;
+    }
+  }
+  let logs = rows.map(fromDailyLog);
+  // Union any file-store logs (writes that fell back), filtered to the range.
+  try {
+    const db = fileRead();
+    let fileLogs = Array.isArray(db.dailyLogs) ? db.dailyLogs : [];
+    if (cls)  fileLogs = fileLogs.filter((l) => l.cls === cls);
+    if (from) fileLogs = fileLogs.filter((l) => (l.date || "") >= from);
+    if (to)   fileLogs = fileLogs.filter((l) => (l.date || "") <= to);
+    const seen = new Set(logs.map((l) => `${l.studentId}|${l.date}`));
+    for (const l of fileLogs) {
+      const k = `${l.studentId}|${l.date}`;
+      if (!seen.has(k)) { seen.add(k); logs.push(l); }
+    }
+  } catch {}
+  return applyDailyLogOverlays(logs);
+}
+
 export async function markAttendanceBulk({ date, cls, postedBy, marks }) {
   if (!date || !Array.isArray(marks) || marks.length === 0) {
     throw new Error("date and marks[] are required");

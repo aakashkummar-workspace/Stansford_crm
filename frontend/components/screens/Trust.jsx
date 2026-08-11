@@ -5,6 +5,7 @@ import { KPI } from "../ui";
 import { money, moneyK, formatClassLabel } from "@/lib/format";
 import { openPrintWindow } from "./Reports";
 import QuickAccessRecent from "../QuickAccessRecent";
+import AttendanceTodayCard from "../AttendanceTodayCard";
 
 export default function ScreenTrust({ E, setCurrent, role, session, onOpenItem }) {
   const isTrustOnly = role === "trust_accountant";
@@ -131,6 +132,8 @@ export default function ScreenTrust({ E, setCurrent, role, session, onOpenItem }
       </div>
 
       <QuickAccessRecent role={role} session={session} onOpenItem={onOpenItem} />
+
+      {!isTrustOnly && <AttendanceTodayCard E={E} role={role} setCurrent={setCurrent} />}
 
       {isTrustOnly && (() => {
         // Trust Accountant overview — strictly trust ledger numbers. No

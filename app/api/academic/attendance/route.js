@@ -1,6 +1,39 @@
 import { NextResponse } from "next/server";
-import { markAttendanceBulk, logAudit, recordTransportAttendance } from "@/lib/db";
+import { markAttendanceBulk, listAttendance, logAudit, recordTransportAttendance } from "@/lib/db";
 import { getSession } from "@/lib/auth";
+
+export const dynamic = "force-dynamic";
+
+// GET /api/academic/attendance?cls=5-A&from=2026-08-01&to=2026-08-31
+// Day-wise / month-wise attendance history for one class. Teachers may only
+// read classes they're linked to; parents are blocked (they have their own
+// child-scoped view).
+export async function GET(req) {
+  const session = await getSession();
+  if (!session) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
+  if (session.role === "parent") return NextResponse.json({ ok: false, error: "Not authorised" }, { status: 403 });
+
+  const url = new URL(req.url);
+  const cls = url.searchParams.get("cls");
+  const from = url.searchParams.get("from") || null;
+  const to = url.searchParams.get("to") || null;
+  if (!cls) return NextResponse.json({ ok: false, error: "cls required" }, { status: 400 });
+
+  if (session.role === "teacher") {
+    const linked = Array.isArray(session.linkedClasses) && session.linkedClasses.length
+      ? session.linkedClasses
+      : (session.linkedId ? [session.linkedId] : []);
+    if (linked.length && !linked.includes(cls)) {
+      return NextResponse.json({ ok: false, error: "Not your class" }, { status: 403 });
+    }
+  }
+  try {
+    const logs = await listAttendance({ cls, from, to });
+    return NextResponse.json({ ok: true, logs });
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: e.message || "Failed" }, { status: 500 });
+  }
+}
 
 export async function POST(req) {
   const session = await getSession();

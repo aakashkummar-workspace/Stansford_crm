@@ -172,7 +172,7 @@ export default function ScreenComplaints({ E, refresh, role, session }) {
 
       <div className="page-head">
         <div>
-          <div className="page-eyebrow">{isParent ? "Family · Raise ticket" : "CRM · Complaints"}</div>
+          <div className="page-eyebrow">{isParent ? "Family · Raise query" : "CRM · Complaints"}</div>
           <div className="page-title">
             {isParent ? <>Talk to <span className="amber">the school</span></> : <>Parent <span className="amber">complaints</span></>}
           </div>
@@ -184,7 +184,7 @@ export default function ScreenComplaints({ E, refresh, role, session }) {
         </div>
         <div className="page-actions">
           {isParent ? (
-            <button className="btn accent" onClick={() => setShowForm(true)}><Icon name="plus" size={13} />New ticket</button>
+            <button className="btn accent" onClick={() => setShowForm(true)}><Icon name="plus" size={13} />New query</button>
           ) : (
             <>
               <button className="btn" onClick={exportPdf} disabled={complaints.length === 0} title="Open a printable, branded PDF report">
@@ -260,8 +260,8 @@ export default function ScreenComplaints({ E, refresh, role, session }) {
       <div className="card">
         <div className="card-head">
           <div>
-            <div className="card-title">{isParent ? "Your tickets" : "Complaint queue"}</div>
-            <div className="card-sub">{isParent ? "Tickets you've raised, with their current status" : "Auto-routed by category"}</div>
+            <div className="card-title">{isParent ? "Your queries" : "Complaint queue"}</div>
+            <div className="card-sub">{isParent ? "Queries you've raised, with their current status" : "Auto-routed by category"}</div>
           </div>
           <div className="card-actions">
             <div className="segmented">
@@ -322,7 +322,7 @@ export default function ScreenComplaints({ E, refresh, role, session }) {
               {filtered.length === 0 && (
                 <tr><td colSpan={isParent ? 7 : 9} className="empty">
                   {isParent
-                    ? `You haven't raised any tickets yet. Click "New ticket" to start.`
+                    ? `You haven't raised any queries yet. Click "New query" to start.`
                     : "No complaints match this filter."}
                 </td></tr>
               )}
@@ -572,7 +572,7 @@ function NewTicketModal({ child, onClose, onSubmit }) {
       <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 520 }}>
         <div className="card-head">
           <div>
-            <div className="card-title">{type === "leave_request" ? "Submit a leave request" : "Raise a ticket"}</div>
+            <div className="card-title">{type === "leave_request" ? "Submit a leave request" : "Raise a query"}</div>
             <div className="card-sub">{child.name ? `${child.name} · ${formatClassLabel(child.cls)}` : "For your child"}</div>
           </div>
           <button className="icon-btn" onClick={onClose}><Icon name="x" size={14} /></button>
