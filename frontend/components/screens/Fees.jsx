@@ -2344,13 +2344,32 @@ function ReportMenu({ onFull, onPick, onClose }) {
     { label: "Paid — collected",       preset: { statusKey: "paid",   label: "Paid" } },
     { label: "Not paid — outstanding", preset: { statusKey: "unpaid", label: "Not paid" } },
   ];
+  // Each fee type can be pulled as All / Paid / Not-paid separately.
   const byType = [
-    { label: "Term I",         preset: { feeTypeKey: "term1",       label: "Term I" } },
-    { label: "Term II",        preset: { feeTypeKey: "term2",       label: "Term II" } },
-    { label: "Term III",       preset: { feeTypeKey: "term3",       label: "Term III" } },
-    { label: "Admission fees", preset: { feeTypeKey: "application", label: "Admission Fees" } },
-    { label: "Transport",      preset: { feeTypeKey: "transport",   label: "Transport" } },
+    { key: "term1",       label: "Term I" },
+    { key: "term2",       label: "Term II" },
+    { key: "term3",       label: "Term III" },
+    { key: "application", label: "Admission fees" },
+    { key: "transport",   label: "Transport" },
   ];
+
+  const Chip = ({ label, tone, onClick }) => (
+    <button
+      onClick={onClick}
+      className="btn ghost"
+      style={{ height: 24, padding: "0 8px", fontSize: 11, borderRadius: 6, color: tone || "var(--ink-2)", background: "var(--card-2)" }}
+    >
+      {label}
+    </button>
+  );
+  const TypeRow = ({ t }) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 10px" }}>
+      <span style={{ flex: 1, fontSize: 12.5, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.label}</span>
+      <Chip label="All" onClick={() => onPick({ feeTypeKey: t.key, label: t.label })} />
+      <Chip label="Paid" tone="var(--ok)" onClick={() => onPick({ feeTypeKey: t.key, statusKey: "paid", label: `${t.label} · Paid` })} />
+      <Chip label="Unpaid" tone="var(--err, #b13c1c)" onClick={() => onPick({ feeTypeKey: t.key, statusKey: "unpaid", label: `${t.label} · Not paid` })} />
+    </div>
+  );
 
   return (
     <div
@@ -2365,16 +2384,16 @@ function ReportMenu({ onFull, onPick, onClose }) {
         borderRadius: 10,
         boxShadow: "var(--shadow-lg)",
         padding: 6,
-        minWidth: 220,
-        maxHeight: 380,
+        minWidth: 300,
+        maxHeight: 420,
         overflowY: "auto",
       }}
     >
       <Item label="Full register — everything" onClick={onFull} />
-      <Section>By payment</Section>
+      <Section>By payment (all fee types)</Section>
       {byPayment.map((o) => <Item key={o.label} label={o.label} onClick={() => onPick(o.preset)} />)}
-      <Section>By fee type</Section>
-      {byType.map((o) => <Item key={o.label} label={o.label} onClick={() => onPick(o.preset)} />)}
+      <Section>By fee type · All / Paid / Unpaid</Section>
+      {byType.map((t) => <TypeRow key={t.key} t={t} />)}
     </div>
   );
 }
