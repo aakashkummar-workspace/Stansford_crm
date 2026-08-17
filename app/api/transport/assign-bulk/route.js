@@ -57,7 +57,7 @@ function isBlank(s) {
 export async function POST(req) {
   const session = await getSession();
   const role = session?.role;
-  const allowed = role === "admin" || role === "principal" || role === "school_accountant" || role === "teacher";
+  const allowed = role === "admin" || role === "principal" || role === "school_accountant" || role === "teacher" || role === "transport_manager";
   if (!allowed) {
     return NextResponse.json(
       { ok: false, error: "Only staff can bulk-assign transport." },

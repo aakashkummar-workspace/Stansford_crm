@@ -113,6 +113,7 @@ const DEFAULT_SCREEN_BY_ROLE = {
   parent: "dashboard",
   school_accountant: "dashboard",
   trust_accountant: "trust",
+  transport_manager: "transport",
 };
 
 const ROLE_LABEL = {
@@ -537,6 +538,26 @@ export default function AppShell({ initialData, session }) {
         SCALE_SESSIONS: [], SCALE_ENTRIES: [],
         SCALE_SUPPORT_PLANS: [], SCALE_DAILY_RITUALS: [],
         SUBJECTS: [],
+      };
+    }
+    if (role === "transport_manager") {
+      // Transport Manager: buses, routes, boarding + the student roster (to
+      // see who rides which bus). Everything financial / academic / HR is
+      // stripped. Keeps ROUTES, ROUTE_TEMPLATES, TRANSPORT_ATTENDANCE,
+      // MAINTENANCE_LOGS and ADDED_STUDENTS from the payload.
+      return {
+        ...data,
+        PENDING_FEES: [], RECENT_FEES: [], FEE_REMINDERS: [],
+        DAILY_LOGS: [], COMPLAINTS: [], ENQUIRIES: [],
+        EXAMS: [], MARKS: [], SUBJECTS: [], TIMETABLE: [], SYLLABUS: [],
+        INVENTORY: [], INVENTORY_CATEGORIES: [], LIBRARY: [], LOANS: [],
+        STAFF: [], TEACHER_ATTENDANCE: [], STAFF_AWARDS: [],
+        EXPENSES: [], DONORS: [], DONATION_PIPELINE: [], COMPLIANCE: [],
+        AI_BRIEF: [], SCHOOLS: [], ANOMALIES: [], AUDIT: [],
+        GOVERNMENT_DOCUMENTS: [], MEETINGS: [], VOLUNTEERS: [], TASKS: [],
+        SCALE_SESSIONS: [], SCALE_ENTRIES: [], SCALE_SUPPORT_PLANS: [], SCALE_DAILY_RITUALS: [],
+        STUDENT_ACTIVITIES: [], LEAVE_REQUESTS: [], REMARKS_REWARDS: [],
+        TC_REQUESTS: [], CUSTOM_ROLES: [], USERS: [],
       };
     }
     return data;

@@ -837,6 +837,7 @@ const CANONICAL_ROLE_OPTIONS = [
   { k: "teacher",           label: "Teacher" },
   { k: "school_accountant", label: "School Accountant" },
   { k: "trust_accountant",  label: "Trust Accountant" },
+  { k: "transport_manager", label: "Transport Manager" },
   { k: "parent",            label: "Parent" },
 ];
 

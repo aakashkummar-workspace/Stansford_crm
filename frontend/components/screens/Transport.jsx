@@ -22,7 +22,7 @@ function Toast({ msg, tone, onClose }) {
 export default function ScreenTransport({ E, refresh, role, session }) {
   const school = resolveSchool(E?.SETTINGS);
   const actor  = session?.name || null;
-  const canEdit = role === "principal" || role === "admin";
+  const canEdit = role === "principal" || role === "admin" || role === "transport_manager";
   const isParent = role === "parent";
   const isTeacher = role === "teacher";
   // True when the signed-in user is allowed to drive the bus-progress

@@ -201,6 +201,14 @@ export const NAV_BY_ROLE = {
     { section: "Account" },
     { id: "account",    label: "My account",    icon: "user" },
   ],
+  // Transport Manager — buses, routes, and boarding only. No fees, exams,
+  // staff, or student admin.
+  transport_manager: [
+    { section: "Transport" },
+    { id: "transport", label: "Transport",  icon: "bus" },
+    { section: "Account" },
+    { id: "account",   label: "My account", icon: "user" },
+  ],
 };
 
 const ROLE_LABEL = {
@@ -211,6 +219,7 @@ const ROLE_LABEL = {
   parent: "Parent",
   school_accountant: "School Accountant",
   trust_accountant: "Trust Accountant",
+  transport_manager: "Transport Manager",
 };
 
 function initialsOf(name) {

@@ -5,7 +5,7 @@ import { getSession } from "@/lib/auth";
 
 const ALLOWED = new Set(["start", "next", "prev", "finish", "reset"]);
 // Roles that can always advance any route (no per-route check needed).
-const ADMIN_ROLES = new Set(["admin", "principal", "academic_director"]);
+const ADMIN_ROLES = new Set(["admin", "principal", "academic_director", "transport_manager"]);
 
 // POST /api/transport/advance { code, action: 'start'|'next'|'prev'|'finish'|'reset' }
 // Allowed callers:

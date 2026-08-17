@@ -11,8 +11,8 @@ import { getSession } from "@/lib/auth";
 // Admin + principal can manage the master timetable (template CRUD).
 // Teachers can READ the list (used by the "My route today" card +
 // scheduling helpers) but not write. Parents are blocked entirely.
-const WRITE_ROLES = new Set(["admin", "principal"]);
-const READ_ROLES  = new Set(["admin", "principal", "academic_director", "teacher"]);
+const WRITE_ROLES = new Set(["admin", "principal", "transport_manager"]);
+const READ_ROLES  = new Set(["admin", "principal", "academic_director", "teacher", "transport_manager"]);
 
 function gate(session, set) {
   if (!session) return { ok: false, error: "Sign in required", status: 401 };

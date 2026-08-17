@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { applyRouteTemplate, logAudit } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 
-const WRITE_ROLES = new Set(["admin", "principal"]);
+const WRITE_ROLES = new Set(["admin", "principal", "transport_manager"]);
 
 // POST /api/transport/templates/apply { code }
 // Replaces (or creates) the live `routes` row whose code matches the

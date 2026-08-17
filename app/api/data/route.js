@@ -89,6 +89,24 @@ function scopeForRole(data, session) {
     campaigns: [],
   };
 
+  if (role === "transport_manager") {
+    // Transport Manager: routes, boarding, and the student roster only.
+    // sanitised already dropped donors / staff / expenses / audit; strip the
+    // remaining finance + academic lists too. routes / routeTemplates /
+    // transportAttendance / addedStudents / maintenanceLogs pass through.
+    return {
+      ...sanitised,
+      pendingFees: [], recentFees: [], feeReminders: [],
+      dailyLogs: [], complaints: [], enquiries: [],
+      exams: [], marks: [], subjects: [], timetable: [], syllabus: [],
+      inventory: [], inventoryCategories: [], library: [], libraryLoans: [],
+      meetings: [], volunteers: [], tasks: [],
+      scaleSessions: [], scaleEntries: [], scaleSupportPlans: [], scaleDailyRituals: [],
+      studentActivities: [], leaveRequests: [], remarksRewards: [],
+      tcRequests: [], governmentDocuments: [],
+    };
+  }
+
   if (role === "teacher") {
     // Teacher sees their own staff record only (so RemarksRewards can
     // tag "About you"). Their assigned-class students stay; everything

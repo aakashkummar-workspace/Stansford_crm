@@ -4,7 +4,7 @@ import { getSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
-const CAN_RECORD = new Set(["admin", "principal"]);
+const CAN_RECORD = new Set(["admin", "principal", "transport_manager"]);
 
 // GET /api/maintenance?busNumber=XX
 export async function GET(req) {
