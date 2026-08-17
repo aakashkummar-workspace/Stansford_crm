@@ -80,7 +80,11 @@ export async function POST(req) {
       const now = new Date();
       const dateStr = now.toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric" });
       const monthLabel = now.toLocaleDateString("en-IN", { month: "long", year: "numeric" });
-      const slNo = (paid.id.match(/\d+/) || [""])[0].slice(-3).padStart(3, "0");
+      // Orderly SL No — the receipt's chronological rank (matches the Fees
+      // screen). Falls back to the id digits only if the serial is missing.
+      const slNo = paid.serial != null
+        ? String(paid.serial).padStart(3, "0")
+        : (paid.id.match(/\d+/) || [""])[0].slice(-3).padStart(3, "0");
 
       let imageBase64 = null;
       try {

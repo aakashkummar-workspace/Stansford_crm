@@ -190,6 +190,28 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
     [scopedRecent, scopedPending]
   );
 
+  // Orderly running serial per receipt (the SL No on the printed receipt).
+  // Numbered by payment time across all receipts, so they read 0001, 0002, …
+  // in the order money was collected — instead of the old "last 3 digits of
+  // the receipt id" which came out random (320, 59, 842…).
+  const serialByReceipt = useMemo(() => {
+    const list = [...(E.RECENT_FEES || [])].sort((a, b) => {
+      const ta = a.paidAt || a.paid_at || "";
+      const tb = b.paidAt || b.paid_at || "";
+      if (ta !== tb) return ta < tb ? -1 : 1;
+      return String(a.id).localeCompare(String(b.id));
+    });
+    const map = {};
+    list.forEach((r, i) => { map[r.id] = i + 1; });
+    return map;
+  }, [E.RECENT_FEES]);
+  const serialFor = (fee) => {
+    const n = fee && serialByReceipt[fee.id];
+    if (n) return String(n).padStart(3, "0");
+    // Fallback for rows not in the receipts list (e.g. previewing a pending fee).
+    return String(fee?.id || "").replace(/[^0-9]/g, "").slice(-3).padStart(3, "0");
+  };
+
   // Global search deep-link: when a fee/paid row is picked from the
   // topbar search, select it so the right-hand Collect/Receipt panel
   // jumps to that record.
@@ -352,6 +374,7 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
         remaining: json.remaining,
         partial: json.partial,
         method,
+        serial: json.fee?.serial ?? null,
       });
       await refresh?.();
       flash(json.partial
@@ -612,7 +635,7 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
     const partial   = lastPayment?.partial && lastPayment.remaining > 0;
     const remaining = lastPayment?.remaining || 0;
     const methodUsed = (selected.method && selected.method !== "—") ? selected.method : method;
-    const receiptNo  = selected.id.replace(/[^0-9]/g, "").slice(-3).padStart(3, "0");
+    const receiptNo  = lastPayment?.serial != null ? String(lastPayment.serial).padStart(3, "0") : serialFor(selected);
     const today = new Date();
     const dateStr  = today.toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric" });
     const monthStr = today.toLocaleDateString("en-IN", { month: "long", year: "numeric" });
@@ -1272,7 +1295,7 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
                 ];
                 if (selected.overdue) lines.push({ label: "Late Fee", amount: 200 });
                 const totalAmt = lastPayment?.amount ?? (selected.amount + (selected.overdue ? 200 : 0));
-                const slNo = selected.id.replace(/[^0-9]/g, "").slice(-3).padStart(3, "0");
+                const slNo = lastPayment?.serial != null ? String(lastPayment.serial).padStart(3, "0") : serialFor(selected);
                 const today = new Date();
                 const dateStr  = today.toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric" });
                 const monthStr = today.toLocaleDateString("en-IN", { month: "long", year: "numeric" });

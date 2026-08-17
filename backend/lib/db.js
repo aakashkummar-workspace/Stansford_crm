@@ -1870,6 +1870,13 @@ export async function payPendingFee(id, method, amount) {
       // so the admin can fix the status manually if needed.
       console.warn(`[db] payPendingFee: receipt saved but student.fee update failed: ${stuUpd.error.message}`);
     }
+    // Orderly SL No = this receipt's chronological rank. As the newest receipt,
+    // its rank equals the total receipt count — which matches how the Fees
+    // screen numbers receipts by payment time.
+    try {
+      const cnt = await supabase.from("recent_fees").select("id", { count: "exact", head: true });
+      if (typeof cnt.count === "number") paidRow.serial = cnt.count;
+    } catch {}
     return { paid: paidRow, fee: newStudentFeeStatus, remaining };
   }
 
@@ -1884,6 +1891,7 @@ export async function payPendingFee(id, method, amount) {
   }
   if (!Array.isArray(db.recentFees)) db.recentFees = [];
   db.recentFees.unshift(paidRow);
+  paidRow.serial = db.recentFees.length; // newest → rank == total count
   const sIdx = (db.addedStudents || []).findIndex((s) => s.id === realStudentId);
   if (sIdx !== -1) db.addedStudents[sIdx].fee = newStudentFeeStatus;
   fileWrite(db);
