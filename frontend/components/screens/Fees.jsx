@@ -31,6 +31,24 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+// "When" label for a fee row. Paid rows show the real payment date+time from
+// the stored ISO timestamp (paidAt) — the old rows stored a frozen "just now"
+// string that never updated, so we prefer paidAt and only fall back to the
+// stored label when there's no timestamp. Pending/overdue keep their
+// "due <date>" label.
+function formatFeeWhen(f) {
+  if (!f) return "—";
+  if (f.status === "pending" || f.status === "overdue") return f.time || "—";
+  const iso = f.paidAt || f.paid_at;
+  if (iso) {
+    const d = new Date(iso);
+    if (!isNaN(d.getTime())) {
+      return d.toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "numeric", minute: "2-digit", hour12: true });
+    }
+  }
+  return (f.time && f.time !== "just now") ? f.time : "—";
+}
+
 export default function ScreenFees({ E, refresh, role, session, searchFocus, clearSearchFocus }) {
   const school = resolveSchool(E?.SETTINGS);
   const actor  = session?.name || null;
@@ -464,7 +482,7 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
         amount: money(f.amount || 0),
         status: (f.status || "—").replace(/^./, (c) => c.toUpperCase()),
         method: f.method || "—",
-        time: f.time || "—",
+        time: formatFeeWhen(f),
       })),
       filename: `${school.name.replace(/\s+/g, "-").toLowerCase()}-fees-register-${new Date().toISOString().slice(0, 10)}`,
     });
@@ -524,7 +542,7 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
         amount: money(f.amount || 0),
         status: (f.status || "—").replace(/^./, (c) => c.toUpperCase()),
         method: f.method || "—",
-        time: f.time || "—",
+        time: formatFeeWhen(f),
       })),
       filename: `${school.name.replace(/\s+/g, "-").toLowerCase()}-fees-${String(label).toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${new Date().toISOString().slice(0, 10)}`,
     });
@@ -937,7 +955,7 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
                     <td className="num">{money(f.amount)}</td>
                     <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{f.method}</td>
                     <td><StatusChip status={f.status}>{f.status.charAt(0).toUpperCase() + f.status.slice(1)}</StatusChip></td>
-                    <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{f.time}</td>
+                    <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{formatFeeWhen(f)}</td>
                     <td>
                       {f.status === "paid" ? (
                         <span style={{ display: "inline-flex", gap: 4 }}>
@@ -1562,7 +1580,7 @@ function ParentFeesSummary({ scopedPending, scopedRecent, child, openReceipt, on
               {scopedRecent.slice(0, 4).map((r) => (
                 <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5 }}>
                   <span style={{ color: "var(--ink-3)" }}>
-                    {r.method} · {r.time} {r.status === "partial" && <span style={{ color: "var(--warn)" }}>· partial</span>}
+                    {r.method} · {formatFeeWhen(r)} {r.status === "partial" && <span style={{ color: "var(--warn)" }}>· partial</span>}
                   </span>
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                     <span className="mono">₹{(r.amount || 0).toLocaleString("en-IN")}</span>

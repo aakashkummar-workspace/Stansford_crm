@@ -1445,6 +1445,7 @@ export async function editStudentFee({ studentId, newTotal, newPaid, actor = "St
   if (paidDelta > 0) {
     const receiptId = `RCP-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 999)}`;
     const paidAt = new Date().toISOString();
+    const timeLabel = new Date(paidAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "numeric", minute: "2-digit", hour12: true });
     // Look up student for name + class on the receipt row.
     let student = null;
     if (supabaseEnabled) {
@@ -1461,7 +1462,7 @@ export async function editStudentFee({ studentId, newTotal, newPaid, actor = "St
       const ins = await supabase.from("recent_fees").insert({
         id: receiptId, student_id: studentId,
         name: student.name, cls: student.cls, amount: paidDelta,
-        method: "offline-entry", time: "just now", paid_at: paidAt,
+        method: "offline-entry", time: timeLabel, paid_at: paidAt,
         fee_type: "annual", status: "partial",
       });
       // No silent file fallback in production — surface the error so the
@@ -1475,7 +1476,7 @@ export async function editStudentFee({ studentId, newTotal, newPaid, actor = "St
       db.recentFees.unshift({
         id: receiptId, studentId, student_id: studentId,
         name: student.name, cls: student.cls, amount: paidDelta,
-        method: "offline-entry", time: "just now", paidAt,
+        method: "offline-entry", time: timeLabel, paidAt,
         feeType: "annual", status: "partial",
       });
       fileWrite(db);
@@ -1798,9 +1799,11 @@ export async function payPendingFee(id, method, amount) {
   // Build the receipt row. Each payment gets a unique receipt id so the
   // same student can have multiple receipts (e.g. partial payments).
   const receiptId = `RCP-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 999)}`;
-  // ISO timestamp of payment — used by Reports for date-range filtering. The
-  // human-readable `time` ("just now", "5 mins ago") stays for the UI table.
+  // ISO timestamp of payment — used by Reports for date-range filtering and,
+  // now, to render the register's "When" column. `time` stores a readable
+  // IST label instead of the old frozen "just now" string.
   const paidAt = new Date().toISOString();
+  const timeLabel = new Date(paidAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "numeric", minute: "2-digit", hour12: true });
   // Resolve the underlying student id for the receipt's back-link, in case the
   // pending row uses the new composite id ("STN-9001__kit").
   const realStudentId = f.studentId || (typeof f.id === "string" && f.id.includes("__") ? f.id.split("__")[0] : f.id);
@@ -1809,7 +1812,7 @@ export async function payPendingFee(id, method, amount) {
     student_id: realStudentId,
     studentId: realStudentId, // file-backend convenience
     name: f.name, cls: f.cls, amount: requested,
-    method, time: "just now", paidAt,
+    method, time: timeLabel, paidAt,
     feeType: f.feeType || DEFAULT_FEE_TYPE,
     status: isFull ? "paid" : "partial",
   };
@@ -1834,7 +1837,7 @@ export async function payPendingFee(id, method, amount) {
     const ins = await supabase.from("recent_fees").insert({
       id: receiptId, student_id: realStudentId,
       name: f.name, cls: f.cls, amount: requested,
-      method, time: "just now", paid_at: paidAt,
+      method, time: timeLabel, paid_at: paidAt,
       fee_type: f.feeType || DEFAULT_FEE_TYPE,
       status: isFull ? "paid" : "partial",
     });
