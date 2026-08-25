@@ -209,6 +209,16 @@ export const NAV_BY_ROLE = {
     { section: "Account" },
     { id: "account",   label: "My account", icon: "user" },
   ],
+  // Fees Manager — fee collection only, plus the SCALE session + reports.
+  fees_manager: [
+    { section: "Fees" },
+    { id: "fees",         label: "Fees & UPI",    icon: "fees" },
+    { section: "SCALE" },
+    { id: "scale",        label: "SCALE session", icon: "academic" },
+    { id: "scale_report", label: "SCALE reports", icon: "reports" },
+    { section: "Account" },
+    { id: "account",      label: "My account",    icon: "user" },
+  ],
 };
 
 const ROLE_LABEL = {
@@ -220,6 +230,7 @@ const ROLE_LABEL = {
   school_accountant: "School Accountant",
   trust_accountant: "Trust Accountant",
   transport_manager: "Transport Manager",
+  fees_manager: "Fees Manager",
 };
 
 function initialsOf(name) {

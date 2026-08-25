@@ -13,7 +13,7 @@ const CAN_CREATE = new Set(["admin"]);
 // for. Any value not in this set is checked against the custom_roles table.
 const CANONICAL_ROLES = new Set([
   "admin", "principal", "academic_director", "teacher", "parent",
-  "school_accountant", "trust_accountant", "transport_manager",
+  "school_accountant", "trust_accountant", "transport_manager", "fees_manager",
 ]);
 
 // GET /api/users?role=teacher → list teachers (id, name, email, linkedId).

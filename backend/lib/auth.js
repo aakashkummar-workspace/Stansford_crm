@@ -30,7 +30,7 @@ const SECRET = new TextEncoder().encode(SECRET_RAW);
 // School / Trust Accountant were added in v2 alongside the finance split.
 export const ROLE_KEYS = [
   "admin", "academic_director", "principal", "teacher", "parent",
-  "school_accountant", "trust_accountant", "transport_manager",
+  "school_accountant", "trust_accountant", "transport_manager", "fees_manager",
 ];
 
 export const ROLE_LABEL = {
@@ -42,6 +42,7 @@ export const ROLE_LABEL = {
   school_accountant: "School Accountant",
   trust_accountant: "Trust Accountant",
   transport_manager: "Transport Manager",
+  fees_manager: "Fees Manager",
 };
 
 export async function hashPassword(plain) {

@@ -10,7 +10,7 @@ export const dynamic = "force-dynamic";
 // Roles that can record SCALE sessions. Teachers are the primary
 // authors; AD / principal / admin can also record (e.g. covering a
 // class or auditing).
-const WRITE_ROLES = new Set(["teacher", "academic_director", "principal", "admin"]);
+const WRITE_ROLES = new Set(["teacher", "academic_director", "principal", "admin", "fees_manager"]);
 
 // GET /api/scale/sessions?cls=2-A&dateFrom=…&dateTo=…
 export async function GET(req) {

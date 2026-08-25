@@ -52,7 +52,7 @@ export default function AttendanceTodayCard({ E, setCurrent, role }) {
         <div style={{ marginLeft: "auto", fontSize: 22, fontWeight: 800, color: pctColor(pct) }}>{pct == null ? "—" : `${pct}%`}</div>
       </div>
       <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginBottom: 8 }}>
-        {marked ? `${present + late}/${marked} in today · ${total} on roll` : `Not marked yet · ${total} on roll`}
+        {`${marked}/${total} marked`}{total - marked > 0 ? ` · ${total - marked} not marked yet` : " · all marked"}
       </div>
       <div style={{ display: "flex", gap: 6 }}>
         <Pill label="Present" n={present} tone="var(--ok)" />

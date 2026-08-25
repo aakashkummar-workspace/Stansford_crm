@@ -107,6 +107,24 @@ function scopeForRole(data, session) {
     };
   }
 
+  if (role === "fees_manager") {
+    // Fees Manager: fees + the SCALE session/reports + the student roster.
+    // Keeps pendingFees / recentFees / feeReminders / addedStudents / classes /
+    // settings / scale* (via ...sanitised); strips academics, inventory,
+    // transport, teacher attendance, and the rest.
+    return {
+      ...sanitised,
+      teacherAttendance: [],
+      dailyLogs: [], complaints: [], enquiries: [],
+      exams: [], marks: [], timetable: [], syllabus: [],
+      inventory: [], inventoryCategories: [], library: [], libraryLoans: [],
+      routes: [], routeTemplates: [], transportAttendance: [], maintenanceLogs: [],
+      meetings: [], volunteers: [], tasks: [],
+      studentActivities: [], leaveRequests: [], remarksRewards: [],
+      tcRequests: [], governmentDocuments: [],
+    };
+  }
+
   if (role === "teacher") {
     // Teacher sees their own staff record only (so RemarksRewards can
     // tag "About you"). Their assigned-class students stay; everything

@@ -114,6 +114,7 @@ const DEFAULT_SCREEN_BY_ROLE = {
   school_accountant: "dashboard",
   trust_accountant: "trust",
   transport_manager: "transport",
+  fees_manager: "fees",
 };
 
 const ROLE_LABEL = {
@@ -558,6 +559,25 @@ export default function AppShell({ initialData, session }) {
         SCALE_SESSIONS: [], SCALE_ENTRIES: [], SCALE_SUPPORT_PLANS: [], SCALE_DAILY_RITUALS: [],
         STUDENT_ACTIVITIES: [], LEAVE_REQUESTS: [], REMARKS_REWARDS: [],
         TC_REQUESTS: [], CUSTOM_ROLES: [], USERS: [],
+      };
+    }
+    if (role === "fees_manager") {
+      // Fees Manager: fee collection + the SCALE session/reports. Keeps
+      // fees, the student roster (for collecting + SCALE) and SCALE data;
+      // everything else (staff, academics, inventory, transport, donors…) is
+      // stripped.
+      return {
+        ...data,
+        STAFF: [], TEACHER_ATTENDANCE: [], STAFF_AWARDS: [],
+        EXPENSES: [], DONORS: [], DONATION_PIPELINE: [], COMPLIANCE: [],
+        AI_BRIEF: [], SCHOOLS: [], ANOMALIES: [], AUDIT: [],
+        EXAMS: [], MARKS: [], TIMETABLE: [], SYLLABUS: [],
+        DAILY_LOGS: [], COMPLAINTS: [], ENQUIRIES: [],
+        INVENTORY: [], INVENTORY_CATEGORIES: [], LIBRARY: [], LOANS: [],
+        ROUTES: [], ROUTE_TEMPLATES: [], TRANSPORT_ATTENDANCE: [], MAINTENANCE_LOGS: [],
+        GOVERNMENT_DOCUMENTS: [], MEETINGS: [], VOLUNTEERS: [], TASKS: [],
+        LEAVE_REQUESTS: [], REMARKS_REWARDS: [], STUDENT_ACTIVITIES: [], TC_REQUESTS: [],
+        CUSTOM_ROLES: [],
       };
     }
     return data;

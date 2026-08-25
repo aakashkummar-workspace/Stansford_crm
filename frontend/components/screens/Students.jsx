@@ -6,7 +6,7 @@ import { KPI, AvatarChip, StatusChip } from "../ui";
 import DocumentsPanel from "../DocumentsPanel";
 import CredentialsModal from "../CredentialsModal";
 import { resolveSchool, downloadPdf } from "@/lib/export";
-import { formatClassLabel } from "@/backend/lib/format.js";
+import { formatClassLabel, feeTypeLabel } from "@/backend/lib/format.js";
 
 // Section is fixed to "A" under the hood — storage keeps "N-A" so the
 // dozens of split("-") readers across the app stay valid, but no UI
@@ -763,6 +763,7 @@ export default function ScreenStudents({ E, refresh, role, session, searchFocus,
         <ProfileModal
           student={profileOf}
           hideContact={isTeacher}
+          school={school}
           onClose={() => setProfileOf(null)}
           onMessage={() => { setMessageStudent(profileOf); setProfileOf(null); }}
           onTC={() => { setTcReasonFor(profileOf); setProfileOf(null); }}
@@ -2088,29 +2089,9 @@ function ConfirmArchive({ student, onCancel, onConfirm }) {
   );
 }
 
-function ProfileModal({ student, onClose, onMessage, onTC, hideContact = false }) {
-  // Derive a stable 28-day attendance pattern from the student id
-  const heatmap = useMemo(() => {
-    const seedChar = student.id.charCodeAt(student.id.length - 1) || 7;
-    return Array.from({ length: 28 }, (_, i) => {
-      const v = ((seedChar * (i + 1) * 9301 + 49297) % 233280) / 233280;
-      if (i % 7 === 6) return { v: -1 };
-      if (v < 0.08) return { v: 0 };
-      return { v: Math.min(4, Math.floor(v * 5)) };
-    });
-  }, [student.id]);
-
-  // Activity history — synthesised from what we know about the student
-  const feeTone = student.fee === "paid" ? "ok" : student.fee === "overdue" ? "bad" : "warn";
-  const timeline = [
-    { t: "Today", i: "fees", tone: feeTone, line: `Fee status · ${student.fee}`, sub: student.fee === "paid" ? "Last receipt auto-sent" : "Reminder scheduled" },
-    { t: "Yesterday", i: "students", tone: "ok", line: "Attendance recorded", sub: `Present · ${student.attendance}% this term` },
-    { t: "3 days ago", i: "book", tone: "info", line: "Homework submitted", sub: "English comprehension · on time" },
-    { t: "1 week ago", i: "bus", tone: student.transport === "—" ? "" : "info", line: student.transport === "—" ? "No transport route" : `Boarded ${student.transport}`, sub: student.transport === "—" ? "Self pick-up/drop" : "Morning run · on time" },
-    { t: "1 month ago", i: "enquiry", tone: "", line: `Joined ${student.joined}`, sub: "Admission confirmed · onboarding complete" },
-  ];
-
-  const phoneDigits = (student.parent || "").replace(/\D/g, "");
+function ProfileModal({ student, onClose, onMessage, onTC, hideContact = false, school }) {
+  const [report, setReport] = useState(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
@@ -2118,32 +2099,96 @@ function ProfileModal({ student, onClose, onMessage, onTC, hideContact = false }
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  // Pull the full 360° report (fees, academics, extras) on open.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const r = await fetch(`/api/students/${encodeURIComponent(student.id)}/report`, { cache: "no-store" });
+        const j = await r.json();
+        if (!cancelled) setReport(j.ok ? j.report : null);
+      } catch { if (!cancelled) setReport(null); }
+      finally { if (!cancelled) setLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [student.id]);
+
+  const phoneDigits = (student.parent || "").replace(/\D/g, "");
+  const money0 = (n) => `₹${Math.round(Number(n) || 0).toLocaleString("en-IN")}`;
+  const dfmt = (d) => {
+    if (!d) return "—";
+    const x = new Date(String(d).length <= 10 ? `${d}T00:00:00` : d);
+    return isNaN(x.getTime()) ? String(d) : x.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+  };
+
+  const fees = report?.fees;
+  const att = report?.attendance?.summary;
+  const feeTone = fees ? (fees.pendingTotal > 0 ? "warn" : "ok") : (student.fee === "paid" ? "ok" : student.fee === "overdue" ? "bad" : "warn");
+  const attPct = att?.attendancePct != null ? `${att.attendancePct}%` : `${student.attendance ?? 0}%`;
+  const feeValue = fees ? (fees.pendingTotal > 0 ? `${money0(fees.pendingTotal)} due` : "Paid") : (student.fee || "—");
+
+  function downloadReport() {
+    if (!report) return;
+    const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    const s = report.student || student;
+    const schoolName = school?.name || "Sanfort International School";
+    const cell = (v, num) => `<td style="padding:4px 6px;border-bottom:1px solid #eee;${num ? "text-align:right" : ""}">${esc(v)}</td>`;
+    const th = (h) => `<th style="text-align:left;padding:4px 6px;border-bottom:1px solid #bbb;color:#555;font-weight:600">${esc(h)}</th>`;
+    const table = (headers, rowsArr) => `<table style="width:100%;border-collapse:collapse;font-size:11px;margin-top:4px"><thead><tr>${headers.map(th).join("")}</tr></thead><tbody>${rowsArr.length ? rowsArr.join("") : `<tr><td colspan="${headers.length}" style="padding:6px;color:#999">None</td></tr>`}</tbody></table>`;
+    const sec = (t, inner) => `<h3 style="margin:16px 0 4px;color:#1f3a8a;font-size:13px">${esc(t)}</h3>${inner}`;
+
+    const receipts = report.fees.receipts.map((f) => `<tr>${cell(dfmt(f.paidAt || f.paid_at))}${cell(feeTypeLabel(f.feeType))}${cell(f.method || "—")}${cell(money0(f.amount), true)}</tr>`);
+    const pending = report.fees.pending.map((f) => `<tr>${cell(feeTypeLabel(f.feeType))}${cell(f.due || "—")}${cell(money0(f.amount), true)}</tr>`);
+    const marksRows = report.examMarks.map((m) => { const e = m.exam || {}; return `<tr>${cell(e.name || e.subject || "—")}${cell(e.subject || "—")}${cell(dfmt(e.date || m.recordedAt))}${cell(`${m.score}/${m.maxMarks || e.maxMarks || "—"}`, true)}</tr>`; });
+    const remarkRows = report.remarks.map((r) => `<tr>${cell(dfmt(r.createdAt))}${cell(r.type)}${cell(r.category || "—")}${cell(r.description)}</tr>`);
+    const actRows = report.activities.map((a) => `<tr>${cell(dfmt(a.activityDate))}${cell(a.activityName)}${cell(a.eventName || "—")}${cell(a.achievementLevel || "—")}</tr>`);
+    const a = report.attendance.summary;
+
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>${esc(s.name)} — Student Report</title></head>
+<body style="font-family:Arial,Helvetica,sans-serif;color:#111;max-width:820px;margin:24px auto;padding:0 16px">
+  <div style="text-align:center;border-bottom:2px solid #1f3a8a;padding-bottom:10px;margin-bottom:14px">
+    <div style="font-size:18px;font-weight:800;color:#1f3a8a">${esc(schoolName)}</div>
+    <div style="font-size:13px;margin-top:4px">Student Report</div>
+  </div>
+  <table style="width:100%;font-size:12px;margin-bottom:6px;border-collapse:collapse">
+    <tr><td style="padding:2px 0"><b>Name:</b> ${esc(s.name)}</td><td style="padding:2px 0"><b>Admission No:</b> ${esc(s.id)}</td></tr>
+    <tr><td style="padding:2px 0"><b>Class:</b> ${esc(formatClassLabel(s.cls))}</td><td style="padding:2px 0"><b>Joined:</b> ${esc(s.joined || "—")}</td></tr>
+    ${hideContact ? "" : `<tr><td style="padding:2px 0"><b>Parent:</b> ${esc(s.parent || "—")}</td><td style="padding:2px 0"><b>Transport:</b> ${esc(s.transport || "—")}</td></tr>`}
+  </table>
+  ${sec("Attendance", `<div style="font-size:12px">Present ${a.present} · Late ${a.late} · Absent ${a.absent} · Leave ${a.leave} · Marked ${a.marked} · Attendance ${a.attendancePct ?? "—"}%</div>`)}
+  ${sec(`Fees — Paid receipts (Total ${money0(report.fees.paidTotal)})`, table(["Date", "Fee type", "Method", "Amount"], receipts))}
+  ${sec(`Fees — Pending (Total ${money0(report.fees.pendingTotal)})`, table(["Fee type", "Due", "Amount"], pending))}
+  ${sec("Academics — Exam & test marks", table(["Assessment", "Subject", "Date", "Score"], marksRows))}
+  ${sec("Remarks & rewards", table(["Date", "Type", "Category", "Note"], remarkRows))}
+  ${sec("Activities & achievements", table(["Date", "Activity", "Event", "Level"], actRows))}
+  <div style="margin-top:24px;font-size:10px;color:#999;text-align:center">Generated ${esc(new Date().toLocaleString("en-IN"))}</div>
+</body></html>`;
+    const w = window.open("", "_blank");
+    if (!w) { alert("Allow pop-ups to download the report"); return; }
+    w.document.write(html); w.document.close(); w.focus();
+    setTimeout(() => { try { w.print(); } catch {} }, 400);
+  }
+
+  const List = ({ rows, empty }) => rows.length === 0
+    ? <div style={{ fontSize: 12, color: "var(--ink-4)" }}>{empty}</div>
+    : <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>{rows}</div>;
+
   return (
     <div
       onClick={onClose}
-      style={{
-        position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)",
-        display: "grid", placeItems: "center", zIndex: 250, padding: 16, overflowY: "auto",
-      }}
+      style={{ position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)", display: "grid", placeItems: "center", zIndex: 250, padding: 16, overflowY: "auto" }}
     >
-      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 720, maxHeight: "calc(100vh - 32px)", overflowY: "auto" }}>
-        {/* Header strip with avatar */}
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 760, maxHeight: "calc(100vh - 32px)", overflowY: "auto" }}>
+        {/* Header */}
         <div style={{ padding: "22px 24px", display: "flex", alignItems: "center", gap: 16, borderBottom: "1px solid var(--rule-2)" }}>
-          <div style={{
-            width: 56, height: 56, borderRadius: 14,
-            background: "linear-gradient(135deg, var(--accent), var(--accent-2))",
-            color: "var(--accent-ink)",
-            display: "grid", placeItems: "center",
-            fontWeight: 600, fontSize: 20,
-          }}>
+          <div style={{ width: 56, height: 56, borderRadius: 14, background: "linear-gradient(135deg, var(--accent), var(--accent-2))", color: "var(--accent-ink)", display: "grid", placeItems: "center", fontWeight: 600, fontSize: 20 }}>
             {student.name.split(" ").map((n) => n[0]).join("")}
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <span style={{ fontSize: 20, fontWeight: 600, letterSpacing: "-0.01em", fontFamily: "var(--font-serif)" }}>{student.name}</span>
-              {student.__added && (
-                <span className="chip ok" style={{ fontSize: 10, height: 20 }}><span className="dot" />new admission</span>
-              )}
+              {student.__added && <span className="chip ok" style={{ fontSize: 10, height: 20 }}><span className="dot" />new admission</span>}
             </div>
             <div style={{ color: "var(--ink-3)", fontSize: 12.5, marginTop: 4, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
               <span className="mono">{student.id}</span>
@@ -2153,106 +2198,119 @@ function ProfileModal({ student, onClose, onMessage, onTC, hideContact = false }
               <span>Joined {student.joined}</span>
             </div>
           </div>
-          <button className="icon-btn" onClick={onClose} style={{ alignSelf: "flex-start" }}>
-            <Icon name="x" size={14} />
-          </button>
+          <button className="icon-btn" onClick={onClose} style={{ alignSelf: "flex-start" }}><Icon name="x" size={14} /></button>
         </div>
 
-        {/* Stats row */}
+        {/* Stats row (real) */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", borderBottom: "1px solid var(--rule-2)" }}>
-          <Stat label="Attendance" value={`${student.attendance}%`} tone={student.attendance < 85 ? "warn" : "ok"} />
-          <Stat label="Fee" value={student.fee.charAt(0).toUpperCase() + student.fee.slice(1)} tone={feeTone} />
-          <Stat label="Transport" value={student.transport} />
+          <Stat label="Attendance" value={attPct} tone={att && att.attendancePct != null ? (att.attendancePct < 85 ? "warn" : "ok") : "ok"} />
+          <Stat label="Fees" value={feeValue} tone={feeTone} />
+          <Stat label="Transport" value={student.transport || "—"} />
           <Stat label="Class" value={formatClassLabel(student.cls)} />
         </div>
 
-        {/* Body — two columns */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0 }}>
-          {/* Left: Parent contact + transport */}
-          <div style={{ padding: "20px 22px", borderRight: "1px solid var(--rule-2)", display: "flex", flexDirection: "column", gap: 16 }}>
-            <ProfileSection title="Parent contact">
-              {hideContact ? (
-                <div style={{ fontSize: 12.5, color: "var(--ink-3)" }}>Hidden</div>
-              ) : student.parent && student.parent !== "—" ? (
-                <>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5 }}>
-                    <Icon name="phone" size={14} style={{ color: "var(--ink-3)" }} />
-                    <span className="mono">{student.parent}</span>
-                  </div>
-                  <div style={{ display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap" }}>
-                    <button className="btn sm" onClick={() => window.open(`tel:${student.parent.replace(/\s/g, "")}`, "_self")}>
-                      <Icon name="phone" size={11} />Call
-                    </button>
-                    <button className="btn sm accent" onClick={onMessage}>
-                      <Icon name="whatsapp" size={11} />WhatsApp
-                    </button>
-                    <button className="btn sm" onClick={() => window.open(`sms:${student.parent.replace(/\s/g, "")}`, "_self")}>
-                      <Icon name="sms" size={11} />SMS
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <div style={{ fontSize: 12.5, color: "var(--ink-3)" }}>No parent contact on file.</div>
-              )}
-            </ProfileSection>
+        {loading && <div style={{ padding: 24, textAlign: "center", color: "var(--ink-3)", fontSize: 13 }}>Loading full profile…</div>}
 
-            <ProfileSection title="Attendance · 28-day">
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 }}>
-                {["M", "T", "W", "T", "F", "S", "S"].map((d, i) => (
-                  <div key={i} style={{ fontSize: 9.5, color: "var(--ink-4)", textAlign: "center" }}>{d}</div>
-                ))}
-                {heatmap.map((c, i) => {
-                  const bg =
-                    c.v === -1 ? "var(--rule-2)" :
-                    c.v === 0 ? "var(--bad)" :
-                    `color-mix(in oklch, var(--accent) ${40 + c.v * 15}%, var(--rule-2))`;
-                  return <div key={i} className="hm-cell" style={{ background: bg, opacity: c.v === -1 ? 0.5 : 1 }} />;
-                })}
-              </div>
-              <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 8 }}>
-                {heatmap.filter((c) => c.v > 0).length} present · {heatmap.filter((c) => c.v === 0).length} absent · {heatmap.filter((c) => c.v === -1).length} off days
-              </div>
-            </ProfileSection>
-
-            <ProfileSection title="Documents">
-              <DocumentsPanel entityType="student" entityId={student.id} canEdit compact />
-            </ProfileSection>
-          </div>
-
-          {/* Right: Timeline */}
-          <div style={{ padding: "20px 22px", display: "flex", flexDirection: "column", gap: 10 }}>
-            <ProfileSection title="Recent activity">
-              <div style={{ display: "flex", flexDirection: "column" }}>
-                {timeline.map((row, i) => (
-                  <div key={i} style={{
-                    display: "grid",
-                    gridTemplateColumns: "28px 1fr auto",
-                    gap: 10,
-                    padding: "9px 0",
-                    borderBottom: i < timeline.length - 1 ? "1px solid var(--rule-2)" : "none",
-                  }}>
-                    <div className={`act-ico ${row.tone || ""}`} style={{ width: 26, height: 26 }}>
-                      <Icon name={row.i} size={12} />
+        {!loading && report && (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0 }}>
+            {/* Left column */}
+            <div style={{ padding: "20px 22px", borderRight: "1px solid var(--rule-2)", display: "flex", flexDirection: "column", gap: 18 }}>
+              <ProfileSection title="Parent contact">
+                {hideContact ? (
+                  <div style={{ fontSize: 12.5, color: "var(--ink-3)" }}>Hidden</div>
+                ) : student.parent && student.parent !== "—" ? (
+                  <>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5 }}>
+                      <Icon name="phone" size={14} style={{ color: "var(--ink-3)" }} />
+                      <span className="mono">{student.parent}</span>
                     </div>
-                    <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: 12.5 }}>{row.line}</div>
-                      <div style={{ fontSize: 11, color: "var(--ink-3)" }}>{row.sub}</div>
+                    <div style={{ display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap" }}>
+                      <button className="btn sm" onClick={() => window.open(`tel:${student.parent.replace(/\s/g, "")}`, "_self")}><Icon name="phone" size={11} />Call</button>
+                      <button className="btn sm accent" onClick={onMessage}><Icon name="whatsapp" size={11} />WhatsApp</button>
                     </div>
-                    <div style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "var(--font-mono)" }}>{row.t}</div>
+                  </>
+                ) : <div style={{ fontSize: 12.5, color: "var(--ink-3)" }}>No parent contact on file.</div>}
+              </ProfileSection>
+
+              <ProfileSection title="Attendance summary">
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {[["Present", att.present, "var(--ok)"], ["Late", att.late, "var(--warn, #b07a18)"], ["Absent", att.absent, "var(--err, #b13c1c)"], ["Leave", att.leave, "var(--accent-2)"]].map(([l, n, c]) => (
+                    <div key={l} style={{ flex: "1 1 60px", textAlign: "center", padding: "7px 4px", borderRadius: 8, background: "var(--card-2)" }}>
+                      <div style={{ fontSize: 16, fontWeight: 700, color: c }}>{n}</div>
+                      <div style={{ fontSize: 9.5, color: "var(--ink-3)", textTransform: "uppercase" }}>{l}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 8 }}>{att.marked} days marked · {att.attendancePct ?? "—"}% attendance</div>
+              </ProfileSection>
+
+              <ProfileSection title="Activities & achievements">
+                <List empty="No activities recorded." rows={report.activities.slice(0, 8).map((a) => (
+                  <div key={a.id} style={{ fontSize: 12 }}>
+                    <div style={{ fontWeight: 500 }}>{a.activityName}{a.achievementLevel ? <span className="chip ok" style={{ marginLeft: 6, fontSize: 9.5 }}>{a.achievementLevel}</span> : null}</div>
+                    <div style={{ fontSize: 11, color: "var(--ink-4)" }}>{[a.eventName, dfmt(a.activityDate)].filter(Boolean).join(" · ")}</div>
                   </div>
-                ))}
-              </div>
-            </ProfileSection>
+                ))} />
+              </ProfileSection>
+
+              <ProfileSection title="Documents">
+                <DocumentsPanel entityType="student" entityId={student.id} canEdit compact />
+              </ProfileSection>
+            </div>
+
+            {/* Right column */}
+            <div style={{ padding: "20px 22px", display: "flex", flexDirection: "column", gap: 18 }}>
+              <ProfileSection title={`Fees · ${money0(fees.paidTotal)} paid · ${money0(fees.pendingTotal)} due`}>
+                <List empty="No fee records." rows={[
+                  ...report.fees.receipts.slice(0, 8).map((f) => (
+                    <div key={f.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                      <span style={{ color: "var(--ink-3)" }}>{feeTypeLabel(f.feeType)} · {f.method || "—"} · {dfmt(f.paidAt || f.paid_at)}</span>
+                      <span style={{ color: "var(--ok)", fontWeight: 600 }}>+{money0(f.amount)}</span>
+                    </div>
+                  )),
+                  ...report.fees.pending.map((f) => (
+                    <div key={f.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                      <span style={{ color: "var(--ink-3)" }}>{feeTypeLabel(f.feeType)} · due {f.due || "—"}</span>
+                      <span style={{ color: "var(--err, #b13c1c)", fontWeight: 600 }}>{money0(f.amount)}</span>
+                    </div>
+                  )),
+                ]} />
+              </ProfileSection>
+
+              <ProfileSection title="Exam & test marks">
+                <List empty="No marks recorded yet." rows={report.examMarks.slice(0, 10).map((m) => {
+                  const e = m.exam || {};
+                  return (
+                    <div key={m.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                      <span style={{ color: "var(--ink-3)" }}>{e.name || e.subject || "Assessment"}{e.subject && e.name ? ` · ${e.subject}` : ""}</span>
+                      <span style={{ fontWeight: 600 }}>{m.score}/{m.maxMarks || e.maxMarks || "—"}</span>
+                    </div>
+                  );
+                })} />
+              </ProfileSection>
+
+              <ProfileSection title="Remarks & rewards">
+                <List empty="No remarks or rewards." rows={report.remarks.slice(0, 8).map((r) => (
+                  <div key={r.id} style={{ fontSize: 12 }}>
+                    <div><span className={`chip ${r.type === "reward" ? "ok" : "warn"}`} style={{ fontSize: 9.5 }}>{r.type}</span> <span style={{ color: "var(--ink-4)", fontSize: 11 }}>{r.category || ""} · {dfmt(r.createdAt)}</span></div>
+                    <div style={{ color: "var(--ink-3)" }}>{r.description}</div>
+                  </div>
+                ))} />
+              </ProfileSection>
+            </div>
           </div>
-        </div>
+        )}
+
+        {!loading && !report && (
+          <div style={{ padding: 24, textAlign: "center", color: "var(--err, #b13c1c)", fontSize: 13 }}>Couldn't load this student's full profile.</div>
+        )}
 
         {/* Footer actions */}
         <div style={{ padding: "14px 22px", borderTop: "1px solid var(--rule-2)", display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button className="btn accent" onClick={downloadReport} disabled={!report} title="Open a printable full report (save as PDF)"><Icon name="download" size={12} />Download report</button>
           <button className="btn" onClick={onTC}><Icon name="book" size={12} />Issue TC</button>
-          {phoneDigits && (
-            <button className="btn" onClick={onMessage}><Icon name="whatsapp" size={12} />Message parent</button>
-          )}
-          <button className="btn accent" onClick={onClose}>Close</button>
+          {phoneDigits && <button className="btn" onClick={onMessage}><Icon name="whatsapp" size={12} />Message parent</button>}
+          <button className="btn" onClick={onClose}>Close</button>
         </div>
       </div>
     </div>

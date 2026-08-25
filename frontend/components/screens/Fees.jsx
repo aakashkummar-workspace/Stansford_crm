@@ -55,7 +55,7 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
   const isParent = role === "parent";
   // Admin, principal and the school accountant may edit the per-class fee
   // structure (term amounts + application + van).
-  const canEditStructure = role === "admin" || role === "principal" || role === "school_accountant";
+  const canEditStructure = role === "admin" || role === "principal" || role === "school_accountant" || role === "fees_manager";
   // ---------- core state ----------
   // Parent-aware initial selection: pick the first PENDING (or the first
   // PAID) for the currently-logged-in child, not whichever happens to be
@@ -124,7 +124,7 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
   // Receipt awaiting delete-confirmation. Only admin/principal/accountant
   // can open this — parents and teachers don't get the delete affordance.
   const [deletingReceipt, setDeletingReceipt] = useState(null);
-  const canDeleteReceipt = role === "admin" || role === "principal" || role === "school_accountant";
+  const canDeleteReceipt = role === "admin" || role === "principal" || role === "school_accountant" || role === "fees_manager";
   // "Add fee" modal — staff picks a student + fee type + amount to create a
   // brand-new pending row. Lets the school collect Application, Kit, ECA,
   // Uniform, Term I/II/III, Van, STEM, Annual Day fees as separate items.
@@ -863,6 +863,8 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
         </div>
       </div>
 
+      {!isParent && <CollectionSummary recent={scopedRecent} />}
+
       <div className="grid g-12">
         <div className="card col-8">
           <div className="card-head">
@@ -1495,6 +1497,159 @@ function ConfirmModal({ title, message, confirmLabel = "Yes", cancelLabel = "No"
 // pending balance broken into term/activity/late, plus a list of past
 // receipts — but with no payment controls. Parents pay at the school
 // office; this card is purely informational.
+// Fee collection at a glance — today's & this month's takings, the running
+// total, and a day-wise / month-wise breakdown. Computed from paid receipts
+// (recent_fees) using each receipt's payment timestamp (paidAt).
+function CollectionSummary({ recent }) {
+  const [today, setToday] = useState("");
+  const [monthKey, setMonthKey] = useState("");
+  const [view, setView] = useState("day"); // "day" | "month"
+  const [detail, setDetail] = useState(null); // { key } — day/month whose receipts to list
+  useEffect(() => {
+    const d = new Date();
+    setToday(d.toISOString().slice(0, 10));
+    setMonthKey(d.toISOString().slice(0, 7));
+  }, []);
+
+  const list = Array.isArray(recent) ? recent : [];
+  const dateOf = (f) => String(f.paidAt || f.paid_at || "").slice(0, 10);
+  const amt = (f) => Number(f.amount) || 0;
+  const sum = (arr) => arr.reduce((a, f) => a + amt(f), 0);
+  const dated = list.filter((f) => dateOf(f)); // receipts that carry a date
+
+  const todayList = dated.filter((f) => dateOf(f) === today);
+  const monthList = dated.filter((f) => dateOf(f).slice(0, 7) === monthKey);
+
+  // Breakdown grouped by day or month, newest first.
+  const byKey = {};
+  for (const f of dated) {
+    const k = view === "day" ? dateOf(f) : dateOf(f).slice(0, 7);
+    if (!byKey[k]) byKey[k] = { amount: 0, count: 0 };
+    byKey[k].amount += amt(f);
+    byKey[k].count += 1;
+  }
+  const rows = Object.entries(byKey)
+    .sort((a, b) => (a[0] < b[0] ? 1 : -1))
+    .slice(0, view === "day" ? 14 : 12);
+
+  const fmtKey = (k) => {
+    if (view === "day") {
+      const d = new Date(`${k}T00:00:00`);
+      return isNaN(d.getTime()) ? k : d.toLocaleDateString("en-IN", { weekday: "short", day: "2-digit", month: "short" });
+    }
+    const [y, m] = k.split("-");
+    const d = new Date(Number(y), Number(m) - 1, 1);
+    return isNaN(d.getTime()) ? k : d.toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+  };
+
+  const Tile = ({ label, amount, count, tone }) => (
+    <div style={{ flex: "1 1 150px", padding: "12px 14px", borderRight: "1px solid var(--rule)" }}>
+      <div style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: 0.4 }}>{label}</div>
+      <div style={{ fontSize: 22, fontWeight: 800, color: tone || "var(--ink)", marginTop: 2 }}>{money(amount)}</div>
+      <div style={{ fontSize: 11, color: "var(--ink-4)", marginTop: 1 }}>{count} receipt{count === 1 ? "" : "s"}</div>
+    </div>
+  );
+
+  // Receipts for the clicked day/month (for the details popup).
+  const detailItems = detail
+    ? dated
+        .filter((f) => (view === "day" ? dateOf(f) : dateOf(f).slice(0, 7)) === detail.key)
+        .sort((a, b) => (String(a.paidAt || a.paid_at) < String(b.paidAt || b.paid_at) ? 1 : -1))
+    : [];
+
+  return (
+    <>
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="card-head">
+        <div>
+          <div className="card-title">Fee collection</div>
+          <div className="card-sub">Daily · monthly · total — from recorded payments</div>
+        </div>
+        <div className="card-actions">
+          <div className="segmented">
+            <button className={view === "day" ? "active" : ""} onClick={() => setView("day")}>Day-wise</button>
+            <button className={view === "month" ? "active" : ""} onClick={() => setView("month")}>Month-wise</button>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", flexWrap: "wrap", borderBottom: "1px solid var(--rule)" }}>
+        <Tile label="Today" amount={sum(todayList)} count={todayList.length} tone="var(--ok)" />
+        <Tile label="This month" amount={sum(monthList)} count={monthList.length} tone="var(--accent-2)" />
+        <Tile label="Total collected" amount={sum(list)} count={list.length} />
+      </div>
+
+      <div style={{ overflowX: "auto" }}>
+        <table className="table">
+          <thead>
+            <tr>
+              <th>{view === "day" ? "Date" : "Month"}</th>
+              <th className="num">Receipts</th>
+              <th className="num">Amount collected</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr><td colSpan={3} className="empty">No recorded payments yet.</td></tr>
+            )}
+            {rows.map(([k, v]) => (
+              <tr key={k} onClick={() => setDetail({ key: k })} style={{ cursor: "pointer" }} title="View the receipts for this period">
+                <td>{fmtKey(k)}{view === "day" && k === today ? <span className="chip ok" style={{ marginLeft: 6, fontSize: 9.5 }}>Today</span> : null}</td>
+                <td className="num" style={{ color: "var(--ink-3)" }}>{v.count}</td>
+                <td className="num" style={{ fontWeight: 600 }}>{money(v.amount)} <Icon name="chevronRight" size={11} style={{ opacity: 0.4, verticalAlign: "middle" }} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    {detail && (
+      <div onClick={() => setDetail(null)} style={{ position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)", display: "grid", placeItems: "center", zIndex: 260, padding: 16 }}>
+        <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 640, maxHeight: "calc(100vh - 32px)", overflowY: "auto" }}>
+          <div className="card-head">
+            <div>
+              <div className="card-title">Collection · {fmtKey(detail.key)}</div>
+              <div className="card-sub">{detailItems.length} receipt{detailItems.length === 1 ? "" : "s"} · {money(detailItems.reduce((a, f) => a + amt(f), 0))}</div>
+            </div>
+            <button className="icon-btn" onClick={() => setDetail(null)}><Icon name="x" size={14} /></button>
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th style={{ width: 32 }}>#</th>
+                  <th>Student</th>
+                  <th>Class</th>
+                  <th>Fee type</th>
+                  <th>Method</th>
+                  <th className="num">Amount</th>
+                  <th>When</th>
+                </tr>
+              </thead>
+              <tbody>
+                {detailItems.length === 0 && <tr><td colSpan={7} className="empty">No receipts.</td></tr>}
+                {detailItems.map((f, i) => (
+                  <tr key={f.id || i}>
+                    <td style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-4)" }}>{i + 1}</td>
+                    <td style={{ fontSize: 12.5, fontWeight: 500 }}>{f.name || "—"}</td>
+                    <td>{f.cls ? <span className="chip">{formatClassLabel(f.cls)}</span> : "—"}</td>
+                    <td><span className="chip" style={{ background: "var(--accent-soft)", color: "var(--accent-2)" }}>{feeTypeLabel(f.feeType)}</span></td>
+                    <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{f.method || "—"}</td>
+                    <td className="num" style={{ fontWeight: 600 }}>{money(f.amount || 0)}</td>
+                    <td style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{formatFeeWhen({ ...f, status: "paid" })}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
+  );
+}
+
 function ParentFeesSummary({ scopedPending, scopedRecent, child, openReceipt, onRefresh }) {
   const totalPending = scopedPending.reduce((a, f) => a + (f.amount || 0), 0);
   const overdueChip  = scopedPending.some((f) => f.overdue);

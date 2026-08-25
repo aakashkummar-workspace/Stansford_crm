@@ -207,7 +207,7 @@ async function runBatched(tasks, batchSize = 4) {
 
 export async function readAllData() {
   if (supabaseEnabled) {
-    const [s, pf, rf, cm, eq, dl, rt, al, ac, cls, st, inv, mv, bc, tp, rl, dn, cp, txa, tt, lib, lns, invCats, ex, mk] = await runBatched([
+    const [s, pf, rf, cm, eq, dl, rt, al, ac, cls, st, inv, mv, bc, tp, rl, dn, cp, txa, tt, lib, lns, invCats, ex, mk, ta] = await runBatched([
       () => safeSelectAll("students",     (q) => q.order("created_at", { ascending: false })),
       () => safeSelectAll("pending_fees", (q) => q.order("created_at", { ascending: false })),
       () => safeSelectAll("recent_fees",  (q) => q.order("paid_at",    { ascending: false })),
@@ -234,6 +234,7 @@ export async function readAllData() {
       () => safeSelect("inventory_categories", (q) => q.order("created_at", { ascending: true })),
       () => safeSelect("exams",                (q) => q.order("created_at", { ascending: false })),
       () => safeSelect("exam_marks",           (q) => q.order("recorded_at",{ ascending: false }).limit(5000)),
+      () => safeSelect("teacher_attendance",   (q) => q.order("date",       { ascending: false }).limit(2000)),
     ]);
     const stopMap = pickupStopsSafe();
     const eveningStopMap = pickupStopsEveningSafe();
@@ -389,7 +390,13 @@ export async function readAllData() {
       // exports default to the bundled "Sanfort International School" if
       // settings haven't been written yet.
       appSettings: await readSettings().catch(() => ({})),
-      teacherAttendance: safeArr("teacherAttendance"),
+      teacherAttendance: (() => {
+        // Supabase is the source of truth; union any file-store rows not present.
+        const supa = (ta || []).map(fromTeacherAttendance).filter(Boolean);
+        const seen = new Set(supa.map((r) => `${r.teacherId}|${r.date}`));
+        const file = safeArr("teacherAttendance").filter((r) => !seen.has(`${r.teacherId}|${r.date}`));
+        return [...supa, ...file];
+      })(),
       // Union of Supabase exams + file-store exams. Without the Supabase
       // half, exams created on the cloud backend never appeared in
       // /api/data, which made every newly-created exam look like it had
@@ -8404,6 +8411,80 @@ export async function listStudentActivities({ studentId, achievementLevel, exter
   if (achievementLevel) all = all.filter((a) => a.achievementLevel === achievementLevel);
   if (typeof externalCompetition === "boolean") all = all.filter((a) => !!a.externalCompetition === externalCompetition);
   return all.slice(0, limit);
+}
+
+// Full 360° report for one student: profile + all fees activity + academics
+// (attendance, exam marks) + extras (remarks/rewards, activities, transport).
+// Per-student queries, so nothing is truncated by the global bootstrap caps.
+export async function getStudentReport(studentId) {
+  if (!studentId) throw new Error("studentId required");
+  const all = await readAllData().catch(() => ({}));
+  const student = (all.addedStudents || []).find((s) => s.id === studentId)
+    || (all.archivedStudents || []).find((s) => s.id === studentId)
+    || null;
+
+  // ---- Fees (fully loaded + paginated in readAllData) ----
+  const owns = (f) => (f.studentId || f.student_id || String(f.id || "").split("__")[0]) === studentId;
+  const pendingFees = (all.pendingFees || []).filter(owns);
+  const receipts = (all.recentFees || []).filter(owns)
+    .sort((a, b) => String(b.paidAt || b.paid_at || "").localeCompare(String(a.paidAt || a.paid_at || "")));
+  const paidTotal = receipts.reduce((a, f) => a + (Number(f.amount) || 0), 0);
+  const pendingTotal = pendingFees.reduce((a, f) => a + (Number(f.amount) || 0), 0);
+
+  // ---- Attendance (daily logs), per student, uncapped ----
+  let dailyLogs = [];
+  if (supabaseEnabled) {
+    const PAGE = 1000; let start = 0;
+    for (;;) {
+      const r = await supabase.from("daily_logs").select("*").eq("student_id", studentId)
+        .order("date", { ascending: false }).range(start, start + PAGE - 1);
+      if (r.error) { if (!isSchemaMissError(r.error)) console.warn(`[db] student daily_logs: ${r.error.message}`); break; }
+      const chunk = (r.data || []).map(fromDailyLog);
+      dailyLogs = dailyLogs.concat(chunk);
+      if (chunk.length < PAGE) break;
+      start += PAGE;
+    }
+  }
+  if (!dailyLogs.length) {
+    try { const db = fileRead(); dailyLogs = (db.dailyLogs || []).filter((l) => l.studentId === studentId); } catch {}
+  }
+  dailyLogs = applyDailyLogOverlays(dailyLogs);
+  const att = { present: 0, late: 0, absent: 0, leave: 0, parent_drop: 0 };
+  for (const l of dailyLogs) { if (att[l.attendance] != null) att[l.attendance]++; }
+  const marked = dailyLogs.length;
+  const atSchool = att.present + att.late + att.parent_drop;
+  const attendancePct = marked ? Math.round((atSchool / marked) * 100) : null;
+
+  // ---- Exam marks + exam meta ----
+  const marks = await listMarks({ studentId }).catch(() => []);
+  const exams = await listExams().catch(() => []);
+  const examById = Object.fromEntries((exams || []).map((e) => [e.id, e]));
+  const examMarks = (marks || [])
+    .map((m) => ({ ...m, exam: examById[m.examId] || null }))
+    .sort((a, b) => String(b.recordedAt || "").localeCompare(String(a.recordedAt || "")));
+
+  // ---- Extras ----
+  const remarks = await listRemarksRewards({ targetType: "student", targetId: studentId, limit: 500 }).catch(() => []);
+  const activities = await listStudentActivities({ studentId, limit: 500 }).catch(() => []);
+  let transport = [];
+  if (supabaseEnabled) {
+    const r = await supabase.from("transport_attendance").select("*").eq("student_id", studentId)
+      .order("marked_at", { ascending: false }).limit(120);
+    if (!r.error) transport = (r.data || []).map(fromTransportAttendance);
+  }
+  if (!transport.length) {
+    try { const db = fileRead(); transport = (db.transportAttendance || []).filter((t) => t.studentId === studentId).slice(0, 120); } catch {}
+  }
+
+  return {
+    student,
+    fees: { pending: pendingFees, receipts, paidTotal, pendingTotal },
+    attendance: { logs: dailyLogs.slice(0, 90), summary: { ...att, marked, atSchool, attendancePct } },
+    examMarks,
+    remarks,
+    activities,
+    transport,
+  };
 }
 
 export async function removeStudentActivity(id) {
