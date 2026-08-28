@@ -18,13 +18,40 @@ export const supabaseEnabled = Boolean(url && (serviceKey || anonKey));
 //   - `cache: "no-store"` so Next.js's route-handler fetch cache doesn't
 //     memoise our query results across requests (would surface stale/empty
 //     rows intermittently).
-//   - a 15s abort timeout so a stalled connection fails fast instead of
-//     hanging the whole request (login, /api/data) for 30s+.
-const supabaseFetch = (input, init = {}) => {
+//   - a short abort timeout + retry: the VPS↔Supabase link intermittently
+//     stalls (a stale keep-alive TCP connection), so a call hangs until it
+//     times out. Aborting at 6s and retrying on a fresh connection turns those
+//     stalls into a quick success on the next attempt, instead of a 30s hang
+//     (or a false failure). Retries are limited to reads (GET) so writes are
+//     never double-applied; writes get a single, longer timeout.
+const TIMEOUT_MS = 6000;
+const WRITE_TIMEOUT_MS = 20000;
+const isRead = (method) => !method || String(method).toUpperCase() === "GET";
+
+const supabaseFetch = async (input, init = {}) => {
+  // If the caller already manages its own abort signal, don't interfere.
   if (init.signal) return fetch(input, { ...init, cache: "no-store" });
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 15000);
-  return fetch(input, { ...init, cache: "no-store", signal: ctrl.signal }).finally(() => clearTimeout(timer));
+
+  const read = isRead(init.method);
+  const attempts = read ? 3 : 1;
+  const timeout = read ? TIMEOUT_MS : WRITE_TIMEOUT_MS;
+  let lastErr;
+
+  for (let i = 0; i < attempts; i++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeout);
+    try {
+      return await fetch(input, { ...init, cache: "no-store", signal: ctrl.signal });
+    } catch (e) {
+      // Only abort (timeout) / network errors reach here; retry those. A real
+      // HTTP error (4xx/5xx) returns a Response and never throws.
+      lastErr = e;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (i < attempts - 1) await new Promise((r) => setTimeout(r, 200));
+  }
+  throw lastErr;
 };
 
 export const supabase = supabaseEnabled
