@@ -1,6 +1,12 @@
 // Supabase client — server-side. Uses the service-role key when available so
 // it can bypass RLS. Falls back to the anon key for read-only fetches.
 import { createClient } from "@supabase/supabase-js";
+import dns from "node:dns";
+
+// Prefer IPv4 when resolving hostnames. On some VPS hosts the IPv6 path to
+// Supabase stalls, so a DB call intermittently hangs ~30s before falling back
+// — which showed up as a frozen "Signing in…" on login. IPv4-first avoids it.
+try { dns.setDefaultResultOrder?.("ipv4first"); } catch {}
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -8,16 +14,23 @@ const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
 export const supabaseEnabled = Boolean(url && (serviceKey || anonKey));
 
-// IMPORTANT: pass `cache: "no-store"` on every supabase fetch so Next.js's
-// route-handler fetch cache doesn't memoise our query results across requests.
-// Without this we'd see stale empty rows for some tables intermittently
-// (Next.js's default fetch cache treats identical fetch URLs as cacheable).
+// Fetch used for every Supabase call:
+//   - `cache: "no-store"` so Next.js's route-handler fetch cache doesn't
+//     memoise our query results across requests (would surface stale/empty
+//     rows intermittently).
+//   - a 15s abort timeout so a stalled connection fails fast instead of
+//     hanging the whole request (login, /api/data) for 30s+.
+const supabaseFetch = (input, init = {}) => {
+  if (init.signal) return fetch(input, { ...init, cache: "no-store" });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  return fetch(input, { ...init, cache: "no-store", signal: ctrl.signal }).finally(() => clearTimeout(timer));
+};
+
 export const supabase = supabaseEnabled
   ? createClient(url, serviceKey || anonKey, {
       auth: { persistSession: false, autoRefreshToken: false },
-      global: {
-        fetch: (input, init = {}) => fetch(input, { ...init, cache: "no-store" }),
-      },
+      global: { fetch: supabaseFetch },
     })
   : null;
 

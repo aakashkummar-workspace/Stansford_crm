@@ -100,8 +100,9 @@ export async function POST(req) {
     maxAge: SESSION_TTL_SECONDS,
   });
 
-  // Audit log is best-effort — don't fail login if it errors.
-  try { await logAudit(user.name, "Sign in", user.email); } catch {}
+  // Audit log is best-effort and MUST NOT block the sign-in response — fire it
+  // and forget so a slow audit write never freezes "Signing in…".
+  logAudit(user.name, "Sign in", user.email).catch(() => {});
 
   return NextResponse.json({
     ok: true,
