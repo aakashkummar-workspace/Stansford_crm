@@ -3,9 +3,9 @@
 import { createClient } from "@supabase/supabase-js";
 import dns from "node:dns";
 
-// Prefer IPv4 when resolving hostnames. On some VPS hosts the IPv6 path to
-// Supabase stalls, so a DB call intermittently hangs ~30s before falling back
-// — which showed up as a frozen "Signing in…" on login. IPv4-first avoids it.
+// Prefer IPv4 when resolving hostnames. On some hosts the IPv6 path to Supabase
+// stalls, so a DB call intermittently hangs ~20s before falling back — which
+// showed up as a frozen "Signing in…" and a 60s+ /api/data. IPv4-first avoids it.
 try { dns.setDefaultResultOrder?.("ipv4first"); } catch {}
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -13,6 +13,7 @@ const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
 export const supabaseEnabled = Boolean(url && (serviceKey || anonKey));
+
 
 // Fetch used for every Supabase call:
 //   - `cache: "no-store"` so Next.js's route-handler fetch cache doesn't
@@ -24,8 +25,15 @@ export const supabaseEnabled = Boolean(url && (serviceKey || anonKey));
 //     stalls into a quick success on the next attempt, instead of a 30s hang
 //     (or a false failure). Retries are limited to reads (GET) so writes are
 //     never double-applied; writes get a single, longer timeout.
-const TIMEOUT_MS = 6000;
-const WRITE_TIMEOUT_MS = 20000;
+// Real queries here return in well under a second, but the connection to
+// Supabase intermittently *cold-stalls* (a new TCP/TLS connect hangs ~20s).
+// So use a SHORT read timeout that only ever trips on a stall, and retry — a
+// retry almost always lands on a working (kept-alive) connection. Keeping the
+// timeout short also keeps each batch round quick, so Node's default HTTP
+// keep-alive reuses warm connections instead of opening new stall-prone ones.
+// Writes get a single, longer window (never retried, so never double-applied).
+const TIMEOUT_MS = 3500;
+const WRITE_TIMEOUT_MS = 25000;
 const isRead = (method) => !method || String(method).toUpperCase() === "GET";
 
 const supabaseFetch = async (input, init = {}) => {
@@ -33,7 +41,7 @@ const supabaseFetch = async (input, init = {}) => {
   if (init.signal) return fetch(input, { ...init, cache: "no-store" });
 
   const read = isRead(init.method);
-  const attempts = read ? 3 : 1;
+  const attempts = read ? 4 : 1;
   const timeout = read ? TIMEOUT_MS : WRITE_TIMEOUT_MS;
   let lastErr;
 

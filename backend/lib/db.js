@@ -282,6 +282,28 @@ export async function readAllData() {
       }
     }
     const mergedClasses = Array.from(classMap.values()).sort((a, b) => Number(a.n) - Number(b.n));
+    // Run the v2 list-queries in PARALLEL. Previously these were ~13 separate
+    // `await`s inside the return object, which run one-after-another — on a
+    // flaky VPS↔Supabase link each stall compounds and /api/data took 60s+.
+    const [
+      expenseCategoriesR, expenseTemplatesR, donorFormSubmissionsR, leaveRequestsR,
+      remarksRewardsR, governmentDocumentsR, studentActivitiesR, customRolesR,
+      scaleSessionsR, scaleEntriesR, scaleSupportPlansR, scaleDailyRitualsR, syllabusR,
+    ] = await runBatched([
+      () => listExpenseCategories().catch(() => safeArr("expenseCategories")),
+      () => listExpenseTemplates().catch(() => safeArr("expenseTemplates")),
+      () => listDonorFormSubmissions({ limit: 200 }).catch(() => safeArr("donorFormSubmissions")),
+      () => listLeaveRequests({ limit: 200 }).catch(() => safeArr("leaveRequests")),
+      () => listRemarksRewards({ limit: 200 }).catch(() => safeArr("remarksRewards")),
+      () => listGovernmentDocuments({ limit: 200 }).catch(() => safeArr("governmentDocuments")),
+      () => listStudentActivities({ limit: 500 }).catch(() => safeArr("studentActivities")),
+      () => listCustomRoles().catch(() => safeArr("customRoles")),
+      () => listScaleSessions({ limit: 200 }).catch(() => safeArr("scaleSessions")),
+      () => listScaleEntries({ limit: 2000 }).catch(() => safeArr("scaleEntries")),
+      () => listSupportPlans({ limit: 200 }).catch(() => safeArr("scaleSupportPlans")),
+      () => listDailyRituals({ limit: 200 }).catch(() => safeArr("scaleDailyRituals")),
+      () => listSyllabus().catch(() => safeArr("syllabus")),
+    ]);
     return {
       ...STATIC_EMPTIES,
       classes: mergedClasses,
@@ -434,18 +456,18 @@ export async function readAllData() {
       // v2 additions — expense categories, public donor-form submissions.
       // Failures are tolerated so a fresh install (where the v2 migration
       // hasn't been applied yet) still loads.
-      expenseCategories: await listExpenseCategories().catch(() => safeArr("expenseCategories")),
-      expenseTemplates:  await listExpenseTemplates().catch(() => safeArr("expenseTemplates")),
-      donorFormSubmissions: await listDonorFormSubmissions({ limit: 200 }).catch(() => safeArr("donorFormSubmissions")),
-      leaveRequests: await listLeaveRequests({ limit: 200 }).catch(() => safeArr("leaveRequests")),
-      remarksRewards: await listRemarksRewards({ limit: 200 }).catch(() => safeArr("remarksRewards")),
-      governmentDocuments: await listGovernmentDocuments({ limit: 200 }).catch(() => safeArr("governmentDocuments")),
-      studentActivities: await listStudentActivities({ limit: 500 }).catch(() => safeArr("studentActivities")),
-      customRoles: await listCustomRoles().catch(() => safeArr("customRoles")),
-      scaleSessions: await listScaleSessions({ limit: 200 }).catch(() => safeArr("scaleSessions")),
-      scaleEntries:  await listScaleEntries({ limit: 2000 }).catch(() => safeArr("scaleEntries")),
-      scaleSupportPlans: await listSupportPlans({ limit: 200 }).catch(() => safeArr("scaleSupportPlans")),
-      scaleDailyRituals: await listDailyRituals({ limit: 200 }).catch(() => safeArr("scaleDailyRituals")),
+      expenseCategories: expenseCategoriesR,
+      expenseTemplates:  expenseTemplatesR,
+      donorFormSubmissions: donorFormSubmissionsR,
+      leaveRequests: leaveRequestsR,
+      remarksRewards: remarksRewardsR,
+      governmentDocuments: governmentDocumentsR,
+      studentActivities: studentActivitiesR,
+      customRoles: customRolesR,
+      scaleSessions: scaleSessionsR,
+      scaleEntries:  scaleEntriesR,
+      scaleSupportPlans: scaleSupportPlansR,
+      scaleDailyRituals: scaleDailyRitualsR,
       library: (() => {
         const sb = (lib || []).map(fromBook);
         const seen = new Set(sb.map((b) => b.id));
@@ -466,7 +488,7 @@ export async function readAllData() {
       })(),
       // Per-class syllabus rows. Read via listSyllabus which itself unions
       // Supabase + file store, so a fresh install (no migration) still works.
-      syllabus: await listSyllabus().catch(() => safeArr("syllabus")),
+      syllabus: syllabusR,
       // Map studentId → snapshot of the previous fee state for any edit
       // made in the last hour. The Students FeeCell uses this to surface
       // an "Undo" button only while the snapshot is still valid.
