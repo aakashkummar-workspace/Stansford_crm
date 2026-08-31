@@ -107,6 +107,7 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
   const [feeTypeFilter, setFeeTypeFilter] = useState("All"); // All | term1 | term2 | term3 | transport | application
   const [filterOpen, setFilterOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
+  const [pendingClassPick, setPendingClassPick] = useState(null); // { termLabel, byClass, classKeys }
   const [collectOpen, setCollectOpen] = useState(false);
   const [picked, setPicked] = useState(new Set());
 
@@ -576,6 +577,141 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
     }
   };
 
+  // Term-wise pending statement — one row per student who owes the given term,
+  // with columns for that term + Admission + Transport dues (student-wise
+  // pivot). Used for term-by-term collection.
+  const generatePendingStatement = (termKey, termLabel) => {
+    const owns = (f) => f.studentId || f.student_id || String(f.id || "").split("__")[0];
+    const byStudent = {};
+    for (const f of scopedPending) {
+      const sid = owns(f);
+      if (!sid) continue;
+      if (!byStudent[sid]) byStudent[sid] = { name: f.name, cls: f.cls, term: 0, admission: 0, transport: 0 };
+      const t = feeTypeOf(f);
+      const amt = Number(f.amount) || 0;
+      if (t === termKey) byStudent[sid].term += amt;
+      else if (t === "application") byStudent[sid].admission += amt;
+      else if (t === "transport") byStudent[sid].transport += amt;
+    }
+    // Every student who owes any of the three (that term / Admission / Transport).
+    const students = Object.values(byStudent)
+      .filter((s) => s.term > 0 || s.admission > 0 || s.transport > 0)
+      .sort((a, b) => String(a.cls || "").localeCompare(String(b.cls || "")) || String(a.name || "").localeCompare(String(b.name || "")));
+    if (students.length === 0) { flash(`No pending ${termLabel} / Admission / Transport`, "bad"); return; }
+
+    const sumT = students.reduce((a, s) => a + s.term, 0);
+    const sumA = students.reduce((a, s) => a + s.admission, 0);
+    const sumTr = students.reduce((a, s) => a + s.transport, 0);
+
+    const opened = downloadPdf({
+      title: `Pending Fees · ${termLabel}`,
+      subtitle: `${students.length} student${students.length === 1 ? "" : "s"} · ${termLabel} + Admission + Transport dues`,
+      school,
+      actor,
+      dateRange: "Current snapshot",
+      orientation: "landscape",
+      summary: [
+        { label: "Students",    value: students.length },
+        { label: termLabel,     value: money(sumT) },
+        { label: "Admission",   value: money(sumA) },
+        { label: "Transport",   value: money(sumTr) },
+        { label: "Grand total", value: money(sumT + sumA + sumTr) },
+      ],
+      columns: [
+        { key: "i",         label: "#",         align: "right",  width: "32px" },
+        { key: "name",      label: "Student" },
+        { key: "cls",       label: "Class",     align: "center", width: "64px" },
+        { key: "term",      label: termLabel,   align: "right" },
+        { key: "admission", label: "Admission", align: "right" },
+        { key: "transport", label: "Transport", align: "right" },
+        { key: "total",     label: "Total due", align: "right" },
+      ],
+      rows: students.map((s, i) => ({
+        i: i + 1,
+        name: s.name || "—",
+        cls: s.cls ? formatClassLabel(s.cls) : "—",
+        term: s.term ? money(s.term) : "—",
+        admission: s.admission ? money(s.admission) : "—",
+        transport: s.transport ? money(s.transport) : "—",
+        total: money(s.term + s.admission + s.transport),
+      })),
+      filename: `${school.name.replace(/\s+/g, "-").toLowerCase()}-pending-${termLabel.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${new Date().toISOString().slice(0, 10)}`,
+    });
+    if (opened === false) flash("Pop-up blocked — please allow pop-ups for this site", "bad");
+    else flash(`${termLabel} pending statement · ${students.length} students`);
+  };
+
+  // Class-wise pending — the students grouped under each class (Class I, then
+  // Class II, …), each class its own section with a class subtotal, and a grand
+  // total at the end. Rendered as a printable page (multi-section layout).
+  // Build + open a printable pending PDF for the given class groups
+  // (groups = [{ clsKey, list }]). Works for a single class or all of them.
+  const printPendingClasses = (termLabel, groups) => {
+    const m = (n) => `₹${Math.round(Number(n) || 0).toLocaleString("en-IN")}`;
+    let gT = 0, gA = 0, gTr = 0;
+    const sections = groups.map(({ clsKey, list }) => {
+      let cT = 0, cA = 0, cTr = 0;
+      const rows = list.map((s, i) => {
+        cT += s.term; cA += s.admission; cTr += s.transport;
+        return `<tr><td style="text-align:right;color:#999">${i + 1}</td><td>${escapeHtml(s.name || "—")}</td>`
+          + `<td style="text-align:right">${s.term ? m(s.term) : "—"}</td>`
+          + `<td style="text-align:right">${s.admission ? m(s.admission) : "—"}</td>`
+          + `<td style="text-align:right">${s.transport ? m(s.transport) : "—"}</td>`
+          + `<td style="text-align:right;font-weight:600">${m(s.term + s.admission + s.transport)}</td></tr>`;
+      }).join("");
+      gT += cT; gA += cA; gTr += cTr;
+      const head = ["#", "Student", termLabel, "Admission", "Transport", "Total due"]
+        .map((h, idx) => `<th style="text-align:${idx === 1 ? "left" : "right"};padding:4px 6px;border-bottom:1px solid #bbb;color:#555;font-weight:600">${escapeHtml(h)}</th>`).join("");
+      return `<h3 style="margin:18px 0 4px;color:#1f3a8a;font-size:14px">${escapeHtml(formatClassLabel(clsKey))}`
+        + ` <span style="font-weight:400;color:#666;font-size:12px">· ${list.length} student${list.length === 1 ? "" : "s"}</span></h3>`
+        + `<table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr>${head}</tr></thead><tbody>${rows}`
+        + `<tr style="background:#f5f2ec;font-weight:700"><td></td><td>Class total</td>`
+        + `<td style="text-align:right">${m(cT)}</td><td style="text-align:right">${m(cA)}</td>`
+        + `<td style="text-align:right">${m(cTr)}</td><td style="text-align:right">${m(cT + cA + cTr)}</td></tr></tbody></table>`;
+    }).join("");
+    const scope = groups.length === 1 ? formatClassLabel(groups[0].clsKey) : `${groups.length} classes`;
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Pending ${escapeHtml(termLabel)} — ${escapeHtml(scope)}</title>`
+      + `<style>td{padding:4px 6px;border-bottom:1px solid #eee}</style></head>`
+      + `<body style="font-family:Arial,Helvetica,sans-serif;color:#111;max-width:900px;margin:24px auto;padding:0 16px">`
+      + `<div style="text-align:center;border-bottom:2px solid #1f3a8a;padding-bottom:10px;margin-bottom:8px">`
+      + `<div style="font-size:18px;font-weight:800;color:#1f3a8a">${escapeHtml(school?.name || "Sanfort International School")}</div>`
+      + `<div style="font-size:13px;margin-top:4px">Pending Fees · ${escapeHtml(termLabel)} + Admission + Transport · ${escapeHtml(scope)}</div></div>`
+      + `<div style="font-size:12px;margin-bottom:4px">Grand total: ${m(gT + gA + gTr)} (${escapeHtml(termLabel)} ${m(gT)} · Admission ${m(gA)} · Transport ${m(gTr)})</div>`
+      + sections
+      + `<div style="margin-top:16px;font-size:12px;text-align:right;font-weight:800;color:#1f3a8a">Grand total: ${m(gT + gA + gTr)}</div>`
+      + `<div style="margin-top:20px;font-size:10px;color:#999;text-align:center">Generated ${escapeHtml(new Date().toLocaleString("en-IN"))}${actor ? ` · ${escapeHtml(actor)}` : ""}</div>`
+      + `</body></html>`;
+    const w = window.open("", "_blank");
+    if (!w) { flash("Pop-up blocked — please allow pop-ups for this site", "bad"); return; }
+    w.document.write(html); w.document.close(); w.focus();
+    setTimeout(() => { try { w.print(); } catch {} }, 400);
+  };
+
+  // Class-wise pending — open a picker so each class can be downloaded on its own.
+  const generatePendingByClass = (termKey, termLabel) => {
+    const owns = (f) => f.studentId || f.student_id || String(f.id || "").split("__")[0];
+    const byStudent = {};
+    for (const f of scopedPending) {
+      const t = feeTypeOf(f);
+      if (t !== termKey && t !== "application" && t !== "transport") continue;
+      const sid = owns(f);
+      if (!sid) continue;
+      if (!byStudent[sid]) byStudent[sid] = { name: f.name, cls: f.cls || "—", term: 0, admission: 0, transport: 0 };
+      const amt = Number(f.amount) || 0;
+      if (t === termKey) byStudent[sid].term += amt;
+      else if (t === "application") byStudent[sid].admission += amt;
+      else if (t === "transport") byStudent[sid].transport += amt;
+    }
+    const students = Object.values(byStudent).filter((s) => s.term > 0 || s.admission > 0 || s.transport > 0);
+    if (students.length === 0) { flash(`No pending ${termLabel} / Admission / Transport`, "bad"); return; }
+    const byClass = {};
+    for (const s of students) { (byClass[s.cls] = byClass[s.cls] || []).push(s); }
+    const classKeys = Object.keys(byClass).sort((a, b) =>
+      (Number(String(a).split("-")[0]) || 0) - (Number(String(b).split("-")[0]) || 0) || String(a).localeCompare(String(b)));
+    classKeys.forEach((k) => byClass[k].sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""))));
+    setPendingClassPick({ termLabel, byClass, classKeys });
+  };
+
   const importStructure = () => {
     const input = document.createElement("input");
     input.type = "file";
@@ -795,6 +931,8 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
                     onClose={() => setReportOpen(false)}
                     onFull={() => { setReportOpen(false); exportPdf(); }}
                     onPick={(preset) => { setReportOpen(false); generateReport(preset); }}
+                    onPending={(key, label) => { setReportOpen(false); generatePendingStatement(key, label); }}
+                    onPendingClass={(key, label) => { setReportOpen(false); generatePendingByClass(key, label); }}
                   />
                 )}
               </div>
@@ -1459,6 +1597,43 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
             finally { setRemindBusy(false); setBulkRemind(null); }
           }}
         />
+      )}
+
+      {pendingClassPick && (
+        <div onClick={() => setPendingClassPick(null)} style={{ position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)", display: "grid", placeItems: "center", zIndex: 300, padding: 16 }}>
+          <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: "100%", maxWidth: 480, maxHeight: "calc(100vh - 32px)", overflowY: "auto" }}>
+            <div className="card-head">
+              <div>
+                <div className="card-title">Pending · {pendingClassPick.termLabel} — by class</div>
+                <div className="card-sub">Download each class separately ({pendingClassPick.termLabel} + Admission + Transport)</div>
+              </div>
+              <button className="icon-btn" onClick={() => setPendingClassPick(null)}><Icon name="x" size={14} /></button>
+            </div>
+            <div style={{ padding: "6px 10px 4px", display: "flex", flexDirection: "column", gap: 6 }}>
+              {pendingClassPick.classKeys.map((k) => {
+                const list = pendingClassPick.byClass[k];
+                const total = list.reduce((a, s) => a + s.term + s.admission + s.transport, 0);
+                return (
+                  <div key={k} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 8px", borderRadius: 8, background: "var(--card-2)" }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 500 }}>{formatClassLabel(k)}</div>
+                      <div style={{ fontSize: 11, color: "var(--ink-4)" }}>{list.length} student{list.length === 1 ? "" : "s"} · {money(total)} due</div>
+                    </div>
+                    <button className="btn sm accent" onClick={() => printPendingClasses(pendingClassPick.termLabel, [{ clsKey: k, list }])}>
+                      <Icon name="download" size={11} />Download
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ padding: "10px 14px", borderTop: "1px solid var(--rule)", display: "flex", justifyContent: "space-between", gap: 8 }}>
+              <button className="btn" onClick={() => printPendingClasses(pendingClassPick.termLabel, pendingClassPick.classKeys.map((k) => ({ clsKey: k, list: pendingClassPick.byClass[k] })))}>
+                <Icon name="download" size={12} />All classes (one file)
+              </button>
+              <button className="btn ghost" onClick={() => setPendingClassPick(null)}>Close</button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -2471,33 +2646,16 @@ function FilterMenu({ value, classes = [], onPick, onClose }) {
 // full register, by payment status (paid / not paid), or by fee type
 // (Term I/II/III, Admission, Transport). Each item calls back with a filter
 // preset consumed by generateReport().
-function ReportMenu({ onFull, onPick, onClose }) {
+function ReportMenu({ onFull, onPick, onPending, onPendingClass, onClose }) {
   useEffect(() => {
-    const onDoc = (e) => {
-      if (!e.target.closest(".report-menu") && !e.target.closest(".btn")) onClose();
-    };
-    setTimeout(() => document.addEventListener("click", onDoc), 0);
-    return () => document.removeEventListener("click", onDoc);
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const Section = ({ children }) => (
-    <div style={{ fontSize: 10.5, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.08em", padding: "8px 10px 4px" }}>
-      {children}
-    </div>
-  );
-  const Item = ({ label, onClick }) => (
-    <button
-      onClick={onClick}
-      className="btn ghost"
-      style={{ width: "100%", justifyContent: "flex-start", height: 30, padding: "0 10px", fontSize: 12.5, color: "var(--ink)" }}
-    >
-      {label}
-    </button>
-  );
-
   const byPayment = [
-    { label: "Paid — collected",       preset: { statusKey: "paid",   label: "Paid" } },
-    { label: "Not paid — outstanding", preset: { statusKey: "unpaid", label: "Not paid" } },
+    { label: "Paid — collected",       sub: "All fee types",  preset: { statusKey: "paid",   label: "Paid" } },
+    { label: "Not paid — outstanding", sub: "All fee types",  preset: { statusKey: "unpaid", label: "Not paid" } },
   ];
   // Each fee type can be pulled as All / Paid / Not-paid separately.
   const byType = [
@@ -2507,19 +2665,47 @@ function ReportMenu({ onFull, onPick, onClose }) {
     { key: "application", label: "Admission fees" },
     { key: "transport",   label: "Transport" },
   ];
+  const terms = [
+    { key: "term1", label: "Term I" },
+    { key: "term2", label: "Term II" },
+    { key: "term3", label: "Term III" },
+  ];
+
+  // Section wrapper — a titled block within the popup grid.
+  const Block = ({ title, hint, children, span }) => (
+    <section style={{ gridColumn: span ? "1 / -1" : "auto", display: "flex", flexDirection: "column", minWidth: 0 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
+        <h4 style={{ margin: 0, fontSize: 11, fontWeight: 700, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--ink-3)" }}>{title}</h4>
+        {hint && <span style={{ fontSize: 10.5, color: "var(--ink-4)" }}>{hint}</span>}
+      </div>
+      {children}
+    </section>
+  );
+
+  // Full-width tappable card (used for "Full register" + pending lists).
+  const CardBtn = ({ label, sub, onClick }) => (
+    <button
+      onClick={onClick}
+      className="btn ghost"
+      style={{ width: "100%", justifyContent: "flex-start", flexDirection: "column", alignItems: "flex-start", gap: 1, height: "auto", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--rule)", background: "var(--card-2)" }}
+    >
+      <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--ink)" }}>{label}</span>
+      {sub && <span style={{ fontSize: 10.5, color: "var(--ink-4)", fontWeight: 400 }}>{sub}</span>}
+    </button>
+  );
 
   const Chip = ({ label, tone, onClick }) => (
     <button
       onClick={onClick}
       className="btn ghost"
-      style={{ height: 24, padding: "0 8px", fontSize: 11, borderRadius: 6, color: tone || "var(--ink-2)", background: "var(--card-2)" }}
+      style={{ height: 24, padding: "0 9px", fontSize: 11, fontWeight: 600, borderRadius: 6, color: tone || "var(--ink-2)", background: "var(--card)", border: "1px solid var(--rule)" }}
     >
       {label}
     </button>
   );
   const TypeRow = ({ t }) => (
-    <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 10px" }}>
-      <span style={{ flex: 1, fontSize: 12.5, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.label}</span>
+    <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 0", borderBottom: "1px solid var(--rule)" }}>
+      <span style={{ flex: 1, fontSize: 12.5, fontWeight: 500, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.label}</span>
       <Chip label="All" onClick={() => onPick({ feeTypeKey: t.key, label: t.label })} />
       <Chip label="Paid" tone="var(--ok)" onClick={() => onPick({ feeTypeKey: t.key, statusKey: "paid", label: `${t.label} · Paid` })} />
       <Chip label="Unpaid" tone="var(--err, #b13c1c)" onClick={() => onPick({ feeTypeKey: t.key, statusKey: "unpaid", label: `${t.label} · Not paid` })} />
@@ -2528,27 +2714,68 @@ function ReportMenu({ onFull, onPick, onClose }) {
 
   return (
     <div
-      className="report-menu"
-      style={{
-        position: "absolute",
-        top: "calc(100% + 6px)",
-        left: 0,
-        zIndex: 50,
-        background: "var(--card)",
-        border: "1px solid var(--rule)",
-        borderRadius: 10,
-        boxShadow: "var(--shadow-lg)",
-        padding: 6,
-        minWidth: 300,
-        maxHeight: 420,
-        overflowY: "auto",
-      }}
+      className="report-menu-overlay"
+      onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)", display: "grid", placeItems: "center", zIndex: 300, padding: 16 }}
     >
-      <Item label="Full register — everything" onClick={onFull} />
-      <Section>By payment (all fee types)</Section>
-      {byPayment.map((o) => <Item key={o.label} label={o.label} onClick={() => onPick(o.preset)} />)}
-      <Section>By fee type · All / Paid / Unpaid</Section>
-      {byType.map((t) => <TypeRow key={t.key} t={t} />)}
+      <div
+        className="report-menu"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "100%",
+          maxWidth: 720,
+          maxHeight: "calc(100vh - 32px)",
+          overflowY: "auto",
+          background: "var(--card)",
+          border: "1px solid var(--rule)",
+          borderRadius: 14,
+          boxShadow: "var(--shadow-lg)",
+        }}
+      >
+        {/* Header */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 18px", borderBottom: "1px solid var(--rule)", position: "sticky", top: 0, background: "var(--card)", zIndex: 1, borderRadius: "14px 14px 0 0" }}>
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: "var(--ink)" }}>Generate report</div>
+            <div style={{ fontSize: 11.5, color: "var(--ink-4)" }}>Pick a slice to export as PDF</div>
+          </div>
+          <button className="icon-btn" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
+        </div>
+
+        {/* Body grid — everything visible, aligned in two columns */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 18, padding: 18 }}>
+          <Block title="Whole register" span>
+            <CardBtn label="Full register — everything" sub="All students · all fee types · paid & pending" onClick={onFull} />
+          </Block>
+
+          <Block title="By payment" hint="all fee types">
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {byPayment.map((o) => <CardBtn key={o.label} label={o.label} sub={o.sub} onClick={() => onPick(o.preset)} />)}
+            </div>
+          </Block>
+
+          <Block title="By fee type" hint="All / Paid / Unpaid">
+            <div>
+              {byType.map((t) => <TypeRow key={t.key} t={t} />)}
+            </div>
+          </Block>
+
+          <Block title="Pending · student-wise" hint="Term + Admission + Transport">
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {terms.map((t) => (
+                <CardBtn key={t.key} label={t.label} sub="One row per student" onClick={() => onPending?.(t.key, t.label)} />
+              ))}
+            </div>
+          </Block>
+
+          <Block title="Pending · class-wise" hint="download each class separately">
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {terms.map((t) => (
+                <CardBtn key={t.key} label={t.label} sub="Grouped by class" onClick={() => onPendingClass?.(t.key, t.label)} />
+              ))}
+            </div>
+          </Block>
+        </div>
+      </div>
     </div>
   );
 }
