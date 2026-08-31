@@ -896,9 +896,9 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
           <div className="page-eyebrow">Finance · Fees register</div>
           <div className="page-title">Fees & <span className="amber">Transaction</span></div>
           <div style={{ display: "flex", gap: 10, color: "var(--ink-3)", fontSize: 12, marginTop: 12, flexWrap: "wrap" }}>
-            <span className="chip ok"><span className="dot" />{moneyK(totals.collected)} collected (live)</span>
-            <span className="chip warn"><span className="dot" />{moneyK(totals.pending)} pending</span>
-            <span className="chip bad"><span className="dot" />{moneyK(totals.overdue)} overdue</span>
+            <span className="chip ok"><span className="dot" />{money(totals.collected)} collected (live)</span>
+            <span className="chip warn"><span className="dot" />{money(totals.pending)} pending</span>
+            <span className="chip bad"><span className="dot" />{money(totals.overdue)} overdue</span>
           </div>
         </div>
         <div className="page-actions">
