@@ -136,6 +136,16 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
   const [remindMenuOpen, setRemindMenuOpen] = useState(false);
   const [bulkRemind, setBulkRemind] = useState(null); // { label, ids, students, amount } | null
 
+  // Optimistic pay-overlay. A full /api/data refresh is slow (and sometimes
+  // stalls) on production, so after a collection we update the numbers locally
+  // from the pay response IMMEDIATELY — the collected total goes up and the
+  // balance goes down at once. The overlay is reconciled away as soon as the
+  // authoritative refresh lands (see the reconcile effect below), so nothing
+  // double-counts.
+  //   receipts: new receipt rows to add to RECENT_FEES
+  //   paidIds:  { [pendingFeeId]: remainingBalance }  (0 = fully paid → drop the row)
+  const [payOverlay, setPayOverlay] = useState({ receipts: [], paidIds: {} });
+
   const handleAddFee = async (payload) => {
     const r = await fetch("/api/fees/add", {
       method: "POST",
@@ -173,14 +183,56 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
   // when viewed as a parent. Non-parent roles see every row as before.
   const myChildId = isParent && E.ADDED_STUDENTS && E.ADDED_STUDENTS[0]
     ? E.ADDED_STUDENTS[0].id : null;
-  const scopedPending = useMemo(
-    () => (myChildId ? (E.PENDING_FEES || []).filter((f) => (f.studentId || f.id) === myChildId) : (E.PENDING_FEES || [])),
-    [E.PENDING_FEES, myChildId]
-  );
-  const scopedRecent = useMemo(
-    () => (myChildId ? (E.RECENT_FEES || []).filter((f) => (f.studentId || f.id) === myChildId) : (E.RECENT_FEES || [])),
-    [E.RECENT_FEES, myChildId]
-  );
+  const scopedPending = useMemo(() => {
+    // Apply the optimistic overlay first: reduce partially-paid rows to their
+    // remaining balance and drop fully-paid ones, so the pending total + count
+    // reflect a just-recorded collection before the slow refresh lands.
+    let base = (E.PENDING_FEES || [])
+      .map((f) => {
+        const rem = payOverlay.paidIds[f.id];
+        return rem === undefined ? f : { ...f, amount: rem };
+      })
+      .filter((f) => {
+        const rem = payOverlay.paidIds[f.id];
+        return !(rem !== undefined && rem <= 0);
+      });
+    return myChildId ? base.filter((f) => (f.studentId || f.id) === myChildId) : base;
+  }, [E.PENDING_FEES, payOverlay, myChildId]);
+
+  const scopedRecent = useMemo(() => {
+    // Union the authoritative receipts with any optimistic ones not yet present
+    // in the fetched data (matched by receipt id, so no double-count).
+    const base = E.RECENT_FEES || [];
+    const baseIds = new Set(base.map((r) => r.id));
+    const extra = payOverlay.receipts.filter((r) => !baseIds.has(r.id));
+    const merged = extra.length ? [...extra, ...base] : base;
+    return myChildId ? merged.filter((f) => (f.studentId || f.id) === myChildId) : merged;
+  }, [E.RECENT_FEES, payOverlay, myChildId]);
+
+  // Reconcile the overlay whenever authoritative data arrives: drop overlay
+  // receipts once the real recent_fees carries them, and drop paid-overrides
+  // once the real pending_fees already reflects the payment (row gone, or its
+  // balance already reduced). Keeps the overlay from lingering or mis-marking a
+  // later re-created fee with the same id.
+  useEffect(() => {
+    setPayOverlay((prev) => {
+      if (prev.receipts.length === 0 && Object.keys(prev.paidIds).length === 0) return prev;
+      const recentIds = new Set((E.RECENT_FEES || []).map((r) => r.id));
+      const pendingAmt = new Map((E.PENDING_FEES || []).map((f) => [f.id, Number(f.amount) || 0]));
+      const receipts = prev.receipts.filter((r) => !recentIds.has(r.id));
+      const paidIds = {};
+      for (const [pid, rem] of Object.entries(prev.paidIds)) {
+        const authAmt = pendingAmt.get(pid);
+        if (authAmt === undefined) continue;   // row removed upstream → payment reflected
+        if (authAmt <= rem) continue;          // upstream balance already reduced → reflected
+        paidIds[pid] = rem;                    // upstream still stale → keep correcting
+      }
+      const unchanged =
+        receipts.length === prev.receipts.length &&
+        Object.keys(paidIds).length === Object.keys(prev.paidIds).length;
+      return unchanged ? prev : { receipts, paidIds };
+    });
+  }, [E.RECENT_FEES, E.PENDING_FEES]);
 
   // ---------- derived data ----------
   const all = useMemo(
@@ -377,7 +429,30 @@ export default function ScreenFees({ E, refresh, role, session, searchFocus, cle
         method,
         serial: json.fee?.serial ?? null,
       });
-      await refresh?.();
+      // Optimistic overlay — update the collected total + pending balance NOW,
+      // from the server's own response, so the numbers are correct instantly
+      // even if the full refresh below is slow or stalls on production.
+      const f = json.fee;
+      const paidRow = {
+        id: f.id,
+        studentId: f.studentId || f.student_id,
+        student_id: f.student_id || f.studentId,
+        name: f.name, cls: f.cls,
+        amount: Number(f.amount) || 0,
+        method: f.method || method,
+        time: f.time,
+        paidAt: f.paidAt || f.paid_at || new Date().toISOString(),
+        feeType: f.feeType || f.fee_type,
+        status: json.partial ? "partial" : "paid",
+        serial: f.serial ?? null,
+      };
+      setPayOverlay((prev) => ({
+        receipts: [paidRow, ...prev.receipts.filter((r) => r.id !== paidRow.id)],
+        paidIds: { ...prev.paidIds, [selected.id]: Number(json.remaining) || 0 },
+      }));
+      // Fire the authoritative refresh but don't block the UI on it — the
+      // overlay already shows the correct numbers. If it stalls, no harm.
+      refresh?.();
       flash(json.partial
         ? `Partial payment posted · ₹${json.remaining.toLocaleString("en-IN")} still pending`
         : "Payment posted · receipt auto-sent",
